@@ -1,0 +1,13 @@
+{
+ "format": "eidolon.edit_rules/0",
+ "_说明": "剪辑规则的通用默认（Eidolon 上游）。只写「什么时候触发 → 做什么 → 多大」，不写怎么实现：同一个 action.type，Eidolon 离线（Python）和 VisualProcess 现场（GLSL）各实现一次。作品覆盖放 Projekt_Visual/<作品>/剪辑规则.json，只写不同的条目，按 id 合并（同 id 的字段逐个覆盖）。trigger.on = 感官.json 的事件名；section = 锚点.json 的 kind。同一帧撞上时 priority 大的赢；enabled=false 关掉。in.<section> = 在该段里覆盖的参数。",
+ "rules": [
+  {"id": "cut_phrase", "priority": 90, "enabled": true, "trigger": {"on": "phrases"}, "action": {"type": "cut", "mode": "hard", "transition": {"type": "break", "frames": 2}}, "in": {"rise": {"trigger": {"on": "downbeats"}}}},
+  {"id": "cutin_halfphrase", "priority": 70, "enabled": true, "trigger": {"on": "phrases", "offset": 0.5}, "action": {"type": "cutin", "src": "memory", "beats": 2}},
+  {"id": "blink_bar1", "priority": 80, "enabled": true, "trigger": {"on": "downbeats"}, "action": {"type": "blink", "frames": [1, 2], "src": "memory"}},
+  {"id": "break_onset", "priority": 60, "enabled": true, "trigger": {"on": "onsets", "min_strength_pct": 70}, "action": {"type": "break", "frames": 2, "amount": 0.6}, "in": {"rise": {"action": {"amount": 1.0}}}},
+  {"id": "bump_beat", "priority": 10, "enabled": true, "trigger": {"on": "beats"}, "action": {"type": "bump", "amount": 0.025, "decay": 9}, "in": {"rise": {"action": {"amount": 0.05}}}},
+  {"id": "strobe_rise", "priority": 30, "enabled": true, "trigger": {"on": "beats", "section": "rise"}, "action": {"type": "strobe", "color": "accent", "amount": 0.35, "prob": {"from": 0.15, "to": 0.9}}},
+  {"id": "invade_rise", "priority": 20, "enabled": true, "trigger": {"section": "rise"}, "action": {"type": "invade", "from": "edge", "texture": "reaction_diffusion", "amount": 0.6}}
+ ]
+}

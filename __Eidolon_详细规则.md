@@ -53,5 +53,18 @@
 - `ran_with` 指纹：`<场景文件>@<Eidolon git 短哈希>#<镜头id>/<参数 hash8>`（和 Synapsis 约定的格式一致）。
 - 渲染器：Blender（Cycles / EEVEE 的渲染层 + 合成器输出）。【没验到】具体输出设置。
 
-## 三、改了这份要做什么
+## 三、剪辑规则（`规则/剪辑规则.json` + 作品覆盖）—— 格式 v0（2026-10-19，和 Visual 会话商定）
+
+- 两层：通用默认 = 本仓库 `规则/剪辑规则.json`；作品覆盖 = `Projekt_Visual/<作品>/剪辑规则.json`，只写不同的条目，**按 id 合并**（同 id 字段逐个覆盖，新 id 追加）。两边都现读、不存副本。
+- 每条：`id`、`priority`（同帧撞上大的赢）、`enabled`、`trigger`、`action`、`in`（在某个 section 里覆盖的参数）。
+- `trigger.on` = 感官.json 的事件名（`beats` / `onsets`，以及升级后的 `downbeats` / `phrases`）；`trigger.section` / `in.<名字>` = 锚点.json 的 `kind`（如 `rise`）。
+- `action.type` 是**动作名**，不写实现：Eidolon 离线（Python）和 VisualProcess 现场（GLSL）各实现一次。现有动作：`cut` `cutin` `blink` `break` `bump` `strobe` `invade`。新增动作先在这里登记。
+- ⚠️`downbeats` / `phrases` 还没进感官.json（v2 粗剪里是从用户锚点手推的 6.4 s 格子），感官层升级后补上。
+
+## 四、锚点（`Projekt_Visual/<作品>/锚点.json`）—— 作品数据，多写入方
+- 不属于任何一个软件。写入方：用户在对话里说的（Eidolon 会话代写，`source:"chat"`）+ VisualProcess 现场 rig 里用户手动标的（`source:"vp"`）。
+- 写的规矩：**按 id 增 / 改 / 删单条**；写前读，`rev` 对不上就重读再合并；写完 `rev+1`。`by:user` 的条目规则不能改。
+- 演奏录下来的逐帧覆盖**不放这里**，放 `演奏/take_*.json`（VisualProcess 定格式）；用户挑中的再「提升」成锚点。
+
+## 五、改了这份要做什么
 - 改格式 = 改上游：先在这里改并写日期，再给 Visual（3_VisualProcess）和 Synapsis 项目构建 会话发消息。下游自己适配，不在这边加兼容层。
