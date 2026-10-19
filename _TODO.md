@@ -12,3 +12,7 @@
 - [~] **乐器分层**：✅ Demucs htdemucs 四轨（`tools/separate.py`，.venv 里跑，5070 上 15.5 s，四轨相加 vs 原混音残差 3.2%）→ `Projekt_Visual/MV_Cant_Kill_Us/分轨/`。发现：人声几乎只在 breakdown（−33 dB）、**rebuild（−20 dB，全曲最强）**、drop3（−31 dB）出现，前半首基本没有；前奏只有贝斯。待做：每轨各出一组感官通道写进感官.json（格式先改规格再通知 Visual）。
 - [ ] **预期**（something is coming）：张力的斜率 + 乐句位置 → 「要来了」通道（用户 38.5 s 听出来的那种）
 - [ ] bpm 150（不是 75）：4 小节 = 6.4 s 和用户的两个切点吻合 → 写进规格
+
+## 💡 下一部试验（👤2026-10-19）
+- **Dune 预告片的音乐**：完全不同的节奏 —— 稳、克制，情绪蕴含在相对静止的画面里的场景和元素中。人物动画少，很多画面可以用 Seedream / Seedance 出。用来检验「克制」和「Thymos 驱动」，和 Glitch Mob 的高能量互补。
+- Billie Eilish 那种需要真人动画 / 实拍的 MV：以后再说，先数字。
