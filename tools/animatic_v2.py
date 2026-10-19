@@ -94,7 +94,7 @@ def shot_kuramoto_v2(t0=10.0, t1=46.0, N=3000, seed=1):
     order = np.argsort(w)
     th = rng.uniform(0, 2 * np.pi, N)
     strength = onset_strength()
-    strong = set(np.round(ON[(strength > np.percentile(strength[(ON > t0) & (ON < t1)], 70)) & (ON > t0) & (ON < t1)] * FPS).astype(int).tolist())
+    strong = set(np.round(ON[(strength > np.percentile(strength[(ON > t0) & (ON < t1)], 92)) & (ON > t0) & (ON < t1)] * FPS).astype(int).tolist())
     beats = BEATS[(BEATS >= t0) & (BEATS < t1)]
     mem = memory_frames()
     rd = np.asarray(Image.open(S.MV / "静帧" / "04_reaction_diffusion.jpg").convert("L").resize((W, H)), np.float64) / 255 > 0.5
@@ -107,8 +107,8 @@ def shot_kuramoto_v2(t0=10.0, t1=46.0, N=3000, seed=1):
     view = 0
     cuts = sorted(set([PH0 + k * PHASE_LEN for k in range(5)] +
                       [RISE + k * BAR for k in range(1, 5)]))           # 乐句硬切 + rise 后每小节切
-    cutins = [PH0 + k * PHASE_LEN + PHASE_LEN / 2 for k in range(4)]   # 半句临时切入
-    bars = [PH0 + k * BAR for k in range(-2, 22)]
+    cutins = [PH0 + k * PHASE_LEN + PHASE_LEN / 2 for k in range(0, 4, 2)]   # 半句临时切入；克制（👤v2 反馈）：隔一个乐句才切入
+    bars = [PH0 + k * PHASE_LEN + PHASE_LEN / 16 for k in range(0, 6)]   # blink：每乐句一次（第 2 拍），不是每小节
     last_cut = -1
     for i in range(int((t1 - t0) * FPS)):
         t = t0 + i / FPS
@@ -167,14 +167,16 @@ def shot_kuramoto_v2(t0=10.0, t1=46.0, N=3000, seed=1):
         if rising:
             inv = invade_mask(t, rd)
             img = img * (1 - inv[..., None] * 0.8) + inv[..., None] * S.RED * 0.6
-            if nb and rng.random() < np.clip((t - RISE) / 6, 0.15, 0.9):   # 红色频闪越来越密
+            if nb and rng.random() < np.clip((t - RISE) / 6, 0.0, 0.5):   # 红色频闪越来越密
                 img = np.clip(img + S.RED * 0.35, 0, 1); tag = tag or "STROBE"
         if is_blink:
             img = mem[int(t * 13) % len(mem)]; tag = "BLINK"
         if f in strong or f - 1 in strong or (f - last_cut) in (1, 2):
             img = glitch(img, rng, 0.6 if not rising else 1.0); tag = tag or "BREAK"
-        kick = max((np.exp(-(t - b) * 9) for b in beats if 0 <= t - b < 0.4), default=0)
-        img = bump(img, 1 + (0.025 if not rising else 0.05) * kick)
+        # bump：只在上扬段的小节第一拍（👤：每拍都让圆圈跳 = 媚俗，强烈情感平铺把别的情感压下去）
+        dbs = [PH0 + k * BAR for k in range(0, 24)]
+        kick = max((np.exp(-(t - b) * 9) for b in dbs if 0 <= t - b < 0.4), default=0) if rising else 0
+        img = bump(img, 1 + 0.02 * kick)
         if rising:   # 抖
             img = np.roll(img, (int(rng.normal(0, 3 * kick)), int(rng.normal(0, 3 * kick))), (0, 1))
         im = A.to_im(img)
