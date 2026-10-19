@@ -176,9 +176,7 @@ def shot_kuramoto_v2(t0=10.0, t1=46.0, N=3000, seed=1):
         # bump：只在上扬段的小节第一拍（👤：每拍都让圆圈跳 = 媚俗，强烈情感平铺把别的情感压下去）
         dbs = [PH0 + k * BAR for k in range(0, 24)]
         kick = max((np.exp(-(t - b) * 9) for b in dbs if 0 <= t - b < 0.4), default=0) if rising else 0
-        img = bump(img, 1 + 0.02 * kick)
-        if rising:   # 抖
-            img = np.roll(img, (int(rng.normal(0, 3 * kick)), int(rng.normal(0, 3 * kick))), (0, 1))
+        # 👤：「鼓点不要影响全局放大。This is too cheap. With no form in it.」→ 不再用拍点推整幅画面
         im = A.to_im(img)
         yield A.hud(im, [f"t = {t:6.2f} s   view = {v}   {tag}",
                          f"K = {K:.2f}   R = {R:.3f}   locked = {lock.mean() * 100:4.1f} %",

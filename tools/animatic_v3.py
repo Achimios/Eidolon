@@ -85,12 +85,13 @@ def plan(t0, t1, rng):
         speed = 2.0 if upr else sec[3]
         # 原片候选：和当前段落同一时段（±4 s）里的镜头
         pool = [i for i in range(len(cuts) - 1) if cuts[i + 1] > sec[1] - 4 and cuts[i] < sec[2] + 4 and cuts[i + 1] - cuts[i] > 0.3]
-        pool = [i for i in pool if i != prev_src] or pool
+        recent = [s_[5] for s_ in segs[-6:]]          # 最近 6 段用过的原片镜头不再用（v3 初稿：带角的头盔出现五六次）
+        pool = [i for i in pool if i not in recent] or pool
         i = int(rng.choice(pool)); prev_src = i
         need = dur * speed
         a, b = cuts[i], cuts[i + 1]
         src = a + rng.random() * max(0, (b - a) - need)
-        segs.append((t, dur, src, speed, upr))
+        segs.append((t, dur, src, speed, upr, i))
         t = nxt
     return segs
 
@@ -117,7 +118,7 @@ def main():
     phrase_edges = set(int(round(G(k) * FPS)) for k in range(60))
     downbeats = [PH0 + BAR * k for k in range(-8, 200)]
     fcount = 0
-    for si, (ts, dur, src, speed, upr) in enumerate(segs):
+    for si, (ts, dur, src, speed, upr, _shot) in enumerate(segs):
         clip = read_clip(src, dur * speed + 0.2)
         n = int(round((ts + dur) * FPS)) - int(round(ts * FPS))
         sec = section_at(ts)
@@ -130,11 +131,10 @@ def main():
             drop = sec[0].startswith("DROP")
             # bump 只在 drop 的小节第一拍（👤：每拍都跳 = 媚俗，情感平铺）
             kick = max((np.exp(-(t - b) * 9) for b in downbeats if 0 <= t - b < 0.4), default=0) if drop else 0
-            zoom = 1 + 0.015 * kick + (0.12 * (j / max(1, n)) if upr else 0)
+            # 👤：鼓点不要影响全局放大（cheap, no form）。只留 uprise 的镜头推近 —— 那是镜头语言，不跟拍子跳
+            zoom = 1 + (0.12 * (j / max(1, n)) if upr else 0)
             img = V.bump(img, zoom)
             thr = A.ch("threat", t)
-            if upr:
-                img = np.roll(img, (int(rng.normal(0, 6 * thr)), int(rng.normal(0, 6 * thr))), (0, 1))
             tag = sec[0]
             if drop and any(abs(t - (G(k) + BEAT)) < 0.5 / FPS for k in range(60)):   # 每乐句一次（第 2 拍）
                 img = mem[int(t * 13) % len(mem)]; tag += "  BLINK"

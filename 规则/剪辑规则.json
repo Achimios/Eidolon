@@ -7,7 +7,7 @@
   {"id": "cutin_halfphrase", "priority": 70, "enabled": true, "trigger": {"on": "phrases", "offset": 0.5, "every": 2}, "action": {"type": "cutin", "src": "memory", "beats": 2}},
   {"id": "blink_bar1", "priority": 80, "enabled": true, "trigger": {"on": "phrases", "offset": 0.0625, "every": 1}, "action": {"type": "blink", "frames": [1, 1], "src": "memory"}},
   {"id": "break_onset", "priority": 60, "enabled": true, "trigger": {"on": "onsets", "min_strength_pct": 92}, "action": {"type": "break", "frames": 2, "amount": 0.6}, "in": {"rise": {"action": {"amount": 1.0}}}},
-  {"id": "bump_beat", "priority": 10, "enabled": true, "trigger": {"on": "downbeats", "section": "drop"}, "action": {"type": "bump", "amount": 0.015, "decay": 9}, "in": {"rise": {"action": {"amount": 0.03}}}},
+  {"id": "bump_beat", "priority": 10, "enabled": false, "trigger": {"on": "downbeats", "section": "drop"}, "action": {"type": "bump", "amount": 0.015, "decay": 9}, "in": {"rise": {"action": {"amount": 0.03}}}, "note": "👤2026-10-19：「鼓点不要影响全局放大。This is too cheap. With no form in it.」拍点该作用在有形的东西上（某个元素、某个区块、某个结构），不是整幅画面。"},
   {"id": "strobe_rise", "priority": 30, "enabled": true, "trigger": {"on": "beats", "section": "rise"}, "action": {"type": "strobe", "color": "accent", "amount": 0.35, "prob": {"from": 0.0, "to": 0.5}}},
   {"id": "invade_rise", "priority": 20, "enabled": true, "trigger": {"section": "rise"}, "action": {"type": "invade", "from": "edge", "texture": "reaction_diffusion", "amount": 0.6}}
  ]
