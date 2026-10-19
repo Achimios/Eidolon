@@ -1,0 +1,19 @@
+node_modules/
+__pycache__/
+.venv/
+dist/
+logs/
+cache/
+.synapsis/
+config/creds.*
+.obsidian/workspace*.json
+
+# 3D 大文件不进 git（场景 / 渲染放 Projekt_Visual）
+*.blend
+*.blend1
+*.c4d
+*.exr
+*.mp4
+*.mov
+out/
+renders/
