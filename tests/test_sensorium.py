@@ -63,6 +63,15 @@ class TestSensorium(unittest.TestCase):
         wraps = int(np.sum(np.diff(ph) < -0.5))
         self.assertAlmostEqual(wraps, 12 * 2 - 2, delta=2)  # 12 秒 × 2 拍/秒，首尾少一两拍
 
+    def test_length_is_floor_of_duration_times_fps(self):
+        # 规格：长度 = floor(duration × fps)。用一个乘出来不是整数的时长
+        x = click_track(120.0, dur=5.083)
+        d = S.analyze(x)
+        import math
+        n = math.floor(len(x) / S.SR * d["fps"])
+        for k, v in d["channels"].items():
+            self.assertEqual(len(v), n, k)
+
     def test_write_is_valid_json(self):
         d = S.analyze(click_track(120.0, dur=4.0))
         with tempfile.TemporaryDirectory() as td:
