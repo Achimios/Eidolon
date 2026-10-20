@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""">v<🖼信息图-海报-仿 MACHINE BEHAVIOR（参考 3_VisualProcess/assets/REF/信息可视化_machine_behavior.png）的版式：
+""">v<🖼信息图-海报-仿 MACHINE BEHAVIOR（参考 Projekt_Visual/_参考库/信息可视化_machine_behavior.png）的版式：
 上：整首歌的真实频谱 + 响度曲线 + 段落竖线；中：两排概念静帧缩略图；下：每个概念一条轨道，只在它负责的那段画出这段音频的波形。
 数据全是真的（这首歌的音频 + 概念草案的段落表），没有装饰性的假数字。
 用法：python tools/poster.py [--out 路径]
