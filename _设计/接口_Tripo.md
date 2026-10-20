@@ -86,3 +86,9 @@
 | 低面数游戏件（备选） | `P1-20260311`，face_limit 150–20k | 30–50 | P2 干净四边形但 100+ credit，太贵，确定要四边形再用 |
 
 一个完整动画角色（图生 + rig + 3 个动作）≈ 30 + 25 + 30 = **85 credit ≈ 0.85 美元**（按价目表算，【没验到】）。
+
+## ✅ 实测（2026-10-20）
+- **API 积分和网页版会员点数是两个账户。** 网页订阅的 3200 点 API 用不了；会员权益里另外领了 1000 API 积分之后，`GET /account/balance` 才变成 1000。
+- `text_to_model`，用 draft 预设（H3.1、无贴图、10k 面）：**10 积分，131 秒**。产出 glb 300KB + 预览 webp + sidecar json → `Projekt_Visual/MV_Cant_Kill_Us/3D/测试_人台.glb`。建任务 → 轮询 → 下载这条主路已验证。
+- 官方 CLI `tripo-cli` 0.7.1 已全局安装（npm）。key 用环境变量 `TRIPO_API_KEY` 现读 creds 传进去，`TRIPO_REGION=ov`，`TRIPO_ANALYTICS_ENABLED=0`；`tripo doctor` 全过。CLI 适合手动试 / `--dry-run` 看计划；流水线用 `src/tripo.py`。
+- CLI 的经验：面数预算 ≤2 万的低模用 `tripo-p1`，其他默认 `tripo-v3.1`；`tripo-p2` 是预览版，四边面要 `-p quad=true`（输出 FBX）。`mesh decimate --model v3.0 --smart-uv` 可以重拓扑 + 展 UV。
