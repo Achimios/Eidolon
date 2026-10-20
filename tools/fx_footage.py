@@ -71,9 +71,35 @@ def fx_dct(img, frac, Mh, Mw):
     return np.asarray(Image.fromarray((np.clip(rgb, 0, 1) * 255).astype(np.uint8)).resize((W, H), Image.BICUBIC), np.float64) / 255
 
 
+YY, XX = np.mgrid[0:H, 0:W]
+Z = ((XX - W / 2) + 1j * (YY - H / 2)) / (H / 2)            # 以半高为 1 的复平面
+R1, R2 = 0.42, 1.0                                          # 每一圈缩小 2.4 倍：一屏里能看到好几层
+PERIOD = np.log(R2 / R1)
+ALPHA = np.arctan(PERIOD / (2 * np.pi))
+FAC = np.cos(ALPHA) * np.exp(1j * ALPHA)
+LZ = np.log(Z + 1e-9) / FAC
+DROSTE_HUD = ["t = {t:6.2f} s   REBUILD  08 DROSTE", f"w = exp( log(z) / f ),  f = cos(a) e^(ia),  a = {np.degrees(ALPHA):.1f} deg", f"scale per turn = {R2 / R1:.2f}x   falling inward"]
+_fall = {"x": 0.0, "t": None}
+
+
+def fx_droste(img, t, t0, t1):
+    """Escher 式对数螺旋：画面套画面，一直往里掉。下落速度跟着这一段的进度和张力慢慢加快（不跟单个拍子跳 —— 👤：拍点推全局 = cheap）"""
+    if _fall["t"] is None or t < _fall["t"]:
+        _fall["x"] = 0.0
+    dt = 1 / FPS if _fall["t"] is not None else 0
+    _fall["t"] = t
+    u = (t - t0) / (t1 - t0)
+    _fall["x"] += dt * PERIOD * (0.25 + 0.9 * u * u + 0.3 * A.ch("tension", t))   # 越到后面掉得越快 = something is coming
+    re = np.mod(LZ.real - _fall["x"] - np.log(R1), PERIOD) + np.log(R1)
+    w = np.exp(re + 1j * LZ.imag)
+    u_ = np.clip(w.real * (H / 2) + W / 2, 0, W - 1).astype(int)
+    v_ = np.clip(w.imag * (H / 2) + H / 2, 0, H - 1).astype(int)
+    return img[v_, u_]
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("fx", choices=["dct"])
+    ap.add_argument("fx", choices=["dct", "droste"])
     ap.add_argument("--from", dest="t0", type=float, default=E.parse_time("2:33.91"))
     ap.add_argument("--to", dest="t1", type=float, default=E.parse_time("2:53.11"))
     a = ap.parse_args()
@@ -90,12 +116,17 @@ def main():
     for t, img in frames_from_edl(a.t0, a.t1):
         u = (A.ch("hunger", t) - lo) / (hi - lo + 1e-9)          # 这一段里的相对饥饿 0~1
         frac = 10 ** (-1.3 - 2.7 * u)                            # 5% → 0.01%：越饿越只剩低频（一束光）
-        img = fx_dct(img, frac, Mh, Mw)
+        frac = min(0.05, frac * (1 + 60 * A.ch("threat", t)))    # 起音时记忆短暂回来一下，再被压回去（对刺激的反应，不是一条死曲线）
+        img = fx_dct(img, frac, Mh, Mw) if a.fx == "dct" else fx_droste(img, t, a.t0, a.t1)
         im = Image.fromarray((img * 255).astype(np.uint8))
         d = ImageDraw.Draw(im)
         n = int((W // 2) * (H // 2) * frac)
         for j, line in enumerate([f"t = {t:6.2f} s   BREAKDOWN  07 DCT", f"coefficients kept = {n:,} / {(W // 2) * (H // 2):,}  ({frac * 100:.3f} %)", f"hunger = {A.ch('hunger', t):.2f}"]):
-            d.text((32, H - 95 + 21 * j), line, font=F, fill=(150, 160, 168))
+            if a.fx == "dct":
+                d.text((32, H - 95 + 21 * j), line, font=F, fill=(150, 160, 168))
+        if a.fx == "droste":
+            for j, line in enumerate(DROSTE_HUD):
+                d.text((32, H - 95 + 21 * j), line.format(t=t), font=F, fill=(150, 160, 168))
         p.stdin.write(im.tobytes())
     p.stdin.close(); p.wait()
     print("->", out)
