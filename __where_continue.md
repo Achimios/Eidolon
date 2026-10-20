@@ -25,5 +25,7 @@
 - ② John 暗示的几种方案，各一张。
 - ③ ✅装好（736ecde）：`tools/beats.py` → `节拍.json`（beat_this：150.00 BPM；乐句格子 43 点里 39 点 ±30ms 内有重拍 = 用户耳朵的锚点被独立模型证实；结尾 243–282 s 四点没对上，待人耳听）。`tools/matte.py`（BiRefNet，硬边，全息光晕被当背景 → 要光晕就拿亮度当 alpha）。SAM2 没装。节拍.json 还没并进感官.json（要先改规格再通知 Visual）。
 - ✅情绪大图 v1：`MV_Cant_Kill_Us/情绪大图/_情绪大图.jpg`（15 段 + John 3 方案，草案.json 可改）。审核坑：太像士官长的装甲会被判版权，写成「无标志的深灰哑光防护服」。
-- ④ 粒子 v3：她全身用点画，碎裂短而猛、落在 drop 上。
+- ④ 粒子：v3 `tools/particle_burst.py`（3D 刚体碎块，👤看过：「2D 没问题，只是不够猛烈」）→ **v4 `tools/particle_shatter.py`**（学 The Crew 逐帧机理，`样片/08_粒子_碎裂_v4.mp4`，等👤看）。参考片分析：`Projekt_Visual/_参考库/分析_参考片.md`（Polynoid Halo4 opener 画风最近；The Crew 节奏 + 碎裂）。
+- 人读文档：`-给人类的解释/生成工具怎么用.md`、`工具一览.md`；作品侧 `MV_Cant_Kill_Us/草稿方案.md`。AGENTS.md 加了「给接手的另一个 AI」一节（Zaoeyo 的 Codex / Claude）。
+- 👤：Synapsis 暂不为本片建图（我的决定：等情绪大图过完再让 Synapsis 会话只读 `草案.json` 导入）；第二章暂停不管。
 - Tripo：API 积分 990（网页会员点数 API 用不了）；`src/tripo.py` + CLI 都通了。
