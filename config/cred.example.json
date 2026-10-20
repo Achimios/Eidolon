@@ -1,0 +1,6 @@
+{
+ "_说明": "复制成 creds.local.json 再填（config/creds.* 已 gitignore；本示例叫 cred.example.json 才能进 git）。占位值不是真 key。对话里永远不打印真值。",
+ "tripo": {"api_key": "填 Tripo 的 key（tsk_ 开头）"},
+ "volc_ark": {"api_key": "填火山方舟 Ark 的 key（Seedream / Seedance）"},
+ "minimax": {"api_key": "可选"}
+}
