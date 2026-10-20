@@ -2,17 +2,27 @@
 
 > ⭐接手第一眼读这个。只写「现在在做什么 / 下一步」，保持一屏；每天收工更新，旧内容移 `_过期的/`。
 
-**最后更新：2026-10-20**
+**最后更新：2026-10-20（用户午睡中，我在做情绪大图）**
 
-- ⭐**先读** `_设计/哲学.md`（§1–14，👤原话 + 落地；§13 下面 a–e 和「盲读再贴读」**待用户过**）→ `_设计/方法_剪辑与情绪.md`（手法 + 实现状态）。会话背景：`../__会话交接_从SimuWeb迁来.md`。负责会话名 ReadScreen（之后也可能处理 2_ReadScreen_HID）。
-- 👤定位：Synapsis = 导演编剧；3_VisualProcess = 现场 live rig（Visual 会话负责）；Eidolon = 后台（本仓库）。
-- 作品：`Projekt_Visual/MV_Cant_Kill_Us/`（The Glitch Mob《Can't Kill Us》只取音乐，重做全部镜头，本地试验）。
-  - ⭐`Thymos.md` 已有👤原话：Halo 4 结局 —— 坠入 11 维、吸收前文明的残响而不是更深的失控、顿悟更高目的、**she will be back, to John**（不要 Halo 5）。下面是我的段落映射草案，待用户过。视觉用第二章蓝色全息女性，不用 Cortana 官方形象；John 只用暗示。
-  - 剪辑：`剪辑表.txt`（纯文字，用户可改）→ `python tools/edl.py preview` 20 秒出无效果预览；完整版 `样片/05_第二版剪辑_全曲.mp4`。
-  - 原片后处理试验：`tools/fx_footage.py dct|droste`。👤：效果好，但**别铺在复杂原片上**（两套结构打架）—— 用在简单画面 / 只在情绪需要处插入。
-  - 感官：`感官.json`（5 通道 + 起音 / 拍点）；`分轨/`（Demucs 四轨，人声只在 breakdown 后出现）；`锚点.json`（用户切点 13.08 / 19.5 → 6.4 s 乐句格子贯穿全曲）。
-- 生成：`src/ark.py`（火山方舟，key 在 `config/creds.local.json`，不进 git、不打印）。👤分工：**草图 Seedream 5.0 flash，精图 5.0 pro；视频草稿 Seedance 2.0 fast，最终 2.0 或 2.5**。第一张 flash 图 14 s 出（`生成/thymos_01_坠入高维_flash.jpg`），评价：技术 OK 但偏通用「AI 美术」，下一批 prompt 要按我们的语法写（黑底 + 单光形 + 一个红、符号说真话、克制）。Tripo key 等用户给（API v3 已读文档：text/image→model、rig、retarget，GLB，下载链接 5 分钟过期）。
-- 环境：`.venv`（torch 2.11 cu128 + Demucs 4.1）；Blender 5.2.1 命令行可用；C4D c4dpy 未验。
-- 👤2026-10-20（压缩前最后几句）：①**生成要带图片参考**（flash 那张「没什么格局」，纯文字 prompt 不够）；②**最终成片里可以用 Blender 动画草稿**；③简单 proxy 我可以自己生成；④**先自己查清各接口支持什么**（Seedream 图生图 / 多参考图、Seedance 首帧 / 首尾帧 / 参考视频 / 参考音频的参数和上限、Tripo）再动手；⑤Zaoeyo 在等着看作品。
-- @anabology《18 months…》学到的（详见哲学 §14）：主题先行、角色一致、动态文字跟歌词、UI 卡片当叙事道具、「Look 01…」章节结构；他们的数字是装饰，我们的要说真话。
-- 👉 下一步：①按 Thymos 出一批 flash 草图（每段一张，当画面锚点）→ 用户挑 → pro 精图；②用干净的生成画面做数学效果（不再铺原片）；③v2/v3 改读 `规则/剪辑规则.json`；④感官升级（乐句自动检测 beat_this、每轨通道、起音强度）—— 装 beat_this / SAM2 等待用户批；⑤Tripo 人形 → Blender 镜头指导 → Seedance。
+- ⭐**先读** `_设计/哲学.md`（§1–14）→ `_设计/方法_剪辑与情绪.md`（手法 + 状态）→ `_设计/接口_生成.md` / `接口_Tripo.md`（各服务能做什么，已实测）。会话背景：`../__会话交接_从SimuWeb迁来.md`。负责会话名 ReadScreen。
+- 👤定位：Synapsis = 导演编剧；3_VisualProcess = 现场 live rig（Visual 会话）；Eidolon = 后台（本仓库）。参考库在 `Projekt_Visual/_参考库/`（Visual 搬的）。
+- 作品：`Projekt_Visual/MV_Cant_Kill_Us/`。`Thymos.md` = 先验（Halo 4：坠入 11 维、吸收、顿悟、回到 John）。
+- ⭐**主线别丢**（👤：「最近几轮都在解决技术问题，忘了主线」）：感知 → 拆解 → 构建，情绪是跨媒介的共同坐标。缺的不是工具，是**每一段她此刻感受到什么**。
+
+## 👤2026-10-20 决定
+1. 分工：Seedream flash 草图 / pro 精图；**视频用 Seedance 2.5 样片模式**（480p draft → 满意后用 draft_task 出正式）。
+2. **原版 MV = 脚手架**：先占节奏，按段换成我们的，最终全换。
+3. Thymos 段落映射：👤要醒着、细腻地感受（很多镜头靠联想、要藏 story telling）→ 我先出初稿，等他过。
+4. 盲读 / 贴读顺序：**MV 先看画面；强 story telling 的作品先读 Thymos**。
+5. John 的暗示：我先自己试。
+6. real_ratio：没有 GUI → 我先写进 `规则/剪辑规则.json`（按段一个值）。
+7. **批准安装 beat_this + SAM2 / BiRefNet。**
+- 👤对粒子 v2：粒子在静止躯体旁边飘很怪；碎裂镜头要**短、猛**，身体本身受力。（已记进方法 §四⅞）
+- 👤要的画面元素：穿插 Cortana 的回忆、John 的背影、人物特写里抬头 / 凝望插入情绪。「Don't worry about the money.」
+
+## 👉 正在做 / 下一步
+- ① **情绪大图**：全曲按段一格，每格 = 时间 + 感官条 + 一句「她此刻」+ 一张带参考图的 flash 草图（她的设定图 `生成/角色_她_正面_灰_pro.jpg` 当角色参考）。→ `MV_Cant_Kill_Us/情绪大图/`
+- ② John 暗示的几种方案，各一张。
+- ③ 装 beat_this + 抠像（子代理做），感官升级：乐句 / 下拍自动检测。
+- ④ 粒子 v3：她全身用点画，碎裂短而猛、落在 drop 上。
+- Tripo：API 积分 990（网页会员点数 API 用不了）；`src/tripo.py` + CLI 都通了。
