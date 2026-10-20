@@ -13,4 +13,6 @@
   - 感官：`感官.json`（5 通道 + 起音 / 拍点）；`分轨/`（Demucs 四轨，人声只在 breakdown 后出现）；`锚点.json`（用户切点 13.08 / 19.5 → 6.4 s 乐句格子贯穿全曲）。
 - 生成：`src/ark.py`（火山方舟，key 在 `config/creds.local.json`，不进 git、不打印）。👤分工：**草图 Seedream 5.0 flash，精图 5.0 pro；视频草稿 Seedance 2.0 fast，最终 2.0 或 2.5**。第一张 flash 图 14 s 出（`生成/thymos_01_坠入高维_flash.jpg`），评价：技术 OK 但偏通用「AI 美术」，下一批 prompt 要按我们的语法写（黑底 + 单光形 + 一个红、符号说真话、克制）。Tripo key 等用户给（API v3 已读文档：text/image→model、rig、retarget，GLB，下载链接 5 分钟过期）。
 - 环境：`.venv`（torch 2.11 cu128 + Demucs 4.1）；Blender 5.2.1 命令行可用；C4D c4dpy 未验。
+- 👤2026-10-20（压缩前最后几句）：①**生成要带图片参考**（flash 那张「没什么格局」，纯文字 prompt 不够）；②**最终成片里可以用 Blender 动画草稿**；③简单 proxy 我可以自己生成；④**先自己查清各接口支持什么**（Seedream 图生图 / 多参考图、Seedance 首帧 / 首尾帧 / 参考视频 / 参考音频的参数和上限、Tripo）再动手；⑤Zaoeyo 在等着看作品。
+- @anabology《18 months…》学到的（详见哲学 §14）：主题先行、角色一致、动态文字跟歌词、UI 卡片当叙事道具、「Look 01…」章节结构；他们的数字是装饰，我们的要说真话。
 - 👉 下一步：①按 Thymos 出一批 flash 草图（每段一张，当画面锚点）→ 用户挑 → pro 精图；②用干净的生成画面做数学效果（不再铺原片）；③v2/v3 改读 `规则/剪辑规则.json`；④感官升级（乐句自动检测 beat_this、每轨通道、起音强度）—— 装 beat_this / SAM2 等待用户批；⑤Tripo 人形 → Blender 镜头指导 → Seedance。
