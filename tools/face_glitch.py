@@ -173,6 +173,8 @@ def waterfall_rows(img, xr, hist, px_per_frame=6, decay=0.0):
     H, W, _ = img.shape
     T = hist.shape[0]
     out = img.copy()
+    if T == 0:
+        return out
     xs = np.arange(W)
     for y in range(H):
         x_r = xr[y]
@@ -333,13 +335,13 @@ def posterize(img, levels=6):
     return np.round(np.clip(img, 0, 1) * (levels - 1)) / (levels - 1)
 
 
-def exposure_clip(img, mask, y0=0.78, gain=3.0):
+def exposure_clip(img, mask, y0=0.78, gain=3.0, add=0.25):
     """y > y0·H 的 mask 内亮度乘 1 + gain·s(y)（s 从 0 平滑到 1），再截到 1 → 颈肩过曝成白"""
     H = img.shape[0]
     s = np.clip((np.arange(H) / H - y0) / max(1e-6, 1 - y0), 0, 1)
     s = s * s * (3 - 2 * s)
     k = 1 + gain * s[:, None, None] * mask[..., None]
-    return np.clip(img * k + 0.25 * s[:, None, None] * mask[..., None], 0, 1)
+    return np.clip(img * k + add * s[:, None, None] * mask[..., None], 0, 1)
 
 
 def dust(img, mask, rng, n=900, n_scratch=6, strength=0.55):
@@ -529,6 +531,7 @@ class Params:
     smear_len: float = 220.0
     smear_inset: int = 6
     smear_dropout: float = 0.25
+    smear_gain: float = 1.0          # 拖影亮度上限（行增益 ~ U(0.2, 1)·smear_gain）
     sort_lo: float = 0.06
     sort_hi: float = 0.7
     split_d: tuple = (9, -4, -9)
@@ -545,10 +548,14 @@ class Params:
     clip_y0: float = 0.80
     clip_gain: float = 3.0
     n_dust: int = 900
+    n_scratch: int = 6
+    clip_add: float = 0.25
+    sort_inset: int = 12
     bar_w: int = 10
     waterfall: bool = False          # True → 2' 代替 2
     wf_px: int = 6
     wf_decay: float = 0.02
+    wf_frac: float = 1.0             # 瀑布图行用历史的多少（强度门控：g = 0 → 0 帧 → 没有拖影）
     sense: dict = field(default_factory=dict)
 
     def hud(self):
@@ -597,13 +604,16 @@ def run(img, mask, p: Params, hist: BoundaryHistory = None, stages=False):
     if hist is not None:
         hist.push(x, xr, p.smear_inset)
     if p.waterfall and hist is not None:
-        x = waterfall_rows(x, xr, hist.array(), p.wf_px, p.wf_decay)
+        harr = hist.array()
+        harr = harr[:int(np.ceil(len(harr) * p.wf_frac - 1e-9))]
+        x = waterfall_rows(x, xr, harr, p.wf_px, p.wf_decay)
         st.append((f"2' waterfall rows  {p.wf_px}px/frame  T={len(hist.buf)}  decay {p.wf_decay}", x))
     else:
-        x = row_smear(x, xr, xb, rng, p.smear_len, p.smear_inset, p.smear_dropout)
+        x = row_smear(x, xr, xb, rng, p.smear_len, p.smear_inset, p.smear_dropout,
+                      row_gain=(0.2 * p.smear_gain, 1.0 * p.smear_gain))
         st.append((f"2  row smear  L={p.smear_len:.0f} lognorm(0,.5)  dropout {p.smear_dropout}  seg 24", x))
     H, W, _ = x.shape
-    left = np.arange(W)[None, :] < (xr[:, None] + 12)
+    left = np.arange(W)[None, :] < (xr[:, None] + p.sort_inset)
     left &= (xr[:, None] > 0)
     x = pixel_sort_rows(x, left, p.sort_lo, p.sort_hi)
     st.append((f"3  pixel sort rows  lum in [{p.sort_lo},{p.sort_hi}]  leftward, smear region", x))
@@ -618,21 +628,23 @@ def run(img, mask, p: Params, hist: BoundaryHistory = None, stages=False):
     st.append((f"6  macroblocks  grid {p.grid}  BGR bars {p.n_triplets}+{p.n_dashes}  DC blocks {p.n_blocks}", x))
     x, ops = channel_ops(x, m, bands, rng, p.p_swap, p.p_invert)
     x = posterize(x, p.levels)
-    x = exposure_clip(x, m, p.clip_y0, p.clip_gain)
-    x = dust(x, m, rng, p.n_dust)
-    x = edge_bar(x, p.bar_w)
+    x = exposure_clip(x, m, p.clip_y0, p.clip_gain, p.clip_add)
+    x = dust(x, m, rng, p.n_dust, p.n_scratch)
+    if p.bar_w > 0:
+        x = edge_bar(x, p.bar_w)
     st.append((f"7  swap/invert {len(ops)} bands  posterize {p.levels}  clip y>{p.clip_y0}  dust {p.n_dust}  red bar", x))
     return (x, m, st) if stages else (x, m)
 
 
 # ---------------------------------------------------------------- 时间包络（👤：暴力的东西不能一直开）
 def envelope(t, onsets, threat, fps=FPS, t_end=None, thr=0.5, hold=2, tau=1.5, a_min=0.6,
-             sustain=1.4, ramp=0.4, downbeats=(), snap=0.2):
+             sustain=1.4, ramp=0.4, downbeats=(), snap=0.2, ramp_start=None):
     """门控 g(t) ∈ [0,1]，每帧一个值（t = 每帧的播放时间）。规律：
       · 脉冲（前段，稀疏）：起音 o 处的威胁峰 s = max threat[o·fps−1 … o·fps+1]；s ≥ thr 才触发。
         幅度 a = a_min + (1−a_min)·(s−thr)/(1−thr)；从 o 所在帧起满幅 hold 帧，之后 a·exp(−k/tau)（k = 衰减了几帧）。
       · 收尾（持续）：r0 = t_end − sustain − ramp（若 ±snap 秒内有小节首拍，吸到那拍上）；
         r0 → r0+ramp 平滑升到 1（smoothstep），之后一直 = 1 到 t_end。
+        ramp_start 给定 → 直接用它（不吸附），收尾 = ramp_start → t_end（sustain 参数不用）。
       · g = max(脉冲, 收尾)。收尾段之后的起音不再单独触发（已经全开）。
     返回 (g, info)：info = {"bursts": [(o, s, a)], "ramp_start": r0, "full_from": r0+ramp}"""
     t = np.asarray(t, np.float64)
@@ -643,6 +655,8 @@ def envelope(t, onsets, threat, fps=FPS, t_end=None, thr=0.5, hold=2, tau=1.5, a
     db = [d for d in downbeats if abs(d - r0) <= snap]
     if db:
         r0 = min(db, key=lambda d: abs(d - r0))
+    if ramp_start is not None:
+        r0 = float(ramp_start)
     g = np.zeros(n)
     bursts = []
     th = np.asarray(threat)
@@ -664,14 +678,26 @@ def envelope(t, onsets, threat, fps=FPS, t_end=None, thr=0.5, hold=2, tau=1.5, a
     u = np.clip((t - r0) / ramp, 0, 1)
     g = np.maximum(g, u * u * (3 - 2 * u))
     return g, {"bursts": bursts, "ramp_start": round(float(r0), 3), "full_from": round(float(r0 + ramp), 3),
-               "law": f"burst: onset threat peak >= {thr}, a = {a_min}+{1 - a_min:.1f}(s-thr)/(1-thr), hold {hold} f, "
+               "law": f"STRENGTH gate (no opacity blend). burst: onset threat peak >= {thr}, a = {a_min}+{1 - a_min:.1f}(s-thr)/(1-thr), hold {hold} f, "
                       f"exp decay tau {tau} f; final: smoothstep ramp {ramp}s from {r0:.3f} (snapped to downbeat within "
                       f"{snap}s), then 1 until {t_end:.3f}; g = max"}
 
 
 def scale_params(p: Params, g):
-    """g < 1 时把「暴力程度」按 g 缩：横移、分离、拖影、错位、色块、换道都乘 g；种子 / 切片数不变"""
+    """强度门控（👤：碎片是「效果强度」，不是透明度）：g < 1 时每一级的强度按 g 缩，画面始终 100 % 不透明。
+    横移 / 横移概率 / RGB 分离 / 拖影长度 / 瀑布图历史长度 / 排序区间宽度与伸进脸的深度 / 列错位 / 色块数 /
+    换道·反相概率 / 过曝 / 灰尘·划痕数 / 左缘红条宽 都乘 g；色阶数 L → L + (256 − L)(1 − g)（g = 0 → 256 级 ≈ 不量化）。
+    g = 0 → 整条管线 ≈ 恒等（只剩挪位 + 8 bit 量化，自检里查）；种子 / 切片数不变"""
     q = Params(**asdict(p))
+    q.wf_frac = p.wf_frac * g
+    q.smear_gain = p.smear_gain * g
+    q.sort_hi = p.sort_lo + (p.sort_hi - p.sort_lo) * g
+    q.sort_inset = int(round(p.sort_inset * g))
+    q.levels = int(round(p.levels + (256 - p.levels) * (1 - g)))
+    q.clip_add = p.clip_add * g
+    q.n_dust = int(round(p.n_dust * g))
+    q.n_scratch = int(round(p.n_scratch * g))
+    q.bar_w = int(round(p.bar_w * g))
     q.max_dx = int(round(p.max_dx * g))
     q.p_shift = p.p_shift * g
     q.split_d = tuple(int(round(v * g)) for v in p.split_d)
@@ -871,6 +897,118 @@ def cmd_palettes(a):
     print("->", o)
 
 
+def retime(src, fit, mode, tmp):
+    """整段源视频变速到 fit 秒（24 fps）：setpts 拉长 + ffmpeg minterpolate。
+    mci = 运动补偿插帧（aobmc + 双向 + vsbmc）；blend = 相邻帧按时间加权混合。结果缓存在 tmp。"""
+    import imageio_ffmpeg
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    tmp.mkdir(parents=True, exist_ok=True)
+    out = tmp / f"{src.stem}_fit{fit:.3f}_{mode}.mp4"
+    if out.exists():
+        return out
+    n_src = sum(1 for _ in video_frames(src, 0, 10 ** 6))
+    n = int(np.ceil(fit * FPS - 1e-9))
+    # 源第 j 帧（pts j/24）→ 输出时间 j/24·k；k = n/(n_src−1)：源末帧落在第 n 帧上，前 n 帧全是插出来的运动、不停帧
+    k = (n + 1) / max(1, n_src - 1)          # 源末帧落在第 n+1 帧（minterpolate 实测少出 1–2 帧）→ 前 n 帧全是运动、不停帧
+    mi = ("minterpolate=fps=24:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1" if mode == "mci"
+          else "minterpolate=fps=24:mi_mode=blend")
+    subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(src), "-an", "-vf", f"setpts={k:.6f}*PTS,{mi}",
+                    "-frames:v", str(n), "-vsync", "cfr", "-r", "24", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p",
+                    str(out)], check=True)
+    return out
+
+
+def head_track(masks, thr=0.5):
+    """每帧：mask 顶 y_top、头最宽处的宽度 w_head、头部（顶 → 脖子最细处）的水平质心 cx"""
+    out = []
+    for m in masks:
+        w = (m > thr).sum(1)
+        ys = np.nonzero(w)[0]
+        top = int(ys[0])
+        hm = top + int(np.argmax(w[top:top + 400]))
+        big = np.nonzero(w[hm:] > 1.25 * w[hm])[0]
+        end = hm + (int(big[0]) if len(big) else len(w) - hm)
+        neck = hm + int(np.argmin(w[hm:max(end, hm + 1)]))
+        col = (m[top:neck + 1] > thr).sum(0).astype(np.float64)
+        cx = float(np.average(np.arange(m.shape[1]), weights=col + 1e-9))
+        out.append((top, int(w[hm]), cx))
+    return np.array(out, np.float64)
+
+
+def gauss_smooth(v, sigma):
+    """边界反射的高斯平滑（裁切路径去抖）"""
+    r = int(3 * sigma)
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    return np.convolve(np.pad(v, r, mode="reflect"), k, mode="valid")
+
+
+def cmd_reframe(a):
+    """把源视频裁紧（16:9），让头宽 / 画高 = 参考镜头（03 抬头 t=4.0）的比例；裁切框平滑跟头（顶边 + 水平质心）。
+    缩放用 PIL LANCZOS + 亚像素 box（不取整 → 不抖）。原文件不动，输出另起名。"""
+    import imageio_ffmpeg
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    src = Path(a.src)
+    frames = video_frames(src, 0, 10 ** 6)
+    n = len(frames)
+    H, W = frames[0].shape[:2]
+    tmp = Path(a.tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
+    mc = tmp / f"masks_{src.stem}_0.000_{n}.npy"
+    if mc.exists():
+        masks = np.load(mc).astype(np.float32) / 255
+    else:
+        mt = get_matter()
+        masks = np.stack([get_mask(mt, f)[0] for f in frames])
+        np.save(mc, (masks * 255 + 0.5).astype(np.uint8))
+    tr = head_track(masks)
+    ref = video_frames(SRC_VIDEO, 4.0, 1)[0]
+    rm = get_mask(get_matter(), ref)[0]
+    rtop, rw, _ = head_track([rm])[0]
+    ratio = rw / ref.shape[0]                              # 参考：头宽 / 画高
+    hc = a.height or float(np.median(tr[:, 1]) / ratio)    # 中位头宽对上参考比例
+    hc = float(np.clip(hc, H / 1.8, H))
+    wc = hc * 16 / 9
+    margin = rtop / ref.shape[0] * hc                      # 头顶留白也照参考
+    top_s = gauss_smooth(tr[:, 0], a.sigma)
+    cx_s = gauss_smooth(tr[:, 2], a.sigma)
+    y0 = np.clip(top_s - margin, 0, H - hc)
+    x0 = np.clip(cx_s - wc / 2, 0, W - wc)
+    out = outname(src.with_name(src.stem + "_裁肩_v1.mp4"))
+    pipe = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
+                             "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(out)],
+                            stdin=subprocess.PIPE)
+    cropped = []
+    for i, f in enumerate(frames):
+        im = to_im(f).resize((W, H), Image.LANCZOS, box=(x0[i], y0[i], x0[i] + wc, y0[i] + hc))
+        pipe.stdin.write(np.asarray(im).tobytes())
+        cropped.append(im)
+    pipe.stdin.close()
+    pipe.wait()
+    info = {"source": src.name, "crop_h": round(hc, 1), "crop_w": round(wc, 1), "scale": round(H / hc, 3),
+            "resampler": "PIL LANCZOS, sub-pixel box", "ref": f"{SRC_VIDEO.name} t=4.0 head width / frame height = {ratio:.3f}",
+            "head_width_median": float(np.median(tr[:, 1])), "smooth_sigma_frames": a.sigma,
+            "path": [{"i": i, "x0": round(float(x0[i]), 2), "y0": round(float(y0[i]), 2)} for i in range(n)]}
+    Path(str(out) + ".json").write_text(json.dumps(info, ensure_ascii=False, indent=1), "utf-8")
+    # 三帧对比：上排参考（03 抬头），下排裁好的
+    idx = [0, n // 2, n - 1]
+    refs = [to_im(r) for r in (video_frames(SRC_VIDEO, 0.0, 1)[0], video_frames(SRC_VIDEO, 2.5, 1)[0], ref)]
+    tw, th_ = 640, 360
+    sheet = Image.new("RGB", (3 * tw, 2 * th_ + 40), (8, 8, 10))
+    for j in range(3):
+        for r, (im, lab) in enumerate([(refs[j], f"03_headlift_v3  t={[0.0, 2.5, 4.0][j]:.1f}s"),
+                                       (cropped[idx[j]], f"crop  frame {idx[j]}  x0={x0[idx[j]]:.0f} y0={y0[idx[j]]:.0f}")]):
+            t = im.resize((tw, th_), Image.LANCZOS)
+            label(t, lab, s=0.9, color=(230, 230, 230), pos="tl")
+            sheet.paste(t, (j * tw, 40 + r * th_))
+    label(sheet, "", s=1.0, pos="tl", color=(170, 174, 180),
+          lines=[f"reframe: crop {wc:.0f}x{hc:.0f} -> 1280x720 (x{H / hc:.2f}, Lanczos), head width / frame height matched to 03 "
+                 f"({ratio:.2f}); path = gaussian sigma {a.sigma} f on mask top + head centroid"])
+    cs = outname(out.with_name(out.stem + "_对比.jpg"))
+    sheet.save(cs, quality=90)
+    print("->", out, "\n->", cs, f"\ncrop {wc:.0f}x{hc:.0f}  scale x{H / hc:.3f}")
+
+
 def contact(frames, path, cols=4):
     tw, th_ = 480, 270
     rows = (len(frames) + cols - 1) // cols
@@ -889,9 +1027,12 @@ def cmd_clip(a):
     sn = json.loads((S.MV / "感官.json").read_text("utf-8"))
     ch = sn["channels"]
     n = int(round(a.dur * FPS)) if a.dur else 10 ** 6
+    if a.fit:
+        src = retime(src, a.fit, a.retime, Path(a.tmp))
+        n = int(np.ceil(a.fit * FPS - 1e-9))
     frames = video_frames(src, a.src_t0, n)
     n = len(frames)
-    dur = n / FPS
+    dur = a.fit if a.fit else n / FPS
     tmp = Path(a.tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     # 遮罩缓存（同一段源帧只推理一次；缓存在 --tmp 里，gitignore）
@@ -912,7 +1053,7 @@ def cmd_clip(a):
                                        "-crf", "16", str(vtmp[key])], stdin=subprocess.PIPE)
     hist = BoundaryHistory()
     off = a.sense_offset
-    side = {"source": src.name, "src_t0": a.src_t0, "play_start": a.start, "dur": dur,
+    side = {"source": src.name, "src_t0": a.src_t0, "fit": a.fit, "retime": a.retime if a.fit else None, "play_start": a.start, "dur": dur,
             "sense_offset": off, "palettes": pals, "waterfall": a.waterfall, "place_dx": a.place_dx,
             "mapping": {"threat": "n_bands = 4 + 22*threat; max_dx = 16 + 300*threat; p_shift = 0.25 + 0.5*threat",
                         "tension": "split d = 2 + 16*tension (R=+d, G=-d/2, B=-d, along normal)",
@@ -925,8 +1066,9 @@ def cmd_clip(a):
     strong = [o for o in loc if th[int(round(o * FPS))] >= np.percentile(th[i0:i1], 88)]
     t_play = np.array(t_sense) + off
     if a.envelope:
-        gate, ginfo = envelope(t_play, np.array(on) + off, th, t_end=t_play[-1] + 1 / FPS, thr=a.burst_thr,
-                               sustain=a.sustain, ramp=a.ramp, downbeats=np.array(sn["events"]["downbeats"]) + off)
+        gate, ginfo = envelope(t_play, np.array(on) + off, th, t_end=a.start + dur, thr=a.burst_thr,
+                               sustain=a.sustain, ramp=a.ramp, downbeats=np.array(sn["events"]["downbeats"]) + off,
+                               ramp_start=a.ramp_start)
         side["envelope"] = ginfo
     else:
         gate = np.ones(n)
@@ -948,15 +1090,9 @@ def cmd_clip(a):
         gi = float(gate[i])
         if gi < 1.0:
             p = scale_params(p, gi)
-        out, m = run(f, mask, p, hist=hist)        # 门关着也跑（瀑布图历史要连续），只是不显示
-        alpha = min(1.0, 1.5 * gi)
-        if alpha < 1.0:
-            clean, cm = place(f, mask, p.place_dx)
+        out, m = run(f, mask, p, hist=hist)        # 门关着也跑（瀑布图历史要连续）；g 只缩强度，不和干净帧混
         for key in pals:
-            x = PALETTES[key][1](out, m, seed)
-            if alpha < 1.0:
-                x = x * alpha + PALETTES[key][1](clean, cm, seed) * (1 - alpha)
-            im = to_im(x)
+            im = to_im(PALETTES[key][1](out, m, seed))
             label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   gate {gi:.2f}   threat {p.sense['threat']:.2f}  "
                                         f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   "
                                         f"mask {msrc}   palette {key}"] + p.hud())
@@ -973,12 +1109,15 @@ def cmd_clip(a):
         np.save(mcache, (np.stack(masks) * 255 + 0.5).astype(np.uint8))
     print(f"{n} 帧 × {len(pals)} 配色  {time.time() - t0:.1f}s")
     if a.envelope:
-        gp = outname(S.MV / "样片" / f"{name}_门控.png")
+        gp = outname(S.MV / "样片" / (name.replace("{pal}", "").replace("__", "_") + "_门控.png"))
         gate_plot(gp, t_play, gate, th, np.array(on) + off, ginfo, np.array(sn["events"]["downbeats"]) + off)
         print("->", gp, ginfo["bursts"], ginfo["ramp_start"], ginfo["full_from"])
     for key in pals:
-        suffix = f"_{PALETTES[key][0]}" if (len(pals) > 1 or a.name) else ""
-        out = outname(S.MV / "样片" / f"{name}{suffix}.mp4")
+        if "{pal}" in name:                       # 名字里留了配色位置：…_{pal}_45.12-51.52
+            out = outname(S.MV / "样片" / (name.replace("{pal}", PALETTES[key][0]) + ".mp4"))
+        else:
+            suffix = f"_{PALETTES[key][0]}" if (len(pals) > 1 or a.name) else ""
+            out = outname(S.MV / "样片" / f"{name}{suffix}.mp4")
         subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(vtmp[key]), "-ss", f"{a.start:.3f}",
                         "-t", f"{dur:.3f}", "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
                         "-b:a", "256k", "-t", f"{dur:.3f}", str(out)], check=True)
@@ -1020,14 +1159,22 @@ def main():
     s2.add_argument("--burst-thr", type=float, default=0.5, help="起音处威胁峰 ≥ 这个才触发脉冲")
     s2.add_argument("--sustain", type=float, default=1.4, help="收尾全开几秒")
     s2.add_argument("--ramp", type=float, default=0.4, help="收尾前升到全开用几秒")
+    s2.add_argument("--ramp-start", type=float, default=None, help="收尾从歌里哪一秒开始升（给了就不用 --sustain / 吸附）")
+    s2.add_argument("--fit", type=float, default=None, help="把整段源视频变速到这么多秒（配合 --retime）")
+    s2.add_argument("--retime", default="mci", choices=["mci", "blend"], help="变速：mci = 运动补偿插帧，blend = 帧混合")
     s2.add_argument("--sense-offset", type=float, default=SENSE_OFFSET, help="感官.json 时间 + 这个 = 播放时间（当前 感官.json 已是播放时间 → 0）")
     s2.add_argument("--waterfall", action=argparse.BooleanOptionalAction, default=True,
                     help="瀑布图行（默认开；👤 2026-10-21 最喜欢「瀑布图行 + 本片配色」：不累眼、只一点颜色）；--no-waterfall = 方法一的拖影")
     s2.add_argument("--tmp", default=str(Path(__file__).resolve().parents[1] / "cache" / "face_glitch"))
+    s4 = sp.add_parser("reframe")
+    s4.add_argument("src")
+    s4.add_argument("--height", type=float, default=None, help="裁切高（源像素）；默认按参考头宽比例自动")
+    s4.add_argument("--sigma", type=float, default=10.0, help="裁切路径高斯平滑（帧）")
+    s4.add_argument("--tmp", default=str(Path(__file__).resolve().parents[1] / "cache" / "face_glitch"))
     s3 = sp.add_parser("image"); s3.add_argument("src"); s3.add_argument("--mask"); s3.add_argument("--out")
     s3.add_argument("--place-dx", type=int, default=0); s3.add_argument("--palette", default="orig", choices=list(PALETTES))
     a = ap.parse_args()
-    {"sheet": cmd_sheet, "palettes": cmd_palettes, "clip": cmd_clip, "image": cmd_image}[a.cmd](a)
+    {"sheet": cmd_sheet, "palettes": cmd_palettes, "clip": cmd_clip, "image": cmd_image, "reframe": cmd_reframe}[a.cmd](a)
 
 
 if __name__ == "__main__":

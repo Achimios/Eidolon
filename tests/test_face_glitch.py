@@ -185,6 +185,22 @@ class TestStages(unittest.TestCase):
         self.assertEqual(p.n_triplets + p.n_dashes + p.n_blocks, 0)
         self.assertEqual(p.p_swap + p.p_invert + p.p_shift, 0)
 
+    def test_strength_gate_zero_is_identity(self):
+        """强度门控（不是透明度）：g = 0 → 整条管线 ≈ 恒等（只剩挪位 + 256 级量化，误差 ≤ 0.5/255），瀑布图行也一样"""
+        img, m = rand_img(72, 128, 11), disk_mask(72, 128, 80, 36, 25)
+        base = F.params_from_sense(0.9, 0.9, 0.9, F.Params(place_dx=10, grid=8))
+        for wf in (False, True):
+            p = F.scale_params(F.Params(**{**F.asdict(base), "waterfall": wf}), 0.0)
+            hist = F.BoundaryHistory()
+            for _ in range(3):
+                out, _ = F.run(img, m, p, hist=hist)
+            ref, _ = F.place(img, m, 10)
+            self.assertLessEqual(float(np.abs(out - ref).max()), 0.5 / 255 + 1e-6, wf)
+
+    def test_strength_gate_one_is_unchanged(self):
+        p = F.params_from_sense(0.4, 0.3, 0.2)
+        self.assertEqual(F.asdict(F.scale_params(p, 1.0)), F.asdict(p))
+
     def test_pipeline_runs_deterministic(self):
         img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
         p = F.Params(place_dx=10, n_dust=50, grid=8)
