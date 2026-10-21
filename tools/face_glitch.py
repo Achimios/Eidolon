@@ -683,6 +683,35 @@ def envelope(t, onsets, threat, fps=FPS, t_end=None, thr=0.5, hold=2, tau=1.5, a
                       f"{snap}s), then 1 until {t_end:.3f}; g = max"}
 
 
+def wipe(img, xr, u, seed=0, L=260.0, group=3.0, max_delay=0.45, dim=0.85):
+    """全面抹除（👤：镜头最后几分之一秒，脸被拖影 / 瀑布图行整个扫掉）。
+    每一行有一条「扫描前沿」c_y(u)：从该行轮廓左边界 x_r(y)（没有轮廓的行从 0）扫到画面右边外 W + L；
+    行按几何分布分组（均值 group 行），每组一个延迟 d ∈ [0, max_delay]，c_y = x0 + (W + L − x0)·smoothstep((u − d)/(1 − d))。
+    前沿左边整行被替换成「前沿处的像素向左拖」：lead·exp(−(c_y − x)/L)（lead = 前沿所在列的像素；前沿出画后 = 最右列，通常是黑）；
+    前沿右边不动。整体亮度再乘 (1 − dim·u²)。u = 0 → 恒等；u = 1 → 每行都扫完，脸不在了，只剩拖痕 / 黑。"""
+    H, W, _ = img.shape
+    rng = np.random.default_rng(seed)
+    delay = np.zeros(H)
+    y = 0
+    while y < H:
+        h = int(rng.geometric(1.0 / max(group, 1.0)))
+        delay[y:y + h] = rng.uniform(0, max_delay)
+        y += h
+    out = img.copy()
+    xs = np.arange(W)
+    for y in range(H):
+        v = np.clip((u - delay[y]) / max(1e-9, 1 - delay[y]), 0, 1)
+        if v <= 0:
+            continue
+        v = v * v * (3 - 2 * v)
+        x0 = max(int(xr[y]), 0)
+        c = x0 + (W + L - x0) * v
+        lead = img[y, min(int(c), W - 1)]
+        left = xs < c
+        out[y, left] = lead[None, :] * np.exp(-(c - xs[left]) / L)[:, None]
+    return out * (1 - dim * u * u)
+
+
 def scale_params(p: Params, g):
     """强度门控（👤：碎片是「效果强度」，不是透明度）：g < 1 时每一级的强度按 g 缩，画面始终 100 % 不透明。
     横移 / 横移概率 / RGB 分离 / 拖影长度 / 瀑布图历史长度 / 排序区间宽度与伸进脸的深度 / 列错位 / 色块数 /
@@ -1085,6 +1114,19 @@ def cmd_clip(a):
     else:
         gate = np.ones(n)
     seed, t0 = 1000, time.time()
+    n_wipe = int(round(a.wipe * FPS)) if a.wipe else 0
+    n_tail = int(round(a.tail_contact * FPS)) if a.tail_contact else 0
+    tail = []
+    reuse = None
+    if a.reuse:
+        assert len(pals) == 1, "--reuse 只能配一个配色"
+        reuse = video_frames(Path(a.reuse), 0, n)
+        assert len(reuse) >= n - n_wipe, (len(reuse), n)
+        side["reused_from"] = Path(a.reuse).name
+    if n_wipe:
+        side["wipe"] = {"frames": n_wipe, "from_t": round(a.start + (n - n_wipe) / FPS, 3), "to_t": round(a.start + dur, 3),
+                        "law": "per-row sweep front x_r -> W+L (L=260), row-group delay U(0,0.45), smoothstep; "
+                               "left of front = lead pixel * exp(-(c-x)/L); brightness *(1-0.85u^2)"}
     thumbs = {k: [] for k in pals}
     every = max(1, n // 16)
     for i, f in enumerate(frames):
@@ -1107,15 +1149,30 @@ def cmd_clip(a):
         if gi < 1.0:
             p = scale_params(p, gi)
         out, m = run(f, mask, p, hist=hist)        # 门关着也跑（瀑布图历史要连续）；g 只缩强度，不和干净帧混
+        uw = (i - (n - n_wipe) + 1) / n_wipe if (n_wipe and i >= n - n_wipe) else 0.0
+        if uw > 0:
+            out = wipe(out, leftmost(m), uw, seed=a.wipe_seed)
+        if reuse is not None and i < n - n_wipe - 1:      # 复用已有成片的这一帧（逐帧解码），只为了历史连续才跑管线
+            pipes[pals[0]].stdin.write((reuse[i] * 255 + 0.5).astype(np.uint8).tobytes())
+            tail.append((f"{ts + off:.2f}s  reused", to_im(reuse[i]))) if i >= n - n_tail else None
+            side["frames"].append({"i": i, "t_play": round(ts + off, 3), "gate": round(gi, 3), "reused": True})
+            continue
         for key in pals:
             im = to_im(PALETTES[key][1](out, m, seed))
             label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   gate {gi:.2f}   threat {p.sense['threat']:.2f}  "
                                         f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   "
                                         f"mask {msrc}   palette {key}"] + p.hud())
+            if reuse is not None and i == n - n_wipe - 1:  # 接缝帧：自己算的 vs 成片里的，必须几乎一样
+                dd = float(np.abs(np.asarray(im, np.float32) / 255 - reuse[i]).mean() * 255)
+                side["reuse_check_frame"] = {"i": i, "mean_abs_diff_255": round(dd, 2)}
+                print(f"接缝帧 {i}：重算 vs 成片 平均差 {dd:.2f}/255")
+                im = to_im(reuse[i])
             pipes[key].stdin.write(np.asarray(im).tobytes())
+            if i >= n - n_tail:
+                tail.append((f"{ts + off:.2f}s  gate {gi:.2f}" + (f"  WIPE u={uw:.2f}" if uw > 0 else ""), im))
             if i % every == 0:
                 thumbs[key].append((f"{ts + off:.2f}s  gate {gi:.2f}  threat {p.sense['threat']:.2f}", im))
-        side["frames"].append({"i": i, "t_play": round(ts + off, 3), "gate": round(gi, 3), **p.sense, "seed": seed,
+        side["frames"].append({"i": i, "t_play": round(ts + off, 3), "gate": round(gi, 3), "wipe_u": round(uw, 3), **p.sense, "seed": seed,
                                "n_bands": p.n_bands, "max_dx": p.max_dx, "split_d": list(p.split_d),
                                "smear_len": round(p.smear_len, 1)})
     for key in pals:
@@ -1139,6 +1196,8 @@ def cmd_clip(a):
                         "-b:a", "256k", "-t", f"{dur:.3f}", str(out)], check=True)
         Path(str(out) + ".json").write_text(json.dumps({**side, "palette": key}, ensure_ascii=False, indent=1), "utf-8")
         contact(thumbs[key], out.with_name(out.stem + "_接触表.jpg"))
+        if tail:
+            contact(tail, out.with_name(out.stem + f"_末{a.tail_contact:.1f}s接触表.jpg"), cols=5)
         print("->", out)
 
 
@@ -1178,6 +1237,10 @@ def main():
     s2.add_argument("--ramp", type=float, default=0.4, help="收尾前升到全开用几秒")
     s2.add_argument("--ramp-start", type=float, default=None, help="收尾从歌里哪一秒开始升（给了就不用 --sustain / 吸附）")
     s2.add_argument("--fit", type=float, default=None, help="把整段源视频变速到这么多秒（配合 --retime）")
+    s2.add_argument("--wipe", type=float, default=0.0, help="最后几秒做全面抹除（在镜头里面，不加长）")
+    s2.add_argument("--wipe-seed", type=int, default=0)
+    s2.add_argument("--reuse", default=None, help="已有成片：抹除之前的帧直接用它（逐帧解码），只重算抹除帧")
+    s2.add_argument("--tail-contact", type=float, default=0.0, help="另出一张最后这么多秒的逐帧接触表")
     s2.add_argument("--extend-to", type=float, default=None,
                     help="原速播放，结尾停在最后一帧补到这么多秒（瓦解效果在停住的帧上照跑）；和 --fit 二选一")
     s2.add_argument("--retime", default="mci", choices=["mci", "blend"], help="变速：mci = 运动补偿插帧，blend = 帧混合")

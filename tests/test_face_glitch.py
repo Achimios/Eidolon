@@ -201,6 +201,24 @@ class TestStages(unittest.TestCase):
         p = F.params_from_sense(0.4, 0.3, 0.2)
         self.assertEqual(F.asdict(F.scale_params(p, 1.0)), F.asdict(p))
 
+    def test_wipe_endpoints(self):
+        """抹除：u = 0 → 恒等；u = 1、不压暗、最右列是黑 → 每一行都被扫掉，整张全黑（脸一个像素都不剩）"""
+        img = rand_img(48, 80, 12)
+        img[:, -1] = 0
+        xr = F.leftmost(disk_mask(48, 80, 50, 24, 15))
+        np.testing.assert_array_equal(F.wipe(img, xr, 0.0), img)
+        np.testing.assert_array_equal(F.wipe(img, xr, 1.0, dim=0.0), 0)
+
+    def test_wipe_front_monotonic(self):
+        """前沿只往右走：u 越大，被替换（≠ 原图）的像素只多不少（不压暗时）"""
+        img = rand_img(48, 80, 13) * 0.5 + 0.5
+        xr = F.leftmost(disk_mask(48, 80, 50, 24, 15))
+        prev = 0
+        for u in np.linspace(0.1, 1.0, 6):
+            k = int((F.wipe(img, xr, u, dim=0.0) != img).any(-1).sum())
+            self.assertGreaterEqual(k, prev)
+            prev = k
+
     def test_pipeline_runs_deterministic(self):
         img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
         p = F.Params(place_dx=10, n_dust=50, grid=8)
