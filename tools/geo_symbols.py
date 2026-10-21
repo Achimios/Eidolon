@@ -30,9 +30,9 @@
   bwr（黑白红，「此刻」整个是红）/ acid（紫黑 + 荧光酸橙）。版本号决定行为（旧版本号复现旧参数，见 build / main）。
 
 用法（Python 用 4_Eidolon/.venv）：
-  python tools/geo_symbols.py countdown --ver v5              # 憋住段 192.36–198.76 的拍数倒数（默认提前 1 拍起）
+  python tools/geo_symbols.py countdown --ver v7 --scale 1.5  # 憋住段 192.36–198.76 的拍数倒数（1080p 信息版；默认提前 1 拍起）
   python tools/geo_symbols.py matrix --ver v3                 # 吸收段 128.36–141.14 的字阵吸收
-  python tools/geo_symbols.py sieve --ver v4 --palette bwr    # 独立版：筛（输出到 MotionDesign/）
+  python tools/geo_symbols.py sieve --ver v6 --scale 1.5 --palette bwr   # 独立版：筛（1080p 信息版，输出到 MotionDesign/）
   python tools/geo_symbols.py countdown --still 195.0         # 只出一帧 png（看构图）
   python tools/geo_symbols.py countdown --scale 0.5 --no-audio # 低分辨率小样
   公共参数：--start / --end（播放时间）、--ver v1、--scale、--ss（超采样倍数）、--out 目录
@@ -411,8 +411,10 @@ class Countdown:
     """憋住段：从 192.36（乐句起点）到 198.76（下一乐句 = 冲顶）共 16 拍。第 i 拍出生的数字 = 离冲顶还剩几拍（16 − i），真数。"""
     name = "倒数"
 
-    def __init__(self, sn, t_release=198.76, n=16, scale=1.0, t_end=None, wt=0.62, delay=2.0, spin=45.0, guide=True, trim=True):
+    def __init__(self, sn, t_release=198.76, n=16, scale=1.0, t_end=None, wt=0.62, delay=2.0, spin=45.0, guide=True, trim=True, v6=False, v7=False):
         self.wt, self.delay, self.spin, self.guide = wt, delay, spin, guide     # v1/v2：wt 1.0、delay 0、spin 90、无引导线
+        self.v6 = v6 or v7                                                  # v6：信息版面（👤「I just love graphic with info」）
+        self.v7 = v7                                                        # v7：v6 + 两位数笔画错开压到 1 帧（v6 的 16–10 前 3 帧只画了一半）
         self.trim = trim                                                    # v5 起：外缘端点随笔宽收
         beats = np.array(sn["events"]["beats"])
         k1 = int(np.argmin(np.abs(beats - t_release)))
@@ -421,7 +423,10 @@ class Countdown:
         self.n = n
         self.sn, self.s = sn, scale
         self.w, self.h = int(W * scale), int(H * scale)
-        self.sp = Spiral(self.beats[:-1], w=self.w, h=self.h)
+        if v6:   # 前位数字在左 0.20W；螺旋中心 = 环心在 0.56W；右 0.795W 起是信息栏 → 左重右密的不对称
+            self.sp = Spiral(self.beats[:-1], R=2.1, phi_deg=-72.0, v0=(-0.36, 0.0), h0=0.36, center=(0.56, 0.50), w=self.w, h=self.h)
+        else:
+            self.sp = Spiral(self.beats[:-1], w=self.w, h=self.h)
         self.down = np.array(sn["events"]["downbeats"]); self.phr = np.array(sn["events"]["phrases"])
         self.on = np.array(sn["events"]["onsets"])
         rng = np.random.default_rng(7)
@@ -445,15 +450,23 @@ class Countdown:
         r = self.sp.rel(i, t)
         for k, _ in enumerate(ss):
             last = (i == self.n - 1) and self.ver_end      # 最后一个数字（1）：只有半拍，要在收缩前画完
-            dl, stg, dur = (0.0, 0.5, 4.0) if last else (self.delay, 1.5, 7.0)
+            dl, stg, dur = (0.0, 0.5, 4.0) if last else (1.0, 0.5, 2.0) if self.v6 else (self.delay, 1.5, 7.0)
+            if self.v7 and not last:                         # v7：两位数 6 笔也要在 ~3 帧内画完 → 错开总预算 1 帧
+                stg = min(stg, 1.0 / max(1, len(ss) - 1))
+            # v6：前 2–3 帧就要认得出（v5 一笔 7 帧、错开 1.5 帧 → 一拍 9.6 帧里大半时间只画了一半，像碎块）
             t0 = born + (dl + k * stg) / FPS                # 先让上一个数字从前位退开 delay 帧
             prog = float(ease2((t - t0) * FPS / dur, dur)) if t >= t0 else 0.0
             rank = int(np.where(self.drop_order[i] == k)[0][0])
-            alive = r > -2.2 - 1.6 * rank / max(1, len(ss) - 1)   # 退到第 2.2–3.8 层时一根根掉
+            if self.v6:
+                alive = r > -1.4 - 0.8 * rank / max(1, len(ss) - 1)  # v6：残笔退得更快（第 1.4–2.2 层掉光）
+            else:
+                alive = r > -2.2 - 1.6 * rank / max(1, len(ss) - 1)   # 退到第 2.2–3.8 层时一根根掉
             out.append((prog, alive))
         return out
 
     def frame(self, t, cv):
+        if self.v6:
+            return self.frame_v6(t, cv)
         s = self.s
         sp = self.sp
         u = sp.u(t)
@@ -552,6 +565,160 @@ class Countdown:
             hun = channel(self.sn, "hunger", t)
             cv.text(46 * s, 78 * s, f"TENSION {ten:4.2f}   HUNGER {hun:4.2f}   CAM u {u:6.3f}  R {sp.R:.2f}/BEAT", 10 * s, DIM)
             info.update(tension=ten, hunger=hun)
+        info["cam_u"] = round(u, 4)
+        info["collapse"] = round(col, 4)
+        return info
+
+
+    # ------------------------------------------------------------ v6：信息版面
+    def frame_v6(self, t, cv):
+        """层级：大数字（0.36H）> 环标签 13 px > 参数行 12 px > 刻度数字 10 px（720p 基准，× scale）。
+        左：前位数字；中：对数螺旋流进四个相位环（每个环有真实刻度和读数）；右：信息栏（剩余拍数、张力 / 饥饿 / 威胁表、
+        本段全部起音的清单、带频率刻度的阶梯频谱）。"""
+        s, sp = self.s, self.sp
+        u = sp.u(t)
+        c0, c1 = self.collapse
+        col = float(ease2((t - c0) / (c1 - c0), (c1 - c0) * FPS)) if t > c0 else 0.0
+        k1 = 1 - col
+        info = {}
+        C = sp.C
+        beats_all = self.sn["events"]["beats"]
+        kb, pb = phase_of(t, beats_all)
+        kd, pd = phase_of(t, self.down)
+        kp, pp = phase_of(t, self.phr)
+        song = t / self.sn["duration"]
+        bar_beat = int(np.searchsorted(beats_all, t, side="right")) - int(np.searchsorted(beats_all, self.down[max(kd, 0)], side="left"))
+        cur = int(np.searchsorted(self.beats[:-1], t, side="right"))
+        remaining = self.n - (cur - 1) if cur >= 1 else None
+        k_on = [o for o in self.on if t - 1.0 / FPS < o <= t]
+        T2, T3, T4 = 13 * s, 12 * s, 10 * s
+
+        def spt(r):
+            return C + (sp.R ** r) * np.array([np.cos(r * sp.phi) * sp.v0[0] - np.sin(r * sp.phi) * sp.v0[1],
+                                               np.sin(r * sp.phi) * sp.v0[0] + np.cos(r * sp.phi) * sp.v0[1]])
+        # ---- 螺旋引导线 + 层刻度
+        if col < 0.98:
+            cv.line([tuple(spt(r) * k1 + C * col) for r in np.linspace(-6.0, 0.0, 300)], DIM, 1.0)
+            for j in range(-5, 1):
+                q = spt(j) * k1 + C * col
+                cv.dot(q[0], q[1], 2.0 * s, MID)
+        # ---- 四个相位环
+        radii = [r * self.h * k1 for r in (0.075, 0.105, 0.140, 0.178)]
+        if col < 0.98:
+            for kk, (r, ph) in enumerate(zip(radii, [pb, pd, pp, song])):
+                cv.arc_line(C[0], C[1], r, -90, 270, DIM, 1.0)
+                cv.arc_band(C[0], C[1], r - 2.4 * s, r + 2.4 * s, -90, -90 + 360 * ph, GREY if kk < 3 else MID)
+            r = radii[0]                                   # 拍环：四分刻度
+            for j in range(4):
+                a = np.radians(-90 + 90 * j)
+                cv.line([(C[0] + (r - 5 * s) * np.cos(a), C[1] + (r - 5 * s) * np.sin(a)),
+                         (C[0] + (r - 9 * s) * np.cos(a), C[1] + (r - 9 * s) * np.sin(a))], MID, 1.0)
+            r = radii[1]                                   # 小节环：1–4，当前拍点亮
+            for j in range(4):
+                a = np.radians(-90 + 90 * j + 45)
+                cv.text(C[0] + (r - 11 * s) * np.cos(a), C[1] + (r - 11 * s) * np.sin(a), str(j + 1), T4,
+                        GREY if j + 1 == bar_beat else DIM, anchor="mm")
+            r = radii[2]                                   # 乐句环：16 拍格，标「离冲顶还剩几拍」
+            for j in range(16):
+                a = np.radians(-90 + 360 * j / 16)
+                L = 9 if j % 4 == 0 else 4.5
+                cv.line([(C[0] + (r + 4 * s) * np.cos(a), C[1] + (r + 4 * s) * np.sin(a)),
+                         (C[0] + (r + (4 + L) * s) * np.cos(a), C[1] + (r + (4 + L) * s) * np.sin(a))], MID, 1.0)
+                if j % 4 == 0:
+                    cv.text(C[0] + (r + 24 * s) * np.cos(a), C[1] + (r + 24 * s) * np.sin(a), str(16 - j), T4, MID, anchor="mm")
+            a = np.radians(-90 + 360 * pp)
+            cv.dot(C[0] + r * np.cos(a), C[1] + r * np.sin(a), 4.0 * s, RED)
+            r = radii[3]                                   # 全曲环：情绪大图的段落边界
+            for g in segments():
+                a = np.radians(-90 + 360 * g["t"][0] / self.sn["duration"])
+                cv.line([(C[0] + (r - 4 * s) * np.cos(a), C[1] + (r - 4 * s) * np.sin(a)),
+                         (C[0] + (r - 11 * s) * np.cos(a), C[1] + (r - 11 * s) * np.sin(a))], MID, 1.0)
+            # 读数列：环的左上方，折线引到各环 12 点
+            lab = [f"BEAT   {pb:4.2f}", f"BAR    {bar_beat}/4  {pd:4.2f}", f"PHRASE {kp + 1}/{len(self.phr)}  {pp:4.2f}",
+                   f"SONG   {t:6.2f}/{self.sn['duration']:.1f} s"]
+            # （v6 草稿把这一列放在环的左上，被退到 −1 层的大数字盖住 → 放到环的正下方，折线引到各环 6 点）
+            lx = C[0] + 28 * s
+            for kk, (r, txt) in enumerate(zip(radii, lab)):
+                ly = C[1] + radii[3] + 30 * s + kk * 17 * s
+                cv.text(lx, ly, txt, T2, GREY if kk == 2 else MID, anchor="lm")
+                xk = C[0] - (3 - kk) * 4 * s
+                cv.line([(lx - 6 * s, ly), (xk, ly), (xk, C[1] + r)], DIM, 1.0)
+            cv.text(lx, C[1] + radii[3] + 30 * s + 4 * 17 * s + 6 * s,
+                    f"LOG SPIRAL  R {sp.R:.2f}/BEAT  PHI {np.degrees(sp.phi):.0f} DEG", T4, DIM, anchor="lm")
+        else:
+            cv.dot(C[0], C[1], 4.0 * s, RED)
+        info.update(beat_phase=round(pb, 4), bar_phase=round(pd, 4), bar_beat=bar_beat, phrase=kp + 1,
+                    phrase_phase=round(pp, 4), song=round(song, 5))
+        # ---- 数字
+        shown = []
+        for i in range(self.n):
+            if t < self.beats[i] - 1e-9:
+                continue
+            pos, hpx, ang, r = sp.xform(i, t)
+            if r < -6:
+                continue
+            ss_, wid = text_strokes(str(self.n - i))
+            unit = min(hpx / GLYPH_H, 0.30 * self.w * (sp.R ** r) / wid) * k1
+            if unit < 0.15:
+                continue
+            pc = C + (pos - C) * k1
+            M = (pc[0] - wid / 2 * unit, pc[1] - GLYPH_H / 2 * unit, unit, 0.0)
+            lum = float(np.clip(1.0 + 0.30 * r, 0.25, 1.0))
+            fill = RED if (NOW_RED and r > -0.5) else tuple(int(c * lum) for c in GREY)
+            for (st, xo), (prog, alive) in zip(ss_, self.digit_alpha(i, t)):
+                if alive:
+                    draw_stroke(cv, st, xo, M, prog, fill, spin=20.0, wt=self.wt, trim=True)
+            shown.append(self.n - i)
+        info["digits_shown"] = shown
+        info["beats_to_release"] = remaining
+        info["seconds_to_release"] = round(self.release - t, 3)
+        # ---- 左上：段落
+        if col < 0.98:
+            seg = next((g for g in segments() if g["t"][0] <= t < g["t"][1]), None)
+            cv.text(46 * s, 44 * s, f"SECTION {seg['id']}  HOLD" if seg else "SECTION --", 15 * s, GREY)
+            if seg:
+                cv.text(46 * s, 64 * s, f"{seg['t'][0]:.2f} - {seg['t'][1]:.2f} s  (EMOTION BOARD)", T3, MID)
+        # ---- 右：信息栏
+        X = 0.795 * self.w
+        CW = 0.175 * self.w
+        lv, db = self.spec.step(t)
+        info["spectrum_steps"] = lv.tolist()
+        if col < 0.98:
+            y = 44 * s
+            cv.text(X, y, "BEATS TO RELEASE", T3, MID); y += 16 * s
+            cv.text(X, y, f"{remaining:2d}" if remaining is not None else "--", 30 * s, GREY); y += 42 * s
+            cv.text(X, y, f"T-{max(0.0, self.release - t):5.3f} s", T2, GREY); y += 17 * s
+            cv.text(X, y, f"RELEASE {self.release:.2f} s  150 BPM", T3, MID); y += 30 * s
+            for name, key in (("TENSION", "tension"), ("HUNGER", "hunger"), ("THREAT", "threat")):
+                v = channel(self.sn, key, t)
+                cv.text(X, y, f"{name:<8}{v:4.2f}", T3, MID)
+                bx = X + 112 * s; bw = CW - 112 * s
+                cv.rect(bx, y + 4 * s, bx + bw, y + 10 * s, outline=DIM, width=1)
+                if v > 0.005:
+                    cv.rect(bx, y + 4 * s, bx + bw * v, y + 10 * s, fill=GREY)
+                info[key] = v
+                y += 18 * s
+            y += 14 * s
+            cv.text(X, y, "ONSETS IN SECTION    THREAT", T3, MID); y += 18 * s
+            for o in [o for o in self.on if self.beats[0] - 1e-6 <= o < self.release]:
+                flash = any(abs(o - q) < 1e-9 for q in k_on)
+                txt = f"{o:8.3f} s    {onset_strength(self.sn, o):4.2f}"
+                if flash:                                          # 起音那一帧：这一行填实（标签框手法）
+                    cv.rect(X - 4 * s, y - 2 * s, X + CW, y + 14 * s, fill=FLASH)
+                    cv.text(X, y, txt, T3, BG)
+                else:
+                    cv.text(X, y, txt, T3, GREY if o <= t else DIM)
+                y += 16 * s
+            yb = self.h - 74 * s                                       # 频谱（带频率刻度）
+            nb = len(lv); bw = CW / nb
+            draw_spectrum(cv, lv, X, yb, bw - 2 * s, 4.6 * s, 2 * s, self.spec.steps, fill=MID, frame=DIM)
+            e = self.spec.edges
+            for f, labf in ((50, "50"), (200, "200"), (1000, "1k"), (5000, "5k"), (12000, "12k")):
+                xx = X + np.log(f / e[0]) / np.log(e[-1] / e[0]) * nb * bw
+                cv.line([(xx, yb + 6 * s), (xx, yb + 10 * s)], MID, 1.0)
+                cv.text(xx, yb + 19 * s, labf, T4, MID, anchor="mm")
+            cv.text(X, yb - self.spec.steps * 4.6 * s - 18 * s, f"SPECTRUM Hz   {self.spec.db_lo:.0f}..{self.spec.db_hi:.0f} dB / 8", T4, MID)
+        info["onset_flash"] = bool(k_on)
         info["cam_u"] = round(u, 4)
         info["collapse"] = round(col, 4)
         return info
@@ -821,15 +988,20 @@ class Sieve:
         self.events.sort()
         self.primes = [int(x) for x in primes_upto(N)]
         self.u = 0.046 * self.h
-        self.gx0 = (0.52 if v < 4 else 0.55) * self.w; self.gy0 = 0.5 * self.h - self.side * self.u / 2
+        self.gx0 = (0.52 if v < 4 else 0.55 if v < 5 else 0.37) * self.w; self.gy0 = 0.5 * self.h - self.side * self.u / 2
         # 左边的大数字：每个 p 一个，尾声第 4 拍再来一个 = π(N)（v2 起；v1 尾声只剩 13 慢慢暗下去，没有收尾）
         self.v = v
         self.t_final = self.t_outro + 4 * self.beat
         self.big = [(tp, str(p)) for tp, p in zip(self.t_pass, self.P)] + ([(self.t_final, str(len(self.primes)))] if v >= 2 else [])
-        self.sp = Spiral([b[0] for b in self.big], R=2.0, phi_deg=-64.0, v0=(-0.20 if v < 3 else -0.14 if v < 4 else -0.23, -0.02), h0=0.30,
-                         center=(0.38 if v < 4 else 0.47, 0.54), w=self.w, h=self.h)   # v4：螺旋中心右移，前位数字不再盖住上一层
+        if v >= 6:   # v6：v5 的两位数前位（13 / 39）和退到 −1 层的上一个数字叠在一起 → 上一层往正上方退（φ −90°）、缩得更快（R 2.4）
+            self.sp = Spiral([b[0] for b in self.big], R=2.4, phi_deg=-90.0, v0=(-0.13, 0.10), h0=0.30, center=(0.30, 0.50), w=self.w, h=self.h)
+        elif v >= 5:   # v5：左 = 数字（不随镜头）、中 = 网格（只推网格）、右 = 计数栏
+            self.sp = Spiral([b[0] for b in self.big], R=2.0, phi_deg=-64.0, v0=(-0.13, -0.02), h0=0.30, center=(0.30, 0.55), w=self.w, h=self.h)
+        else:
+            self.sp = Spiral([b[0] for b in self.big], R=2.0, phi_deg=-64.0, v0=(-0.20 if v < 3 else -0.14 if v < 4 else -0.23, -0.02), h0=0.30,
+                             center=(0.38 if v < 4 else 0.47, 0.54), w=self.w, h=self.h)   # v4：螺旋中心右移，前位数字不再盖住上一层
         self.cam_anchors = np.array([b[0] for b in self.big])
-        self.zk = (0.012, 0.035) if v < 2 else (0.005, 0.022)        # v1 推到 ×1.49，网格顶行被裁 → v2 收到 ~×1.2
+        self.zk = (0.012, 0.035) if v < 2 else (0.005, 0.022) if v < 5 else (0.003, 0.010)   # v1 ×1.49 裁顶行 → v2 ~×1.2 → v5 ~×1.10（只推网格）
 
     def cell(self, n):
         r, c = divmod(n - 1, self.side)
@@ -844,6 +1016,8 @@ class Sieve:
         return float(np.exp(z))
 
     def frame(self, t, cv):
+        if self.v >= 5:
+            return self.frame_v5(t, cv)
         s, u = self.s, self.u
         info = {}
         hits = [e for e in self.events if e[0] <= t]
@@ -935,6 +1109,132 @@ class Sieve:
         info.update(p=p_now, crossings=crossings, struck=struck, remaining=remaining, primes_lit=lit, cam_zoom=round(z, 4))
         return info
 
+    # ------------------------------------------------------------ v5：信息版面（👤「I just love graphic with info」）
+    def frame_v5(self, t, cv):
+        """左：大数字（不随镜头）；中：13×13 网格（只有网格推近，×1.10 封顶）——每格数字一直可读，被划掉的格保留数字 + 划线 +
+        右上角「被谁筛掉」的因子标签（2·3·…，当前这一遍的划线 / 标签是强调色）；右：实时计数栏。"""
+        s, u = self.s, self.u
+        info = {}
+        hits = [e for e in self.events if e[0] <= t]
+        by = {}
+        last_hit = {}
+        for (te, n, p) in hits:
+            by.setdefault(n, []).append(p)
+            last_hit[n] = te
+        k = int(np.searchsorted(self.t_pass, t, side="right") - 1)
+        p_now = self.P[k] if 0 <= k and t < self.t_outro else None
+        f_num, f_tag = 11.0 * s, 7.5 * s
+        lit = 0
+        if t >= self.t_outro:
+            lit = int(np.clip(np.floor((t - self.t_outro) / (4 * self.beat) * len(self.primes)) + 1, 0, len(self.primes)))
+        # ---- 网格
+        for n in range(1, self.N + 1):
+            xy = self.cell(n)
+            x0, y0 = xy[0] - u / 2, xy[1] - u / 2
+            cv.dot(x0, y0, 0.8 * s, DIM)
+            if n == 1:
+                cv.text(xy[0], xy[1], "1", f_num, DIM, anchor="mm")
+                continue
+            ps = by.get(n)
+            if ps:
+                age = t - last_hit[n]
+                g = float(ease2(age * FPS / 4.0, 4.0))
+                cur_pass = (p_now is not None and ps[-1] == p_now)
+                if age < 2.0 / FPS:                                         # 划到的那一帧：格底填实（作用在这一格上）
+                    cv.rect(x0 + 2 * s, y0 + 2 * s, x0 + u - 2 * s, y0 + u - 2 * s, fill=BAR)
+                cv.text(xy[0], xy[1] + 1 * s, str(n), f_num, DIM if g >= 1 else MID, anchor="mm")
+                L = 0.36 * u * g
+                cv.line([(xy[0] - L, xy[1] + 1 * s), (xy[0] + L, xy[1] + 1 * s)], RED if cur_pass else MID, 1.4)
+                for q in range(1, len(ps)):                                  # 被再划一次：下面多一道短线（重复劳动）
+                    yy = xy[1] + (7 + 3 * q) * s
+                    cv.line([(xy[0] - 0.18 * u, yy), (xy[0] + 0.18 * u, yy)], DIM, 1.0)
+                tag = "·".join(str(p) for p in ps)
+                cv.text(x0 + u - 3 * s, y0 + 3 * s, tag, f_tag, RED if cur_pass else MID, anchor="ra")
+                continue
+            if p_now is not None and n == p_now:
+                cv.rect(x0 + 2 * s, y0 + 2 * s, x0 + u - 2 * s, y0 + u - 2 * s, fill=RED)
+                cv.text(xy[0], xy[1], str(n), f_num * 1.1, BG, anchor="mm")
+                continue
+            done_p = n in self.P and t >= self.t_pass[self.P.index(n)]
+            if t >= self.t_outro and self.primes.index(n) < lit:
+                cv.rect(x0 + 2 * s, y0 + 2 * s, x0 + u - 2 * s, y0 + u - 2 * s, outline=GREY, width=1)
+                cv.text(xy[0], xy[1], str(n), f_num, GREY, anchor="mm")
+            else:
+                cv.text(xy[0], xy[1], str(n), f_num, GREY if done_p else MID, anchor="mm")
+        # 当前划痕所在的行：底线
+        cur = [e for e in hits if t - e[0] < 3.0 / FPS]
+        if cur and t < self.t_outro:
+            te, n, p = cur[-1]
+            xy = self.cell(n)
+            cv.line([(self.gx0, xy[1] + u * 0.5), (xy[0] + u * 0.5, xy[1] + u * 0.5)], FLASH, 1.2)
+        gcx = self.gx0 + self.side * u / 2
+        z = self.cam_zoom(t)
+        cv.zoom(z, gcx, 0.5 * self.h)                                          # 只推网格
+        # ---- 左：大数字（不随镜头）
+        for i, (tb, txt) in enumerate(self.big):
+            if t < tb:
+                continue
+            pos, hpx, ang, r = self.sp.xform(i, t)
+            if r < -5:
+                continue
+            ss_, wid = text_strokes(txt)
+            unit = min(hpx / GLYPH_H, 0.24 * self.w * (self.sp.R ** r) / wid)
+            M = (pos[0] - wid / 2 * unit, pos[1] - GLYPH_H / 2 * unit, unit, 0.0)
+            lum = float(np.clip(1.0 + 0.32 * r, 0.22, 1.0))
+            final = (i == len(self.P))
+            fill = RED if (r > -0.5 and (t < self.t_outro or final)) else tuple(int(c * lum) for c in GREY)
+            for q, (st, xo) in enumerate(ss_):
+                t0 = tb + (1.0 + 0.5 * q) / FPS
+                prog = float(ease2((t - t0) * FPS / 2.5, 2.5)) if t >= t0 else 0.0
+                draw_stroke(cv, st, xo, M, prog, fill, spin=20.0, wt=0.62, trim=True)
+        # ---- 右：实时计数
+        struck = len(by)
+        crossings = len(hits)
+        remaining = self.N - 1 - struck
+        done = [kk for kk in range(len(self.P)) if t >= self.t_pass[kk] + 3.5 * self.beat]
+        nxt = self.P[done[-1] + 1] if done and done[-1] + 1 < len(self.P) else (17 if done else 2)
+        bound = nxt * nxt
+        confirmed = int(np.sum(np.array(self.primes) < bound)) if done else 2
+        X, CW = 0.765 * self.w, 0.20 * self.w
+        T2, T3, T4 = 13 * s, 12 * s, 10 * s
+        y = 44 * s
+        cv.text(X, y, "CANDIDATES LEFT", T3, MID); y += 16 * s
+        cv.text(X, y, f"{remaining:3d}", 30 * s, GREY); y += 42 * s
+        cv.text(X, y, f"OF {self.N - 1}  (2..{self.N})", T3, MID); y += 28 * s
+        cv.text(X, y, f"p NOW    {p_now if p_now else '-':>3}", T2, RED if p_now else MID); y += 18 * s
+        if p_now:
+            cv.text(X, y, f"FROM p^2 = {p_now * p_now}  STEP {p_now}", T3, MID)
+        y += 18 * s
+        cv.text(X, y, f"PROVEN PRIME  {confirmed:3d}", T2, GREY); y += 16 * s
+        cv.text(X, y, f"(every survivor < {bound if bound <= self.N else str(bound) + ' > N'})", T4, MID); y += 28 * s
+        cv.text(X, y, "NEW STRIKES BY p", T3, MID); y += 18 * s
+        firsts = {}
+        for n, ps in by.items():
+            firsts[ps[0]] = firsts.get(ps[0], 0) + 1
+        mx = max(1, (self.N - 1) // 2 - 1)
+        for p in self.P:
+            c = firsts.get(p, 0)
+            cv.text(X, y, f"{p:>2}", T3, RED if p == p_now else MID)
+            bx = X + 30 * s; bw = CW - 80 * s
+            cv.rect(bx, y + 4 * s, bx + bw, y + 10 * s, outline=DIM, width=1)
+            if c:
+                cv.rect(bx, y + 4 * s, bx + bw * c / mx, y + 10 * s, fill=RED if p == p_now else GREY)
+            cv.text(bx + bw + 8 * s, y, f"{c:3d}", T3, GREY if c else DIM)
+            y += 17 * s
+        y += 12 * s
+        cv.text(X, y, f"CROSSINGS {crossings:3d}", T3, MID); y += 16 * s
+        cv.text(X, y, f"RE-CROSSED {crossings - struck:3d}", T3, MID); y += 28 * s
+        if t >= self.t_outro:
+            cv.text(X, y, f"pi({self.N}) = {min(lit, len(self.primes))}", 15 * s, RED if lit >= len(self.primes) else GREY)
+        # ---- 左上 / 左下
+        cv.text(46 * s, 44 * s, "SIEVE OF ERATOSTHENES", 15 * s, GREY)
+        cv.text(46 * s, 64 * s, f"N = {self.N} = {self.side}^2   SIEVE WITH p <= {self.side}", T3, MID)
+        bar = int(t // (4 * self.beat)) + 1
+        cv.text(46 * s, self.h - 40 * s, f"{self.bpm:.0f} BPM   BAR {bar}   BEAT {int(t / self.beat) % 4 + 1}/4   t {t:6.3f} s   GRID x{z:5.3f}", T4, DIM)
+        info.update(p=p_now, crossings=crossings, struck=struck, remaining=remaining, proven=confirmed, primes_lit=lit,
+                    new_by_p=firsts, cam_zoom=round(z, 4))
+        return info
+
     def audio(self, sr=48000):
         """筛的声化：每次划格一个 4 ms 正弦嗒（行 r → 330·2^(−r/12) Hz，往下越低），每个 p 的第一拍一个 55 Hz 低音（120 ms）。"""
         n = int(self.T * sr) + sr
@@ -1020,7 +1320,8 @@ def render(scene, t0, t1, out, ss=3, audio=True, tmp=None, sheet_n=24):
 
 def build(kind, sn, a):
     if kind == "countdown":
-        old = dict(wt=1.0, delay=0.0, spin=90.0, guide=False, trim=False) if a.ver in ("v1", "v2") else dict(trim=False) if a.ver in ("v3", "v4") else {}
+        old = dict(wt=1.0, delay=0.0, spin=90.0, guide=False, trim=False) if a.ver in ("v1", "v2") else dict(trim=False) if a.ver in ("v3", "v4") \
+            else {} if a.ver == "v5" else dict(v6=True) if a.ver == "v6" else dict(v7=True)
         sc = Countdown(sn, t_release=a.release, scale=a.scale, **old)
         return sc
     st = {"v0": 1, "v1": 1, "v2": 2}.get(a.ver, 3)
@@ -1047,7 +1348,7 @@ def main():
     if a.palette != "cold" and not a.tag:
         a.tag = {"bwr": "_黑白红", "acid": "_酸性"}[a.palette]
     if a.kind == "sieve":                                           # 独立版：不读感官.json，输出到 MotionDesign/
-        sc = Sieve(scale=a.scale, v={"v1": 1, "v2": 2, "v3": 3}.get(a.ver, 4))
+        sc = Sieve(scale=a.scale, v={"v1": 1, "v2": 2, "v3": 3, "v4": 4, "v5": 5}.get(a.ver, 6))
         a.start = 0.0 if a.start is None else a.start
         a.end = sc.T if a.end is None else a.end
         outd = Path(a.out) if a.out else MD_DIR

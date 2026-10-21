@@ -123,6 +123,21 @@ class TestCountdownTruth(unittest.TestCase):
 
 
 @unittest.skipUnless(SENSE.exists(), "需要 感官.json")
+class TestCountdownV6(unittest.TestCase):
+    def test_v6_truth_and_legible_in_3_frames(self):
+        sn = json.loads(SENSE.read_text("utf-8"))
+        cd = G.Countdown(sn, scale=0.5, v7=True)
+        cd.spec = G.StepSpectrum(cd.beats[0] - 0.1, cd.release)
+        for i in range(16):
+            info = cd.frame(cd.beats[i] + 0.01, G.Canvas(cd.w, cd.h, 1))
+            self.assertEqual(info["beats_to_release"], 16 - i)
+            if i < 15:                                      # 👤主会话：新数字前 2–3 帧就要可辨认
+                progs = [pr for pr, _ in cd.digit_alpha(i, cd.beats[i] + 3.5 / G.FPS)]
+                self.assertGreater(min(progs), 0.7, i)
+                self.assertGreater(float(np.mean(progs)), 0.85, i)
+
+
+@unittest.skipUnless(SENSE.exists(), "需要 感官.json")
 class TestMatrixTruth(unittest.TestCase):
     def test_voices_and_matching(self):
         sn = json.loads(SENSE.read_text("utf-8"))
@@ -152,8 +167,32 @@ class TestSieveTruth(unittest.TestCase):
         self.assertEqual(info["remaining"], 39)
         self.assertEqual(info["struck"] + info["remaining"] + 1, 169)
         self.assertEqual(info["primes_lit"], 39)
+        sv5 = G.Sieve(scale=0.25, v=5)
+        i5 = sv5.frame(sv5.T - 0.01, G.Canvas(sv5.w, sv5.h, 1))
+        self.assertEqual(i5["proven"], 39)
+        self.assertEqual(sum(i5["new_by_p"].values()), i5["struck"])            # 每个合数恰好被「第一次」划一次
+        self.assertEqual(i5["new_by_p"][2], 83)                                   # 4..168 的偶数
+        mid = sv5.frame(sv5.t_pass[3] + 0.1, G.Canvas(sv5.w, sv5.h, 1))          # p = 7 这一遍：2/3/5 已完 → 49 以下的幸存者都已证明
+        self.assertEqual(mid["proven"], int(np.sum(G.primes_upto(48) < 49)))
         x = sv.audio()
         self.assertLessEqual(float(np.abs(x).max()), 0.8 + 1e-9)
+
+
+class TestSieveLayoutV6(unittest.TestCase):
+    def test_front_numeral_clears_previous_and_frame(self):
+        """v6：每个大数字落定（下一拍前）时，和退到 −1 层的上一个数字外接框不相交；也不出画（v5 的 13 / 39 叠在一起）"""
+        sv = G.Sieve(scale=1.0, v=6)
+        def box(i, t):
+            pos, hpx, _, r = sv.sp.xform(i, t)
+            ss_, wid = G.text_strokes(sv.big[i][1])
+            unit = min(hpx / G.GLYPH_H, 0.24 * sv.w * (sv.sp.R ** r) / wid)
+            return pos[0] - wid / 2 * unit, pos[1] - G.GLYPH_H / 2 * unit, pos[0] + wid / 2 * unit, pos[1] + G.GLYPH_H / 2 * unit
+        for i in range(1, len(sv.big)):
+            t = sv.big[i][0] + 0.45
+            a, b = box(i, t), box(i - 1, t)
+            inter = max(0, min(a[2], b[2]) - max(a[0], b[0])) * max(0, min(a[3], b[3]) - max(a[1], b[1]))
+            self.assertLess(inter, 0.06 * (a[2] - a[0]) * (a[3] - a[1]), i)
+            self.assertGreater(a[0], 0.03 * sv.w); self.assertLess(a[2], sv.gx0)
 
 
 class TestPalette(unittest.TestCase):
