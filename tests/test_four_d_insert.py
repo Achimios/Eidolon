@@ -281,6 +281,17 @@ class TestGoldenAge(unittest.TestCase):
         S, dS = F.hermite01(1.0, 0.2, 0.05)
         self.assertAlmostEqual(S, 1.0); self.assertAlmostEqual(dS, 0.05)
 
+    def test_camera_roll(self):
+        """roll = 0 与旧相机相同；roll 只绕视线转画框：eye / fwd 不变，right、up 仍正交单位，转了 roll 角"""
+        import torch
+        a = F.cam_basis(1.2, -0.1, 3.0, (0.1, 0.2, 0.0))
+        b = F.cam_basis(1.2, -0.1, 3.0, (0.1, 0.2, 0.0), roll=math.radians(25))
+        self.assertTrue(torch.allclose(a[0], b[0]) and torch.allclose(a[1], b[1]))
+        self.assertAlmostEqual(float(b[2] @ b[3]), 0.0, places=6)
+        self.assertAlmostEqual(float(b[2].norm()), 1.0, places=6)
+        self.assertAlmostEqual(float(a[2] @ b[2]), math.cos(math.radians(25)), places=6)
+        self.assertTrue(torch.allclose(F.camera(8, 6, 1.2, -0.1, 3.0)[1], F.camera(8, 6, 1.2, -0.1, 3.0, roll=0.0)[1]))
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)

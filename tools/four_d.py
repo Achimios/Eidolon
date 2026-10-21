@@ -401,7 +401,8 @@ class MeshSDF:
         """HUD 字体（consola）没有中文 → 中文名映射成 ASCII"""
         st = self.path.stem
         tr = {"测试": "test", "人台": "mannequin", "她": "her", "躯体核心": "torso_core", "蜷缩": "curled",
-              "无材质": "untextured", "有材质": "textured", "低模": "lowpoly", "高模": "highpoly", "有Normal": "normalmap"}
+              "无材质": "untextured", "有材质": "textured", "低模": "lowpoly", "高模": "highpoly", "有Normal": "normalmap",
+              "蜷缩抱膝": "curled_hugging_knees", "抱膝": "hugging_knees", "漂浮侧坐": "floating_sidesit", "手抚心": "hand_on_heart", "有贴图": "textured", "100万面": "1M"}
         s = "_".join(tr.get(p, p) for p in st.split("_"))
         return s if s.isascii() else "mesh"
 
@@ -699,20 +700,23 @@ def slice_fn(obj, R, c):
 
 
 # ---------- 球追踪 ----------
-def cam_basis(yaw=0.6, pitch=0.42, dist=5.2, target=(0.0, 0.0, 0.0)):
-    """相机在以 target 为心的球面上：eye = target + dist·(cos p sin y, sin p, cos p cos y)；返回 (eye, fwd, right, up)"""
+def cam_basis(yaw=0.6, pitch=0.42, dist=5.2, target=(0.0, 0.0, 0.0), roll=0.0):
+    """相机在以 target 为心的球面上：eye = target + dist·(cos p sin y, sin p, cos p cos y)；roll（弧度）= 绕视线转画框；返回 (eye, fwd, right, up)"""
     tg = torch.tensor(target, dtype=torch.float32, device=DEV)
     off = torch.tensor([math.cos(pitch) * math.sin(yaw), math.sin(pitch), math.cos(pitch) * math.cos(yaw)], device=DEV)
     eye = tg + dist * off
     fwd = -off
     right = torch.linalg.cross(fwd, torch.tensor([0.0, 1.0, 0.0], device=DEV)); right = right / right.norm()
     up = torch.linalg.cross(right, fwd)
+    if roll:
+        cr, sr = math.cos(roll), math.sin(roll)
+        right, up = cr * right + sr * up, -sr * right + cr * up
     return eye, fwd, right, up
 
 
-def camera(w, h, yaw=0.6, pitch=0.42, dist=5.2, fov=34.0, target=(0.0, 0.0, 0.0)):
+def camera(w, h, yaw=0.6, pitch=0.42, dist=5.2, fov=34.0, target=(0.0, 0.0, 0.0), roll=0.0):
     """>v<🧊四维切片-相机-透视相机绕 target（默认原点）；返回每个像素的 (ro, rd)"""
-    eye, fwd, right, up = cam_basis(yaw, pitch, dist, target)
+    eye, fwd, right, up = cam_basis(yaw, pitch, dist, target, roll)
     ys, xs = torch.meshgrid(torch.arange(h, device=DEV), torch.arange(w, device=DEV), indexing="ij")
     s = math.tan(math.radians(fov) / 2)
     u = (xs + 0.5 - w / 2) / (h / 2) * s
@@ -802,13 +806,13 @@ def sdf_ao(g, p, n, steps=5):
 
 
 def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55,
-           fov=34.0, target=(0.0, 0.0, 0.0), key=None, emit=0.0):
+           fov=34.0, target=(0.0, 0.0, 0.0), key=None, emit=0.0, roll=0.0):
     dist = dist or obj.cam
     """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）
     | sculpt（一盏硬主光 key 斜扫 + 软阴影 + AO + 镜面高光，几乎无补光 → 深黑；平切面照样自发光）"""
     hw, hh = w * ss, h * ss
     g = slice_fn(obj, R, c)
-    eye, rd = camera(hw, hh, yaw, pitch, dist, fov, target)
+    eye, rd = camera(hw, hh, yaw, pitch, dist, fov, target, roll)
     tracer = getattr(obj, "tracer", None)          # 生长物体：自己的追踪器（下界步长 + 真截面判命中），只对 R = I 有效
     if tracer is not None and not torch.allclose(R, torch.eye(4, device=R.device)):
         raise ValueError(f"{obj.name} 只支持 R = I（生长锥没有定义 4D 旋转后的下界）")
@@ -889,7 +893,7 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
     v = v * ok if look in ("surface", "sculpt") else v
     red = img(((0.32 - tang) / 0.22).clamp(0, 1) ** 1.5) * red_gain * ok
     if xray and obj.facets is None:
-        red = torch.maximum(red, _xray_tangency(obj, R, c, cam_basis(yaw, pitch, dist, target), hw, hh, fov=fov) * 0.75 * red_gain)
+        red = torch.maximum(red, _xray_tangency(obj, R, c, cam_basis(yaw, pitch, dist, target, roll), hw, hh, fov=fov) * 0.75 * red_gain)
     # 超采样 → 降到输出分辨率
     v = F.avg_pool2d(v[None, None], ss)[0, 0]
     red = F.avg_pool2d(red[None, None], ss)[0, 0]
@@ -1713,9 +1717,10 @@ class RiseSpec:
     相机：距离 d0 → d1 对数匀速拉远（全程），对准点从「手此刻的位置」平滑移到身体重心；yaw 匀速绕，pitch 线性抬高（结尾俯一点 → 孤独）"""
     def __init__(self, dur, fps=24, size=(1280, 720), grow=4.0, a0=0.22, a1=0.05, c_end=0.012, d0=1.05, d1=20.0,
                  yaw0=1.45, yaw_rate=0.07, pitch0=-0.04, pitch1=0.14, fov=24.0, key_az=-80.0, key_el=48.0, cut_glow=0.55,
-                 hud_band=96, hud_scale=0.75, cold=0.5, red_gain=1.0):
+                 hud_band=96, hud_scale=0.75, cold=0.5, red_gain=1.0, roll0=0.0, roll_rate=0.0, cam_ease=False):
         self.dur, self.fps, self.size, self.grow, self.a0, self.a1, self.c_end = dur, fps, size, grow, a0, a1, c_end
         self.d0, self.d1, self.yaw0, self.yaw_rate, self.pitch0, self.pitch1, self.fov = d0, d1, yaw0, yaw_rate, pitch0, pitch1, fov
+        self.roll0, self.roll_rate, self.cam_ease = roll0, roll_rate, cam_ease   # 弧度、弧度/秒；cam_ease：拉远用 smoothstep 收住（终点人物还大）
         self.key_az, self.key_el, self.cut_glow, self.hud_band, self.hud_scale, self.cold, self.red_gain = (
             key_az, key_el, cut_glow, hud_band, hud_scale, cold, red_gain)
         if not 0 < grow <= dur:
@@ -1751,11 +1756,11 @@ def rise_track(sp, s_max, geo):
         c, cv = hs * math.cos(ph), -hs * math.sin(ph) * w
         hp = o + h_perp + d * (hs * math.sin(ph))            # 手（第一个出生的部位）此刻在截面里的位置
         u = t / sp.dur
-        dist = sp.d0 * (sp.d1 / sp.d0) ** u
+        dist = sp.d0 * (sp.d1 / sp.d0) ** ((u * u * (3 - 2 * u)) if sp.cam_ease else u)
         m = u * u * (3 - 2 * u)
         tg = (1 - m) * hp + m * center
         out.append(dict(i=i, t=t, c=c, cv=cv, v=abs(cv), phi=math.degrees(ph), hand_v=hs * w, th=0.0, dist=dist,
-                        yaw=sp.yaw0 + sp.yaw_rate * t, pitch=sp.pitch0 + (sp.pitch1 - sp.pitch0) * u, target=tuple(float(x) for x in tg)))
+                        yaw=sp.yaw0 + sp.yaw_rate * t, pitch=sp.pitch0 + (sp.pitch1 - sp.pitch0) * u, roll=sp.roll0 + sp.roll_rate * t, target=tuple(float(x) for x in tg)))
     return out
 
 
@@ -1764,7 +1769,7 @@ def _rise_frame(obj, sp, k, prev_b, tag, rp=None):
     R = rot4()
     key = key_dir(sp.yaw0, sp.pitch0, sp.key_az, sp.key_el)
     v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, "sculpt", yaw=k["yaw"], pitch=k["pitch"], red_gain=sp.red_gain, dist=k["dist"],
-                    cut_glow=sp.cut_glow, fov=sp.fov, target=k["target"], key=key)
+                    cut_glow=sp.cut_glow, fov=sp.fov, target=k["target"], key=key, roll=k["roll"])
     rp = rp or RedPoint(*red.shape)
     red = rp(red)
     b = betti(obj, R, k["c"], n=64)
@@ -1777,7 +1782,7 @@ def _rise_frame(obj, sp, k, prev_b, tag, rp=None):
              f"   dc/dt = {k['cv']:+.3f}/s"
              f"     t = {k['t']:.3f} / {sp.dur:g} s",
              f"cam: dist {k['dist']:5.2f} (log-uniform pull-back {sp.d0:g} -> {sp.d1:g})  yaw {math.degrees(k['yaw']):6.1f}"
-             f"  pitch {math.degrees(k['pitch']):+.1f}  fov {sp.fov:g}  aim ({tg[0]:+.2f},{tg[1]:+.2f},{tg[2]:+.2f})"
+             f"  pitch {math.degrees(k['pitch']):+.1f}  roll {math.degrees(k['roll']):+.1f}  fov {sp.fov:g}  aim ({tg[0]:+.2f},{tg[1]:+.2f},{tg[2]:+.2f})"
              f"   key light az {sp.key_az:+.0f} el {sp.key_el:+.0f}",
              _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
              "red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32);  glow = cut face on the membrane (s = 0)"]
@@ -2045,6 +2050,8 @@ def main():
     r.add_argument("--rise-cam", default="1.05,20", help="相机距离 d0,d1（对数匀速拉远）")
     r.add_argument("--rise-pitch", default="-0.04,0.14", help="pitch 起,止（弧度）")
     r.add_argument("--rise-yaw", default="1.45,0.07", help="yaw0（弧度）, 匀速绕（弧度/秒）")
+    r.add_argument("--rise-roll", default="0,0", help="roll0（度）, 匀速 roll（度/秒）：绕视线转画框")
+    r.add_argument("--rise-ease", action="store_true", help="拉远收住：log 距离按 smoothstep 走（慢起慢收，终点人物仍大），不再对数匀速")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
         MESH.path, MESH.n, MESH.max_faces, MESH.lateral, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, a.sdf_faces, a.mesh_lateral, None
@@ -2084,7 +2091,9 @@ def main():
         y0, yr = (float(x) for x in a.rise_yaw.split(","))
         kz, ke = (float(x) for x in a.key.split(","))
         sp = RiseSpec(a.rise, a.fps, (w, h), a.rise_grow, a0, a1, d0=d0, d1=d1, yaw0=y0, yaw_rate=yr, pitch0=p0, pitch1=p1, fov=a.fov,
-                      key_az=kz, key_el=ke, cut_glow=a.cut_glow, hud_band=a.hud_band or 96, hud_scale=a.hud_scale, cold=a.cold)
+                      key_az=kz, key_el=ke, cut_glow=a.cut_glow, hud_band=a.hud_band or 96, hud_scale=a.hud_scale, cold=a.cold,
+                      roll0=math.radians(float(a.rise_roll.split(",")[0])), roll_rate=math.radians(float(a.rise_roll.split(",")[1])),
+                      cam_ease=a.rise_ease)
         track = rise_track(sp, s_max, (o, d, hand, center))
         print(f"  membrane: o = {o.tolist()}, d = {d.tolist()}, s_max = {s_max:.3f}, first-born (hand) = {hand.tolist()}, centre = {center.tolist()}")
         if a.plan:
