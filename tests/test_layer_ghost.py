@@ -127,6 +127,27 @@ class TestLayerGhost(unittest.TestCase):
         self.assertLess(corr1(0.5), corr1(1.0))                    # 相邻像素更不像 = 纹粒更细
         self.assertEqual(G.parse_set("sep_mul=2,n_layers=7"), {"sep_mul": 2.0, "n_layers": 7})
 
+    def test_versions_A_B(self):
+        """A 回忆：阶梯停帧帧号；B 清晰：g = 0 → 只剩第 0 层（无纹理 / 散射 / bloom）= 干净画面；x 轴分裂的层位移逐像素精确"""
+        idx = [G.hold_index(i, 10) for i in range(12)]
+        self.assertEqual(idx, [0, 0, 0, 2, 2, 4, 4, 4, 7, 7, 9, 9])   # 每 2.4 帧换一张源帧
+        self.assertEqual([G.hold_index(i, 0) for i in range(5)], list(range(5)))
+        img = rand_img(60, 80)
+        q = G.params_from_sense(0.9, 0.9, 0.9, 0.0, G.Params(style="split", **BARE))
+        self.assertEqual((q.n_vis, q.scatter, q.grain, q.bloom, q.chan_sep), (1.0, 0.0, 0.0, 0.0, 0.0))
+        np.testing.assert_array_equal(G.run(img, q), img)
+        H, W, y0, x0 = 30, 120, 15, 10
+        dot = np.zeros((H, W, 3), np.float32)
+        dot[y0, x0] = 1.0
+        px = G.Params(n_layers=3, n_vis=3, spacing=8.0, growth=1.0, falloff=1.0, edge="zero", axis="x",
+                      **{**BARE, "chan_sep": 2.0})
+        o = G.run(dot, px)
+        for k in range(3):
+            self.assertAlmostEqual(float(o[y0, x0 + 8 * k - 2 * k, 0]), 1 / 3, places=6)
+            self.assertAlmostEqual(float(o[y0, x0 + 8 * k, 1]), 1 / 3, places=6)
+            self.assertAlmostEqual(float(o[y0, x0 + 8 * k + 2 * k, 2]), 1 / 3, places=6)
+        self.assertEqual([a for a, _ in G.split_schedule([(1, 1)] * 4, "alt")], ["y", "x", "y", "x"])
+
     def test_tone_curve(self):
         x = np.linspace(0, 1, 11)
         np.testing.assert_array_equal(G.tone_curve(x, 0.0), x)

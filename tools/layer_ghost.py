@@ -40,6 +40,10 @@
   python tools/layer_ghost.py clip [--palette cold] # 样片/21_多层重影_全息女性_v1.mp4（整段裁肩 v2 → 45.12 s 起，配乐）+ .json + 接触表
   python tools/layer_ghost.py sweep                  # 静帧/25e 2×3 扫参（每格 1:1 裁切 + 参数）+ 25b_v3（BEST 组合）
   python tools/layer_ghost.py clip --best --name 21_多层重影_全息女性_v2   # 👤「更多色散、更细腻」的组合
+  两个版本（👤「重影现在的效果很好」）：
+    A 回忆：clip --best --fps-hold 10 --name 21_多层重影_A回忆_v1        （源 10 fps 阶梯停帧，层 / 纹理每帧仍在动）
+            clip --best --fps-hold 10 --glitch --name 21_多层重影_A回忆_瓦解_v1   （强起音叠 face_glitch：瀑布图行 + 本片，门控 = 效果强度）
+    B 清晰：clip --best --style split --name 21_多层重影_B清晰分裂_v1     （平时干净；强起音层沿 y / x 轮流分裂 4 帧后弹回）
   任意 Params 字段：clip --set "sep_mul=2,chan_g=0.5,tex_scale=0.5,hl_smooth=0.6,spacing_mul=0.8,n_layers=7"
   倍率旋钮（感官映射之后再乘）：spacing_mul、sep_mul、chan_g（G 错位 = chan_g × R/B 错位）、tex_scale（纹粒尺寸）、grain_mul、hl_smooth（白处纹粒减弱）
 """
@@ -247,6 +251,18 @@ class Params:
     tex_scale: float = 1.0          # 纹粒尺寸 ×（< 1 更细）
     grain_mul: float = 1.0          # 纹粒强度 ×
     hl_smooth: float = 0.0          # 高光处纹粒减弱：T → 1 + (T − 1)(1 − hl_smooth·L²)，L = 该层源亮度（白处更平，像参考图）
+    # ---- 层错开的方向
+    axis: str = "y"                 # y = 竖向错开（默认）| x = 横向错开（通道分离也沿 x）
+    direction: int = 1              # +1 向下 / 向右；−1 向上 / 向左
+    # ---- 两个版本（👤 2026-10-22「重影现在的效果很好」→ A 回忆 / B 清晰分裂），clip 用
+    style: str = "memory"           # memory = A 回忆（常开底强度 + 脉冲）| split = B 清晰（平时干净，强起音才分裂）
+    fps_hold: float = 0.0           # > 0 → 源画面按这个帧率阶梯停帧（如 10 fps），层 / 纹理 / 门控仍每帧在动（「低帧率的回忆」）
+    split_axis: str = "alt"         # B：每次分裂的方向 y | x | alt（y、x 轮流）| random
+    split_frames: int = 4           # B：分裂满幅保持几帧
+    split_tau: float = 0.7          # B：之后弹回的 exp 衰减（帧）
+    split_px: float = 22.0          # B：分裂时的层距（参考像素，再 × (0.6 + 0.8·威胁)）
+    glitch: bool = False            # A_瓦解：强起音处在多层重影之上叠 face_glitch（瀑布图行 + 本片配色，门控 = 效果强度）
+    glitch_thr: float = 0.6         # 瓦解脉冲的威胁阈值
     seed: int = 7
     sense: dict = field(default_factory=dict)
 
@@ -271,6 +287,17 @@ PRESETS = {
 def params_from_sense(threat, tension, hunger, g=1.0, base=None, **kw):
     """感官 + 门控 g → 参数（映射表见模块 docstring）"""
     p = Params(**{**(asdict(base) if base else {}), **kw})
+    if p.style == "split":          # B 清晰：g = 0 → 只剩第 0 层、无纹理 / 散射 / bloom = 干净的画面；分裂时一起出来
+        p.spacing = p.split_px * (0.6 + 0.8 * threat)
+        p.n_vis = 1 + (p.n_layers - 1) * g
+        p.chan_sep = (0.3 + 2.5 * tension) * g
+        p.scatter_r = 10 + 50 * hunger
+        p.scatter = 0.5 * g
+        p.grain = 0.6 * g
+        p.bloom = 0.4 * g
+        p.sense = {"threat": round(float(threat), 3), "tension": round(float(tension), 3),
+                   "hunger": round(float(hunger), 3), "gate": round(float(g), 3)}
+        return p
     p.spacing = (4 + 16 * threat) * (0.3 + 0.7 * g)
     p.n_vis = 1 + (p.n_layers - 1) * (0.35 + 0.65 * threat) * g
     p.chan_sep = (0.3 + 2.5 * tension) * g
@@ -287,8 +314,8 @@ def layer_offsets(p: Params, unit):
     """[(dy_k, dx_k, (sep_R, sep_G, sep_B))]：整数像素"""
     out = []
     for k in range(p.n_layers):
-        dy = int(round(unit * p.spacing * p.spacing_mul * (k ** p.growth))) if k else 0
-        dx = int(round(p.slant * dy))
+        d = int(round(p.direction * unit * p.spacing * p.spacing_mul * (k ** p.growth))) if k else 0
+        dy, dx = (d, int(round(p.slant * d))) if p.axis != "x" else (int(round(p.slant * d)), d)
         s = unit * p.chan_sep * p.sep_mul * k
         out.append((dy, dx, (int(round(-s)), int(round(p.chan_g * s)), int(round(s)))))
     return out
@@ -340,7 +367,8 @@ def run(img, p: Params, bank=None, stages=False):
     lsrc = np.clip(lum(src), 0, 1) if p.hl_smooth > 0 else None
     if use_tex and bank is None:
         bank = TextureBank()
-    blurred = gblur(src, u * p.scatter_r, u * p.scatter_r * p.aniso) if p.scatter > 0 else None
+    sr = u * p.scatter_r
+    blurred = (gblur(src, sr, sr * p.aniso) if p.axis != "x" else gblur(src, sr * p.aniso, sr)) if p.scatter > 0 else None
     sharp_plain = np.zeros_like(src)     # 只有层（无色散 / 纹理 / 散射）—— 给分解表
     disp = np.zeros_like(src)
     tex_only = np.zeros_like(src)
@@ -365,7 +393,8 @@ def run(img, p: Params, bank=None, stages=False):
             T = 1 + (T - 1) * (1 - p.hl_smooth * Lk * Lk)
         for c in range(3):
             a = w[k] * tint[k, c]
-            lay = a * shift(src[..., c], dy + sep[c], dx, p.edge)
+            cy, cx = (dy + sep[c], dx) if p.axis != "x" else (dy, dx + sep[c])
+            lay = a * shift(src[..., c], cy, cx, p.edge)
             if stages:
                 sharp_plain[..., c] += w[k] * shift(src[..., c], dy, dx, p.edge)
                 disp[..., c] += lay
@@ -375,7 +404,7 @@ def run(img, p: Params, bank=None, stages=False):
             if stages:
                 tex_only[..., c] += lay * (Tc if Tc is not None else 1.0)
             if blurred is not None:
-                lay = (1 - p.scatter) * lay + p.scatter * a * shift(blurred[..., c], dy + sep[c], dx, p.edge)
+                lay = (1 - p.scatter) * lay + p.scatter * a * shift(blurred[..., c], cy, cx, p.edge)
             out[..., c] += lay * (Tc if Tc is not None else 1.0)
     if stages:
         st.append((f"1  {p.n_layers} layers, vis {p.n_vis:.1f}, dy_k = round(u·{p.spacing:.1f}·k^{p.growth})  "
@@ -591,6 +620,35 @@ def contact(frames, path, cols=4):
     sheet.save(path, quality=88)
 
 
+def hold_index(i, fps_hold, fps=FPS):
+    """阶梯停帧：第 i 个输出帧显示的源帧号。fps_hold ≤ 0 → i（不停帧）"""
+    if fps_hold <= 0 or fps_hold >= fps:
+        return i
+    return int(np.floor(np.floor(i * fps_hold / fps + 1e-9) * fps / fps_hold + 1e-9))
+
+
+def split_schedule(fired, axis_rule, seed=0):
+    """B：每次分裂的方向 [(axis, direction)]。alt = y、x 轮流；random = 随机；方向（±）随机"""
+    rng = np.random.default_rng(seed)
+    out = []
+    for j, _ in enumerate(fired):
+        ax = {"alt": "yx"[j % 2], "random": "yx"[int(rng.integers(2))]}.get(axis_rule, axis_rule)
+        out.append((ax, int(rng.choice([-1, 1]))))
+    return out
+
+
+def load_glitch(src, n):
+    """face_glitch 模块 + 遮罩（先找 face_glitch 的遮罩缓存，没有才跑 BiRefNet）"""
+    import face_glitch as F
+    cdir = ROOT / "cache" / "face_glitch"
+    hits = [h for h in sorted(cdir.glob(f"masks_{src.stem}_0.000_*.npy")) if int(h.stem.rsplit("_", 1)[1]) >= n]
+    if hits:
+        return F, np.load(hits[0])[:n].astype(np.float32) / 255, f"BiRefNet (cache {hits[0].name})"
+    mt = F.get_matter()
+    fr = video_frames(src, 0, n)
+    return F, np.stack([F.get_mask(mt, f)[0] for f in fr]), "BiRefNet"
+
+
 def cmd_clip(a):
     import imageio_ffmpeg
     ff = imageio_ffmpeg.get_ffmpeg_exe()
@@ -604,54 +662,97 @@ def cmd_clip(a):
     t_play = a.start + np.arange(n) / FPS
     th = np.asarray(ch["threat"])
     on = np.asarray(sn["events"]["onsets"])
-    g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=a.base)
-    bank = TextureBank()
     extra = {**(BEST if a.best else {}), **parse_set(a.set)}
+    for k_, v_ in (("style", a.style), ("fps_hold", a.fps_hold), ("split_axis", a.split_axis),
+                   ("split_frames", a.split_frames), ("glitch", a.glitch)):
+        if v_ is not None:
+            extra[k_] = v_
+    base = Params(**{"palette": a.palette, "unit": a.unit, **extra})
+    if base.style == "split":       # B：平时 0（干净），强起音满幅 split_frames 帧后快速弹回
+        g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=0.0, hold=base.split_frames, tau=base.split_tau)
+    else:
+        g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=a.base)
+    sched = split_schedule(fired, base.split_axis, seed=3) if base.style == "split" else []
+    fired_t = [o for o, _ in fired]
+    if base.glitch:                 # 瓦解只在强起音：满 2 帧 + exp τ 1.5 帧（face_glitch 的脉冲形状），门控 = 效果强度
+        F, masks, msrc = load_glitch(src, n)
+        g_fg, fired_fg = pulses(t_play, on, th, thr=base.glitch_thr, min_gap=a.min_gap, base=0.0, hold=2, tau=1.5)
+        hist = F.BoundaryHistory()
+    bank = TextureBank()
     CACHE.mkdir(parents=True, exist_ok=True)
     vtmp = CACHE / f"{a.name}_noaudio.mp4"
     pipe = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                              "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", str(vtmp)],
                             stdin=subprocess.PIPE)
+    if base.style == "split":
+        mapping = {"threat": f"split spacing = {base.split_px}*(0.6+0.8*threat) ref-px; n_vis = 1+(N-1)g",
+                   "tension": "chan_sep = (0.3+2.5*tension)*g",
+                   "hunger": "scatter sigma = 10+50*hunger ref-px; s = 0.5g; grain 0.6g; bloom 0.4g (g = 0 -> clean)",
+                   "gate": f"pulse only, base 0: threat peak >= {a.thr}, gap >= {a.min_gap}s; full {base.split_frames} f then exp tau "
+                           f"{base.split_tau} f; axis per split = {base.split_axis}, direction random"}
+    else:
+        mapping = {"threat": "spacing = (4+16*threat)*(0.3+0.7g) ref-px; n_vis = 1+(N-1)*(0.35+0.65*threat)*g",
+                   "tension": "chan_sep = (0.3+2.5*tension)*g ref-px per layer (R-, B+)",
+                   "hunger": "scatter sigma_y = 10+50*hunger ref-px; scatter s = 0.25+0.35g",
+                   "gate": f"g = max({a.base}, pulse); pulse on onsets with threat peak >= {a.thr} and >= {a.min_gap}s after the last fired; "
+                           f"full 2 f then exp tau 3 f"}
     side = {"tool": "tools/layer_ghost.py clip", "source": src.name, "play_start": a.start, "dur": dur, "frames_n": n,
-            "palette": a.palette, "sense_offset": 0.0,
+            "palette": a.palette, "sense_offset": 0.0, "style": base.style, "fps_hold": base.fps_hold,
             "model": "N integer-shifted copies x real texture mask (ref high-pass) + anisotropic scatter + bloom, additive on black, tone curve. NO displacement.",
-            "mapping": {"threat": "spacing = (4+16*threat)*(0.3+0.7g) ref-px; n_vis = 1+(N-1)*(0.35+0.65*threat)*g",
-                        "tension": "chan_sep = (0.3+2.5*tension)*g ref-px per layer (R-, B+)",
-                        "hunger": "scatter sigma_y = 10+50*hunger ref-px; scatter s = 0.25+0.35g",
-                        "gate": f"g = max({a.base}, pulse); pulse on onsets with threat peak >= {a.thr} and >= {a.min_gap}s after the last fired; "
-                                f"full 2 f then exp tau 3 f",
-                        "seed": f"new texture/seed every {a.hold} frames and at fired pulses"},
-            "knobs": extra, "fired": fired, "frames": []}
+            "mapping": mapping, "seed": f"new texture/seed every {a.hold} frames and at fired pulses",
+            "knobs": extra, "fired": fired, "splits": [[o, ax, d] for (o, _), (ax, d) in zip(fired, sched)], "frames": []}
+    if base.glitch:
+        side["glitch"] = {"mask": msrc, "fired": fired_fg,
+                          "law": "face_glitch.run on top of the layer-ghost frame (waterfall rows, place_dx 0), params_from_sense -> "
+                                 "scale_params(g_fg) = strength gate (not opacity), palette ours; shown only where g_fg > 0.02; run every frame "
+                                 "so the waterfall history stays continuous"}
     seed, t0 = 100, time.time()
-    fired_t = [o for o, _ in fired]
     thumbs, every = [], max(1, n // 16)
-    for i, f in enumerate(frames):
+    cur = (base.axis, base.direction)
+    for i in range(n):
         tp = t_play[i]
+        j = hold_index(i, base.fps_hold)
+        f = frames[j]
         k = min(int(round(tp * FPS)), len(th) - 1)
-        if i % a.hold == 0 or any(abs(o - tp) < 0.5 / FPS for o in fired_t):
+        hit = [q for q, o in enumerate(fired_t) if abs(o - tp) < 0.5 / FPS]
+        if i % a.hold == 0 or hit:
             seed += 1
+        if hit and sched:
+            cur = sched[hit[0]]
         p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k], float(g[i]),
-                              Params(**{"palette": a.palette, "unit": a.unit, **extra, "seed": seed}))
+                              Params(**{**asdict(base), "seed": seed, "axis": cur[0], "direction": cur[1]}))
         out = run(f, p, bank)
+        tag = ""
+        if base.glitch:
+            gf = float(g_fg[i])
+            fp = F.params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k],
+                                     F.Params(seed=seed, waterfall=True, place_dx=0))
+            fo, fm = F.run(out, masks[j], F.scale_params(fp, gf), hist=hist)
+            if gf > 0.02:
+                out = F.PALETTES["ours"][1](fo, fm, seed)
+                tag = f"  GLITCH {gf:.2f}"
         im = to_im(out)
         if a.hud:
-            label(im, [f"t = {tp:6.3f} s (play)   gate {g[i]:.2f}   threat {p.sense['threat']:.2f}  tension {p.sense['tension']:.2f}  "
-                       f"hunger {p.sense['hunger']:.2f}"] + p.hud(W), s=0.8, color=(130, 136, 142))
+            label(im, [f"t = {tp:6.3f} s (play)   src frame {j}   gate {g[i]:.2f}   threat {p.sense['threat']:.2f}  "
+                       f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   style {p.style}  axis {p.axis}{p.direction:+d}{tag}"]
+                  + p.hud(W), s=0.8, color=(130, 136, 142))
         pipe.stdin.write(np.asarray(im).tobytes())
-        if i % every == 0:
-            thumbs.append((f"{tp:.2f}s  gate {g[i]:.2f}  threat {p.sense['threat']:.2f}", im))
-        side["frames"].append({"i": i, "t_play": round(float(tp), 3), **p.sense, "seed": seed,
-                               "spacing": round(p.spacing, 2), "n_vis": round(p.n_vis, 2), "chan_sep": round(p.chan_sep, 2),
-                               "scatter_r": round(p.scatter_r, 1), "scatter": round(p.scatter, 2)})
+        if i % every == 0 or (hit and len(thumbs) < 24):
+            thumbs.append((i, f"{tp:.2f}s  gate {g[i]:.2f}  {p.style} {p.axis}{tag}", im))
+        side["frames"].append({"i": i, "t_play": round(float(tp), 3), "src_frame": j, **p.sense, "seed": seed, "axis": p.axis,
+                               "direction": p.direction, "spacing": round(p.spacing, 2), "n_vis": round(p.n_vis, 2),
+                               "chan_sep": round(p.chan_sep, 2), "scatter_r": round(p.scatter_r, 1), "scatter": round(p.scatter, 2),
+                               **({"glitch_gate": round(float(g_fg[i]), 3)} if base.glitch else {})})
     pipe.stdin.close()
     pipe.wait()
-    print(f"{n} 帧  {time.time() - t0:.1f}s  脉冲 {fired}")
+    print(f"{n} 帧  {time.time() - t0:.1f}s  脉冲 {fired}" + (f"  瓦解 {fired_fg}" if base.glitch else ""))
     out = outname(S.MV / "样片" / f"{a.name}.mp4")
     subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(vtmp), "-ss", f"{a.start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
                     "-t", f"{dur:.3f}", str(out)], check=True)
     Path(str(out) + ".json").write_text(json.dumps(side, ensure_ascii=False, indent=1), "utf-8")
-    contact(thumbs, outname(out.with_name(out.stem + "_接触表.jpg")))
+    thumbs = sorted(thumbs, key=lambda x: x[0])[:24]
+    contact([(lab, im) for _, lab, im in thumbs], outname(out.with_name(out.stem + "_接触表.jpg")))
     print("->", out)
 
 
@@ -682,6 +783,11 @@ def main():
     s2.add_argument("--hold", type=int, default=4, help="纹理 / 种子保持几帧")
     s2.add_argument("--hud", action=argparse.BooleanOptionalAction, default=True)
     s2.add_argument("--best", action="store_true", help="用扫参挑出的组合 BEST（25b_v3 那组）")
+    s2.add_argument("--style", default=None, choices=["memory", "split"], help="memory = A 回忆（默认）| split = B 清晰分裂")
+    s2.add_argument("--fps-hold", type=float, default=None, help="源画面阶梯停帧的帧率（如 10）；层 / 纹理仍每帧在动")
+    s2.add_argument("--split-axis", default=None, choices=["y", "x", "alt", "random"], help="B：分裂方向")
+    s2.add_argument("--split-frames", type=int, default=None, help="B：分裂满幅保持几帧")
+    s2.add_argument("--glitch", action="store_true", default=None, help="A_瓦解：强起音处叠 face_glitch（瀑布图行 + 本片）")
     s2.add_argument("--set", default="", help='覆盖任意 Params 字段，如 "sep_mul=2,chan_g=0.5,tex_scale=0.5,n_layers=7"（在 --best 之上）')
     a = ap.parse_args()
     {"sheet": cmd_sheet, "clip": cmd_clip, "sweep": cmd_sweep}[a.cmd](a)
