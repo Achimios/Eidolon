@@ -48,7 +48,7 @@
 | 下游要读感官 / stems | ⭐`__Eidolon_详细规则.md` |
 | 有哪些数学效果、各说什么情绪 | `_设计/效果库.md`（跨作品的视觉词汇表） |
 | 调生成服务（Seedream / Seedance / Tripo / Neural4D） | `_设计/接口_生成.md`、`_设计/接口_Tripo.md`、`_设计/接口_Neural4D.md`（能力 + 实测 + 坑）；封装在 `src/ark.py`、`src/tripo.py`、`src/neural4d.py`。⭐出视频流程：Seedream 多候选（简单图 flash）→ 👤挑 → Seedance 2.5 草稿 → 👤挑 → 正式 |
-| 换电脑 / 复现 | `-给人类的解释/换电脑怎么复现.md`（两个仓库都没有远端；大文件不进 git） |
+| 换电脑 / 复现 | `-给人类的解释/换电脑怎么复现.md`（GitHub 私有库 Achimios/Eidolon、Achimios/Projekt_Visual；大文件不进 git；push 要走代理） |
 | 某个工具怎么用 | `-给人类的解释/工具一览.md`；每个 `tools/*.py` 顶部 docstring |
 
 `_` 开头给 AI 读，`-` 开头给人读。接手先读 `__where_continue.md`。
