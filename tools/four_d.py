@@ -16,6 +16,8 @@ HUD 的 b0 b1 b2 是在粗体素网格上真数的 Betti 数（连通块 / 洞 /
   python tools/four_d.py --obj mesh_spin --insert 3.16 --look sculpt --fov 24 --target 0,0.22,0.05 --yaw0 1.32 --yaw-rate 0.157 \
       --key=-80,48 --red-point --cold 0.5 --v0 70 --v-end 8 --tau 1.1 --song-t0 57.94 --plot x.png ...
       # GoldenAge 版（👤2026-10-22）：侧面特写、长焦、相机绕 target 匀速转，一盏硬主光 + 软阴影 + AO，只留一个红点；--plot 运动速度图
+  python tools/four_d.py --emerge 5.6 --mesh 3D/她.glb --sdf-res 256 --sdf-faces 300000 --out x.mp4 --contact x.jpg --plot x.png --song-t0 161.14
+      # 浮现（👤2026-10-22）：4D 测地锥 —— 超平面扫过，她从手指尖沿身体长进三维；相机贴着手开始、对数匀速拉远到虚空里很小的一个人
   python tools/four_d.py --sheet [--out x.jpg]   # 总览接触表（6 行物体 × 6 列切片 / 角度）
   python tools/four_d.py --list
 --out 以 .mp4 结尾 → 视频（1920x1080, 24 fps）；否则当目录，写 PNG 帧。
@@ -491,6 +493,201 @@ MESH = MeshSDF(MESH_DEFAULT)
 OBJS.update(mesh_objs(MESH))
 
 
+# ---------- 生长：从一点（手）长进三维（👤2026-10-22「从另一个维度浮现，从手开始」） ----------
+_NB26 = [(dz, dy, dx) for dz in (-1, 0, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dz, dy, dx) != (0, 0, 0)]
+CHAMFER_SLACK = 1.09     # 26 邻接倒角距离最多高估欧氏距离 ~8 %（方向 (2,1,0)：(√2+1)/√5 = 1.080）→ 下界要除以它
+
+
+def chamfer_relax(D, h, mask=None, max_iter=6000, check=16):
+    """>v<🧊四维切片-生长-26 邻接倒角距离的 min-plus 松弛（Bellman–Ford，GPU）：D(x) ← min(D(x), D(x+o) + |o|·h)。
+    mask 给了：只在 mask 里传播（体内测地距离，沿结构走，不跨缝）；没给：全空间（欧氏 1-Lipschitz 下包络）。有限步内精确收敛"""
+    n0, n1, n2 = D.shape
+    inf = torch.tensor(float("inf"), device=D.device)
+    for it in range(max_iter):
+        P = F.pad(D[None, None], (1, 1, 1, 1, 1, 1), value=float("inf"))[0, 0]
+        best = D
+        for dz, dy, dx in _NB26:
+            best = torch.minimum(best, P[1 + dz:1 + dz + n0, 1 + dy:1 + dy + n1, 1 + dx:1 + dx + n2] + h * math.sqrt(dz * dz + dy * dy + dx * dx))
+        if mask is not None:
+            best = torch.where(mask, best, inf)
+        if it % check == check - 1 and torch.equal(best, D):
+            return best, it + 1
+        D = best
+    return D, max_iter
+
+
+class Grow:
+    """>v<🧊四维切片-生长-4D 物体 O = { (p, w) : f3(p) ≤ 0 且 D(p) ≤ K·(w − w0) }：身体 × 一根以 seed 为顶点的「测地锥」。
+    超平面 w = c 切出来 = 身体里离 seed 测地距离 ≤ r = K(c − w0) 的部分 → c 往上扫，她从 seed（手指尖）沿身体结构长出来。
+    D = 体内 26 邻接倒角测地距离（只在体素 f3 < 0 里传播 → 垂着的手离大腿再近也不会跳过去），轻微平滑 + 顶点处双曲抹圆
+    D_s = √(D² + a²) − a（锥尖变光滑 → 刚出生那一刻超平面与 4D 表面真相切 → 红点）。
+    D_L = D 的欧氏 1-Lipschitz 下包络（全空间松弛）：max(f3, (D_L − r)/1.09) 是到截面的距离下界 → 球追踪 / 阴影 / AO 用它；
+    真截面（命中判定、法向、平切面）用 D。体外的 D = 法向延拓（取最近体内值，8 层外常数）。体内连不到 seed 的碎块（体素孤岛）从最近的已长部分「跳」过去，数量会打印"""
+    def __init__(self, msh, seed_side=1.0, K=1.0, apex=0.03, smooth=1, seed=None, ext_layers=8):
+        self.msh, self.seed_side, self.K, self.apex, self.smooth, self.seed_xyz = msh, seed_side, K, apex, smooth, seed
+        self.ext_layers = ext_layers
+        self.D = None
+
+    def build(self):
+        if self.D is not None:
+            return
+        t0 = time.time()
+        if self.msh.vol is None:
+            self.msh.load()
+        vol = self.msh.vol[0, 0]
+        n = vol.shape[0]
+        h = 2 * MESH_B / (n - 1)
+        self.h, self.n = h, n
+        inside = vol < 0
+        ax = torch.linspace(-MESH_B, MESH_B, n, device=DEV)
+        Z, Y, X = torch.meshgrid(ax, ax, ax, indexing="ij")
+        if self.seed_xyz is None:
+            self.seed_xyz = hand_tip(inside, X, Y, Z, self.seed_side)
+        s = torch.tensor(self.seed_xyz, device=DEV)
+        d2 = (X - s[0]) ** 2 + (Y - s[1]) ** 2 + (Z - s[2]) ** 2
+        d2 = torch.where(inside, d2, torch.tensor(float("inf"), device=DEV))
+        si = int(torch.argmin(d2))
+        D0 = torch.full_like(vol, float("inf")).reshape(-1)
+        D0[si] = 0.0
+        D, it_g = chamfer_relax(D0.reshape(vol.shape), h, inside)
+        reach = torch.isfinite(D)
+        self.unreached = int((inside & ~reach).sum())
+        inf = torch.tensor(float("inf"), device=DEV)
+        # 体外：法向延拓（一层层往外，取已有邻居的平均）—— 不能用 Lipschitz 下包络：那会把手的小值隔空灌到大腿表面，
+        # 表面（体内体外体素之间插值）比体内先长 → 皮肤上一片蕾丝状的「提前生长」（v0 实测：大腿表面 0.7，体内 1.33）
+        if self.unreached:
+            H0, _ = chamfer_relax(torch.where(reach, D, inf), h)
+            D = torch.where(inside & ~reach, H0, D)    # 孤岛：从最近的已长部分「跳」过去
+        known = inside.clone()
+        val = torch.where(known, D, torch.zeros_like(D))
+        for _ in range(self.ext_layers):
+            kf = known.float()[None, None]
+            num = F.avg_pool3d((val * known.float())[None, None], 3, 1, 1)[0, 0]
+            den = F.avg_pool3d(kf, 3, 1, 1)[0, 0]
+            new = (~known) & (den > 0)
+            val = torch.where(new, num / den.clamp(min=1e-9), val)
+            known = known | new
+        field = torch.where(known, val, torch.full_like(val, float(val[known].max()) + 1.0))   # 再远：常数（那里 f3 早就 ≫ 0）
+        for _ in range(self.smooth):              # 倒角距离的等值面是多面体 → 轻微平滑（体内体外一起，seed 附近对称）
+            field = F.avg_pool3d(F.pad(field[None, None], (1, 1, 1, 1, 1, 1), mode="replicate"), 3, 1)[0, 0]
+            field[si // (n * n), (si // n) % n, si % n] = 0.0
+        field = torch.sqrt(field * field + self.apex ** 2) - self.apex   # 锥尖抹圆（单调变换，不改先后顺序）
+        DL, it_l = chamfer_relax(torch.where(inside, field, inf), h)  # 下界用：只认体内的值
+        Dfield = field
+        self.Dmax = float(Dfield[inside].max())
+        self.D = Dfield[None, None].contiguous()
+        self.DL = DL[None, None].contiguous()
+        self.inside = inside
+        self.seed_idx = si
+        cent = torch.stack([X[inside].mean(), Y[inside].mean(), Z[inside].mean()])
+        self.center = tuple(float(x) for x in cent)
+        print(f"  grow: geodesic {n}^3 from seed {tuple(round(x, 3) for x in self.seed_xyz)}  ({it_g} relax iters; Lipschitz hull {it_l});"
+              f" D_max = {self.Dmax:.3f}; unreached interior voxels {self.unreached} / {int(inside.sum())}; {time.time() - t0:.1f}s", flush=True)
+
+    def _samp(self, G, x, y, z):
+        q = torch.stack([x, y, z], -1).reshape(-1, 3).clamp(-MESH_B, MESH_B)
+        return F.grid_sample(G, (q / MESH_B).reshape(1, -1, 1, 1, 3), mode="bilinear", padding_mode="border",
+                             align_corners=True).reshape(x.shape)
+
+    def dist(self, x, y, z):
+        self.build()
+        return self._samp(self.D, x, y, z)
+
+    def r_of(self, c, w0=0.0):
+        return self.K * (c - w0)
+
+    def f(self, p):
+        """4D：max( f3(p), (D(p) − K w) / √(1 + K²) )   （w0 = 0）"""
+        x, y, z, w = _cols(p)
+        return torch.maximum(self.msh(x, y, z), (self.dist(x, y, z) - self.K * w) / math.sqrt(1 + self.K ** 2))
+
+    def cap(self, p):
+        x, y, z, w = _cols(p)
+        return (self.dist(x, y, z) - self.K * w) / math.sqrt(1 + self.K ** 2) - self.msh(x, y, z)
+
+    def lb(self, c):
+        """3D 截面（w = c）距离的下界：max(f3, (D_L − r) / 1.09)"""
+        self.build()
+        r = self.r_of(c)
+
+        def g(x):
+            return torch.maximum(self.msh(x[:, 0], x[:, 1], x[:, 2]), (self._samp(self.DL, x[:, 0], x[:, 1], x[:, 2]) - r) / CHAMFER_SLACK)
+        return g
+
+    def tracer(self, c, eye, rd, bound, iters=420, eps=6e-4):
+        """球追踪：步长用下界 lb；lb 很小但真截面 g > 半个体素（缝边上下界偏松的地方）→ 不算命中，小步继续"""
+        self.build()
+        lb = self.lb(c)
+        r = self.r_of(c)
+
+        def true_g(x):
+            return torch.maximum(self.msh(x[:, 0], x[:, 1], x[:, 2]), (self.dist(x[:, 0], x[:, 1], x[:, 2]) - r) / math.sqrt(1 + self.K ** 2))
+        n = rd.shape[0]
+        b = (eye[None] * rd).sum(1)
+        disc = b * b - (eye @ eye - bound * bound)
+        t = (-b - torch.sqrt(disc.clamp(min=0))).clamp(min=0)
+        tfar = -b + torch.sqrt(disc.clamp(min=0))
+        hit = torch.zeros(n, dtype=torch.bool, device=DEV)
+        idx = torch.nonzero(disc > 0).squeeze(1)
+        for _ in range(iters):
+            if idx.numel() == 0:
+                break
+            p = eye[None] + rd[idx] * t[idx, None]
+            d = lb(p)
+            near = d < eps * (1 + t[idx])
+            ok = near & (true_g(p) < 0.5 * self.h)
+            hit[idx[ok]] = True
+            t[idx] += torch.where(ok, torch.zeros_like(d), torch.where(near, torch.full_like(d, 0.35 * self.h), d * 0.92))
+            keep = (~ok) & (t[idx] < tfar[idx])
+            idx = idx[keep]
+        return hit, t
+
+    def emit(self, ph, c, width=0.015):
+        """皮肤上紧挨着生长前沿的一圈亮带：exp(−(r − D)/width)，只在已长出的一侧"""
+        r = self.r_of(c)
+        gap = r - self.dist(ph[:, 0], ph[:, 1], ph[:, 2])
+        return torch.where(gap >= -0.5 * self.h, torch.exp(-gap.clamp(min=0) / width), torch.zeros_like(gap))
+
+    def xray_box(self, c, margin=0.03):
+        """已长出部分的包围盒（中心, 半边长）+ 余量；X 光相切点在这里面找"""
+        occ = self.occupancy(c)
+        if not occ.any():
+            return self.seed_xyz, margin
+        n = self.n
+        idx = torch.nonzero(occ)
+        lo, hi = idx.min(0).values.float(), idx.max(0).values.float()
+        to = lambda i: -MESH_B + i * 2 * MESH_B / (n - 1)  # noqa: E731
+        ctr = [float(to((lo[k] + hi[k]) / 2)) for k in (2, 1, 0)]
+        half = float((hi - lo).max()) * MESH_B / (n - 1) + margin
+        return tuple(ctr), half
+
+    def occupancy(self, c):
+        """体素中心上的截面：f3 < 0 且 D ≤ r（测试 / HUD 体积比用）"""
+        self.build()
+        return self.inside & (self.D[0, 0] <= self.r_of(c))
+
+
+def hand_tip(inside, X, Y, Z, side=1.0):
+    """>v<🧊四维切片-生长-手指尖：膝盖以上（离脚底 > 30 % 身高）、侧向 side·x 超过最宽处 60 % 的体素（= 垂着的手臂）里最低的那个"""
+    ys = Y[inside]
+    above = Y > ys.min() + 0.3 * (ys.max() - ys.min())
+    xs = X[inside & above] * side
+    arm = inside & above & (X * side > 0.6 * xs.max())
+    if not arm.any():
+        raise ValueError("找不到手臂（侧向轴不对？）")
+    j = int(torch.argmin(torch.where(arm, Y, torch.tensor(9.0, device=DEV))))
+    return (float(X.reshape(-1)[j]), float(Y.reshape(-1)[j]), float(Z.reshape(-1)[j]))
+
+
+def grow_obj(msh, seed_side=1.0, K=1.0):
+    gr = Grow(msh, seed_side, K)
+    o = Obj("mesh_grow", "grow (geodesic cone)", f"max( f3(p), (D(p) - K w) / sqrt(1+K^2) ),  D = geodesic distance inside {msh.label} from the hand, K = {K:g}",
+            gr.f, 3.0, bound=1.6, cam=4.3, vbox=1.15, cap=gr.cap)
+    o.grow = gr
+    o.tracer, o.lb, o.emit, o.xray_box = gr.tracer, gr.lb, gr.emit, gr.xray_box
+    return o
+
+
 def slice_fn(obj, R, c):
     """3D 截面的 SDF：g(x) = f([x, c] · R)"""
     if obj.R0 is not None:
@@ -605,14 +802,18 @@ def sdf_ao(g, p, n, steps=5):
 
 
 def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55,
-           fov=34.0, target=(0.0, 0.0, 0.0), key=None):
+           fov=34.0, target=(0.0, 0.0, 0.0), key=None, emit=0.0):
     dist = dist or obj.cam
     """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）
     | sculpt（一盏硬主光 key 斜扫 + 软阴影 + AO + 镜面高光，几乎无补光 → 深黑；平切面照样自发光）"""
     hw, hh = w * ss, h * ss
     g = slice_fn(obj, R, c)
     eye, rd = camera(hw, hh, yaw, pitch, dist, fov, target)
-    hit, t = trace(g, eye, rd, obj.bound, obj.step)
+    tracer = getattr(obj, "tracer", None)          # 生长物体：自己的追踪器（下界步长 + 真截面判命中），只对 R = I 有效
+    if tracer is not None and not torch.allclose(R, torch.eye(4, device=R.device)):
+        raise ValueError(f"{obj.name} 只支持 R = I（生长锥没有定义 4D 旋转后的下界）")
+    hit, t = tracer(c, eye, rd, obj.bound) if tracer is not None else trace(g, eye, rd, obj.bound, obj.step)
+    gs = obj.lb(c) if getattr(obj, "lb", None) is not None else g      # 阴影 / AO 用距离下界（真截面在缝边不是 Lipschitz 的）
     P = eye[None] + rd * t[:, None]
     hi = torch.nonzero(hit).squeeze(1)
     ph = P[hi]
@@ -648,13 +849,15 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
     if look == "sculpt":
         Lk = key if key is not None else key_dir(yaw, pitch, -95.0, 38.0)
         lk = (nrm @ Lk).clamp(min=0)
-        sh = soft_shadow(g, ph + nrm * 2.5e-3, Lk)
-        ao = sdf_ao(g, ph, nrm)
+        sh = soft_shadow(gs, ph + nrm * 2.5e-3, Lk)
+        ao = sdf_ao(gs, ph, nrm)
         hv = Lk[None] + vdir; hv = hv / (hv.norm(dim=1, keepdim=True) + 1e-9)
         spec = (nrm * hv).sum(1).clamp(min=0) ** 48
         lit = sh * (1.06 * lk ** 1.15 + 0.6 * spec)
         lam = lk * sh                                            # 切面亮度跟主光走（下面 face 用）
         v = img(0.012 + 0.035 * ao + lit * (0.55 + 0.45 * ao) + 0.10 * rim ** 2 * ao)
+        if getattr(obj, "emit", None) is not None and emit > 0:      # 生长前沿在皮肤上的亮带
+            v = v + emit * img(obj.emit(ph, c))
     elif look == "surface":
         v = img(0.05 + 0.62 * lam + 0.55 * rim ** 1.5)
     if look in ("surface", "sculpt"):
@@ -695,9 +898,13 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
 
 def _xray_tangency(obj, R, c, basis, hw, hh, n=72, thr=0.32, fov=34.0):
     """被挡住的相切点也要看得见：在 n³ 网格上找截面表面附近 |n_xyz|/|n| < thr 的点，透视投影后泼成柔光（R 已含 R0）"""
-    B = obj.vbox
+    B, ctr = obj.vbox, None
+    if getattr(obj, "xray_box", None) is not None:      # 生长物体：网格只铺在已长出部分的包围盒上（刚出生时只有指尖那么大，72³ 的全盒子看不见它）
+        ctr, B = obj.xray_box(c)
     ax = torch.linspace(-B, B, n, device=DEV)
     X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
+    if ctr is not None:
+        X = X + torch.tensor(ctr, dtype=torch.float32, device=DEV)
     q = torch.cat([X, torch.full_like(X[:, :1], c)], 1)
     hcell = 2 * B / (n - 1)
     fq = obj.f(q @ R)
@@ -1234,6 +1441,223 @@ def _insert_contact(path, thumbs, track, diffs, sp, name, tag, cols=6):
     print(f"  contact sheet -> {path}")
 
 
+# ---------- 浮现镜头：从手长出来（👤2026-10-22，孤独） ----------
+class EmergeSpec:
+    """浮现镜头参数。生长：「进度」s = α·r/D_max + (1 − α)·体积比，按 v(t) = v_end + (v0 − v_end) e^{−t/τ} 的形状走（v0 < v_end → 慢慢起来，不从 0 起），
+    t = full 时 s = 1（全身长全；之后超平面继续走、什么都不再变）。α = vol_alpha：1 = 前沿测地匀速，< 1 = 体积大处放慢。
+    相机：距离 d(t) = d0 (d1/d0)^{t/T}（对数匀速拉远 = 画面里恒定的「退开」感，不从静止开始、不停）；
+    对准点 target = 已长出部分的重心（体素上真算）的指数平滑（τ = track_tau 秒），+ end_off·u（u = (d − d0)/(d1 − d0)）：
+    镜头跟着生长走 —— 手指 → 手 → 小臂 → 肩 → 身体中心；
+    yaw 匀速绕转。主光固定在世界里（key_az / key_el 相对起始相机）"""
+    def __init__(self, dur, fps=24, size=(1280, 720), r0=0.006, gv_ratio=0.05, gtau=1.5, full=None, d0=0.9, d1=18.0, yaw0=0.55,
+                 yaw_rate=0.05, pitch=0.12, fov=24.0, key_az=-70.0, key_el=42.0, end_off=(0.0, 0.0, 0.0), red_point=True, cold=0.5,
+                 cut_glow=0.55, emit=0.5, hud_band=0, hud_scale=1.0, track_tau=0.25, vol_alpha=0.7, red_until=0.08):
+        self.dur, self.fps, self.size = dur, fps, size
+        self.r0, self.gv_ratio, self.gtau, self.full = r0, gv_ratio, gtau, (full if full is not None else 0.82 * dur)
+        self.d0, self.d1, self.yaw0, self.yaw_rate, self.pitch, self.fov = d0, d1, yaw0, yaw_rate, pitch, fov
+        self.key_az, self.key_el, self.end_off = key_az, key_el, tuple(end_off)
+        self.red_point, self.cold, self.cut_glow, self.emit = red_point, cold, cut_glow, emit
+        self.hud_band, self.hud_scale, self.track_tau, self.vol_alpha, self.red_until = hud_band, hud_scale, track_tau, vol_alpha, red_until
+        if not 0 < vol_alpha <= 1:
+            raise ValueError("vol_alpha ∈ (0, 1]（0 = 只按体积走，指尖那段会一闪而过）")
+        if not 0 < gv_ratio < 1:
+            raise ValueError("gv_ratio = v0 / v_end ∈ (0, 1)：起步慢、不为 0")
+        if not 0 < self.full <= dur:
+            raise ValueError("full（长全的时刻）∈ (0, dur]")
+        if d1 <= d0 or yaw_rate == 0:
+            raise ValueError("要拉远（d1 > d0），相机不能静止（yaw_rate ≠ 0）")
+
+
+def emerge_track(gr, sp):
+    """>v<🧊四维切片-浮现-每帧真参数（纯数学）：t, r, dr/dt, c, dist, yaw, target, u"""
+    gr.build()
+    n = insert_frames(sp.dur, sp.fps)
+    T = (n - 1) / sp.fps
+    unit = lambda t: fast_slow(t, sp.gv_ratio, 1.0, sp.gtau)  # noqa: E731   v_end = 1 的形状，再整体缩放
+    # 「进度」s(r) = α·r/D_max + (1 − α)·V(r)/V_body（V = 已长出体积，单调）：s 按 unit(t) 走，再反解 r。
+    # α = 1：前沿测地匀速（躯干一秒内灌满 → 画面运动在 2.3 s 鼓一个包，v1 实测法向光流峰 5.3 px/帧）；α < 1：体积大的地方前沿自动放慢
+    rs = torch.linspace(sp.r0, gr.Dmax, 600).tolist()
+    nb = float(gr.inside.sum())
+    prog = [sp.vol_alpha * (r - sp.r0) / (gr.Dmax - sp.r0) + (1 - sp.vol_alpha) * float(gr.occupancy(r / gr.K).sum()) / nb for r in rs]
+    prog = np.maximum.accumulate(np.array(prog)); prog = (prog - prog[0]) / (prog[-1] - prog[0])
+    u_full = unit(sp.full)[0]
+
+    def r_in(t):
+        return float(np.interp(min(1.0, unit(t)[0] / u_full), prog, rs))
+    v_last = (r_in(sp.full) - r_in(sp.full - 0.05)) / 0.05
+
+    def r_at(t):                                   # 长全之后超平面照走（什么都不再变），按最后的速度外推
+        return r_in(t) if t <= sp.full else gr.Dmax + (t - sp.full) * v_last
+    ax = torch.linspace(-MESH_B, MESH_B, gr.n, device=DEV)
+    Z, Y, X = torch.meshgrid(ax, ax, ax, indexing="ij")
+    off = np.array(sp.end_off)
+    out, tg = [], np.array(gr.seed_xyz, dtype=np.float64)
+    a = 1 - math.exp(-1.0 / (sp.fps * sp.track_tau))
+    for i in range(n):
+        t = i / sp.fps
+        r = r_at(t)
+        v = (r_at(t + 0.5 / sp.fps) - r_at(max(0.0, t - 0.5 / sp.fps))) / ((t + 0.5 / sp.fps) - max(0.0, t - 0.5 / sp.fps))
+        d = sp.d0 * (sp.d1 / sp.d0) ** (t / T)
+        u = (d - sp.d0) / (sp.d1 - sp.d0)
+        occ = gr.occupancy(r / gr.K)
+        cen = np.array([float(X[occ].mean()), float(Y[occ].mean()), float(Z[occ].mean())]) if occ.any() else np.array(gr.seed_xyz)
+        tg = tg + a * (cen + off * u - tg)          # 跟着「已经长出来的部分」的重心走（指数平滑，τ = track_tau）
+        out.append(dict(i=i, t=t, r=r, v=v, c=r / gr.K, dist=d, u=u, yaw=sp.yaw0 + sp.yaw_rate * t,
+                        target=tuple(float(q) for q in tg)))
+    return out
+
+
+def _emerge_frame(obj, sp, k, prev_b, tag, rp=None):
+    gr = obj.grow
+    Wd, Hd = sp.size
+    R = torch.eye(4, device=DEV)
+    key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el)
+    v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, "sculpt", yaw=k["yaw"], pitch=sp.pitch, dist=k["dist"], cut_glow=sp.cut_glow,
+                    fov=sp.fov, target=k["target"], key=key, emit=sp.emit)
+    if sp.red_point:
+        rp = rp or RedPoint(*red.shape)
+        if k["r"] > sp.red_until:          # 只留「出生」那一下：之后的相切（前沿在胸口绕回来自己合上、头顶长完）也是真的，但落在胸口像个装饰 → 不画，慢慢熄
+            red = torch.zeros_like(red)
+        red = rp(red)
+    b = betti(obj, R, k["c"], n=64)
+    occ = gr.occupancy(k["c"])
+    frac = float(occ.sum()) / float(gr.inside.sum())
+    rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45, cold=sp.cold)
+    if sp.hud_band:
+        rgb = torch.cat([rgb, torch.zeros(sp.hud_band, Wd, 3, device=rgb.device)], 0)
+    changed = prev_b is not None and b != prev_b
+    tg = k["target"]
+    lines = [f"{obj.name} ({obj.op}): {obj.eq}",
+             f"slice w = c = {k['c']:+.3f}  ->  r = K c = {k['r']:.3f} / D_max {gr.Dmax:.3f}    dr/dt = {k['v']:.3f}/s    volume {frac * 100:5.1f} %"
+             f"    t = {k['t']:.3f} / {sp.dur:g} s",
+             f"cam: pull back d = {sp.d0:g} (x{sp.d1 / sp.d0:.1f})^(t/T) = {k['dist']:5.2f}   look-at = centroid of grown part (EMA {sp.track_tau:g} s)"
+             f" ({tg[0]:+.2f},{tg[1]:+.2f},{tg[2]:+.2f})   orbit {math.degrees(sp.yaw_rate):+.1f} deg/s   fov {sp.fov:g}   key light fixed",
+             _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
+             f"red point = hyperplane tangent to the 4D surface at birth (r < {sp.red_until:g}): the moment she first touches our space"]
+    im = to_pil(rgb)
+    hud(im, lines, tag, red_line=3 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
+    return im, rgb, b, rp, frac
+
+
+def emerge(obj, sp, out, tag=None, contact=None, plot=None, song_t0=None, still=None):
+    """>v<🧊四维切片-浮现-渲染浮现镜头；still = 只出第 N 帧（看构图）"""
+    track = emerge_track(obj.grow, sp)
+    Wd, Hd = sp.size
+    tag = tag or "4D_EMERGE / FROM THE HAND"
+    if still is not None:
+        im = _emerge_frame(obj, sp, track[still], None, tag)[0]
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        im.save(out, quality=92)
+        print(f"{out}: frame #{still} t={track[still]['t']:.3f} r={track[still]['r']:.3f} d={track[still]['dist']:.2f}")
+        return track
+    sink = Sink(out, sp.fps, sp.size)
+    thumbs, diffs, flows, fracs, prev_arr, prev_b, rp = [], [], [], [], None, None, None
+    t0 = time.time()
+    for k in track:
+        im, rgb, b, rp, frac = _emerge_frame(obj, sp, k, prev_b, tag, rp)
+        arr = rgb[: Hd - sp.hud_band].mean(-1)
+        diffs.append(float((arr - prev_arr).abs().mean()) if prev_arr is not None else float("nan"))
+        flows.append(normal_flow(prev_arr, arr) if prev_arr is not None else float("nan"))
+        fracs.append(frac)
+        prev_arr, prev_b = arr, b
+        sink.add(im)
+        if contact:
+            thumbs.append(im.resize((Wd // 4, Hd // 4), Image.LANCZOS))
+        if k["i"] % 12 == 0:
+            print(f"  frame {k['i']}/{len(track)}  {time.time() - t0:.1f}s  r={k['r']:.3f} vol={frac * 100:.1f}% b={b}", flush=True)
+    sink.close()
+    print(f"{out}: {sink.i} frames = {sink.i / sp.fps:.4f} s (slot {sp.dur:g} s), {time.time() - t0:.1f}s")
+    if contact:
+        labs = [f"#{k['i']:03d} r={k['r']:.2f} vol={f * 100:.0f}% d={k['dist']:.1f}" for k, f in zip(track, fracs)]
+        _emerge_contact(contact, thumbs[::2], labs[::2], track, fracs, diffs, tag)
+    if plot:
+        emerge_plot(plot, track, fracs, diffs, flows, sp, tag, song_t0)
+    return track, fracs, diffs
+
+
+def _emerge_contact(path, thumbs, labs, track, fracs, diffs, tag, cols=6):
+    tw, th_ = thumbs[0].size
+    rows = math.ceil(len(thumbs) / cols)
+    pad, lab, plot_h = 8, 20, 170
+    SW = cols * (tw + pad) + pad
+    SH = rows * (th_ + lab + pad) + pad + plot_h + 40
+    im = Image.new("RGB", (SW, SH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 13)
+    for j, (tb, s) in enumerate(zip(thumbs, labs)):
+        x, y = pad + (j % cols) * (tw + pad), pad + (j // cols) * (th_ + lab + pad)
+        im.paste(tb, (x, y))
+        d.text((x, y + th_ + 3), s, font=f, fill=(150, 160, 168))
+    y0 = SH - plot_h - 20
+    x0, x1 = 60, SW - 30
+    n = len(track)
+    px = lambda j: x0 + (x1 - x0) * j / max(1, n - 1)  # noqa: E731
+    py = lambda r: y0 + plot_h - 20 - (plot_h - 40) * r  # noqa: E731
+    d.line([(x0, py(0)), (x1, py(0))], fill=(70, 74, 78))
+    d.line([(px(j), py(fr)) for j, fr in enumerate(fracs)], fill=(150, 160, 168), width=2)
+    dv = diffs[1:]
+    dmax = max(dv) if dv and max(dv) > 0 else 1
+    d.line([(px(j + 1), py(x / dmax)) for j, x in enumerate(dv)], fill=(235, 60, 66), width=2)
+    d.text((x0, y0 - 4), f"{tag}   grey: grown volume fraction (0 -> 100 %)   red: measured mean |frame diff| (normalised, max {dmax * 1000:.1f}e-3)"
+           "   (every 2nd frame shown)", font=f, fill=(150, 160, 168))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path, quality=90)
+    print(f"  contact sheet -> {path}")
+
+
+def emerge_plot(path, track, fracs, diffs, flows, sp, tag, song_t0=None):
+    """>v<🧊四维切片-浮现-速度图：上 = 生长前沿测地速度 dr/dt（灰粗）+ 已长出体积比（灰细）+ 相机对数拉远速率（白，恒定）；
+    下 = 实测法向光流（红）/ 帧间差分（灰）；横轴 = 镜头内秒数，song_t0 给了就标歌里的重拍"""
+    PW, PH = 1600, 760
+    im = Image.new("RGB", (PW, PH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 15); fs = ImageFont.truetype(FONT, 13)
+    x0, x1 = 90, PW - 40
+    n = len(track)
+    T = (n - 1) / sp.fps
+    tx = lambda t: x0 + (x1 - x0) * t / max(T, 1e-9)  # noqa: E731
+    grey, dim, red, white = (150, 160, 168), (60, 64, 68), (235, 60, 66), (200, 208, 214)
+    panels = [(60, 360), (420, 700)]
+    db, ph_ = song_downbeats(song_t0, song_t0 + T) if song_t0 is not None else ([], [])
+    for (ya, yb) in panels:
+        d.rectangle([x0, ya, x1, yb], outline=dim)
+        for tb in db:
+            xb = tx(tb - song_t0)
+            d.line([(xb, ya), (xb, yb)], fill=(90, 40, 44) if tb in ph_ else (55, 58, 62), width=2 if tb in ph_ else 1)
+    for tb in db:
+        d.text((tx(tb - song_t0) + 4, panels[1][1] + 26), f"{tb:.2f}" + (" phrase" if tb in ph_ else ""), font=fs, fill=grey)
+    for j in range(int(T / 0.5) + 1):
+        d.line([(tx(j * 0.5), panels[1][1]), (tx(j * 0.5), panels[1][1] + 6)], fill=grey)
+        d.text((tx(j * 0.5) - 12, panels[1][1] + 8), f"{j * 0.5:.1f}s", font=fs, fill=grey)
+    ya, yb = panels[0]
+    vmax = max(k["v"] for k in track) * 1.15
+    ty = lambda v: yb - (yb - ya) * v / vmax  # noqa: E731
+    d.line([(tx(k["t"]), ty(k["v"])) for k in track], fill=grey, width=3)
+    d.line([(tx(k["t"]), yb - (yb - ya) * fr) for k, fr in zip(track, fracs)], fill=grey, width=1)
+    lr = math.log(sp.d1 / sp.d0) / T
+    tfull = sp.full
+    d.line([(tx(tfull), ya), (tx(tfull), yb)], fill=(80, 84, 88))
+    d.text((tx(tfull) + 4, ya + 4), "fully grown", font=fs, fill=grey)
+    d.text((x0, ya - 44), f"{tag}   growth front (geodesic units/s, max {vmax / 1.15:.2f}) and camera", font=f, fill=white)
+    d.text((x0, ya - 24), f"thick: dr/dt  (progress s = {sp.vol_alpha:g} r/D_max + {1 - sp.vol_alpha:g} volume follows 1 + ({sp.gv_ratio:g} - 1) e^(-t/{sp.gtau:g}): slows where she is thick)   thin: grown volume 0 -> 100 %"
+           f"   camera: d/dt ln(dist) = {lr:.3f}/s const, orbit {math.degrees(sp.yaw_rate):.1f} deg/s const", font=fs, fill=grey)
+    ya, yb = panels[1]
+    fl, df = flows[1:], diffs[1:]
+    fmax = max(fl) * 1.1 if fl and max(fl) > 0 else 1.0
+    dmax = max(df) if df and max(df) > 0 else 1.0
+    ty = lambda v: yb - (yb - ya) * v / fmax  # noqa: E731
+    d.line([(tx(k["t"]), ty(x)) for k, x in zip(track[1:], fl)], fill=red, width=3)
+    d.line([(tx(k["t"]), ty(x / dmax * max(fl))) for k, x in zip(track[1:], df)], fill=grey, width=1)
+    d.text((x0, ya - 24), f"measured: red = normal-flow speed (px/frame, max {max(fl):.2f})   grey = mean |frame diff| (scaled, max {dmax * 1000:.1f}e-3)",
+           font=fs, fill=grey)
+    if song_t0 is not None:
+        d.text((x0, PH - 22), f"song time: {song_t0:.2f} -> {song_t0 + n / sp.fps:.2f} s ({n} frames @ {sp.fps} fps)   vertical lines = downbeats"
+               " (senses json, playback time; dark red = phrase start)", font=fs, fill=grey)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path)
+    print(f"  motion plot -> {path}")
+
+
 # ---------- 接触表 ----------
 SHEET_ROWS = [
     ("tiger", "rotate", None), ("ditorus", "rotate", None), ("loft_sphere_torus", "slice", None),
@@ -1372,6 +1796,16 @@ def main():
     g.add_argument("--cold", type=float, default=0.0, help="暗部冷偏强度（0 = 关；0.5 ≈ 很淡）")
     g.add_argument("--plot", default=None, help="运动速度图 png 路径（理论角速度 + 实测法向光流 / 帧间差分）")
     g.add_argument("--song-t0", type=float, default=None, help="这个镜头在歌里的起点（秒，播放时间）：速度图上标重拍")
+    e = ap.add_argument_group("浮现镜头（--emerge 槽长秒数）：4D 测地锥，超平面扫过 → 她从手指尖沿身体长进三维；相机从手对数匀速拉远")
+    e.add_argument("--emerge", type=float, default=None, help="槽长（秒）；--mesh 给站立模型（默认 3D/她.glb）")
+    e.add_argument("--seed-side", type=float, default=1.0, help="从哪只手长：+1 / −1（侧向 x 的正负）")
+    e.add_argument("--grow-full", type=float, default=None, help="第几秒长全（默认 0.82 × 槽长）")
+    e.add_argument("--grow-ratio", type=float, default=0.05, help="前沿起步速度 / 最终速度（< 1：慢慢起来）")
+    e.add_argument("--grow-tau", type=float, default=1.5, help="前沿加速的时间常数（秒）")
+    e.add_argument("--d0", type=float, default=0.9, help="起始相机距离（贴着手）"); e.add_argument("--d1", type=float, default=18.0, help="结束相机距离")
+    e.add_argument("--end-off", default="0,0,0", help="结束时对准点 = 身体中心 + 这个偏移（x,y,z）：把人放到画面一侧，留更多空")
+    e.add_argument("--emit", type=float, default=0.5, help="生长前沿在皮肤上的亮带强度")
+    e.add_argument("--vol-alpha", type=float, default=0.7, help="生长进度里前沿距离的权重（1 = 测地匀速；< 1 = 躯干这种体积大的地方放慢）")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
         MESH.path, MESH.n, MESH.max_faces, MESH.lateral, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, a.sdf_faces, a.mesh_lateral, None
@@ -1399,6 +1833,23 @@ def main():
         return
     if a.sheet:
         sheet(a.out or str(MV / "静帧" / "20_四维切片_总览.jpg"), look=a.look)
+        return
+    if a.emerge is not None:
+        msh = MeshSDF(a.mesh or MV / "3D" / "她.glb", a.sdf_res, a.sdf_faces, a.mesh_lateral)
+        obj = grow_obj(msh, a.seed_side)
+        w, h = (int(x) for x in a.size.lower().split("x"))
+        sp = EmergeSpec(a.emerge, a.fps, (w, h), gv_ratio=a.grow_ratio, gtau=a.grow_tau, full=a.grow_full, d0=a.d0, d1=a.d1, yaw0=a.yaw0,
+                        yaw_rate=a.yaw_rate, pitch=a.pitch, fov=a.fov, key_az=float(a.key.split(",")[0]), key_el=float(a.key.split(",")[1]),
+                        end_off=tuple(float(x) for x in a.end_off.split(",")), red_point=True, cold=a.cold, cut_glow=a.cut_glow, emit=a.emit,
+                        hud_band=a.hud_band, hud_scale=a.hud_scale, vol_alpha=a.vol_alpha)
+        if a.plan:
+            for k in emerge_track(obj.grow, sp):
+                print(f"  #{k['i']:03d} t={k['t']:.3f} r={k['r']:.3f} dr/dt={k['v']:.3f} d={k['dist']:.2f} u={k['u']:.2f} target={k['target']}")
+            return
+        out = Path(a.out or "emerge.mp4")
+        if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):
+            sys.exit(f"已存在，不覆盖：{out} / {a.contact} / {a.plot}（换版本号）")
+        emerge(obj, sp, str(out), a.tag, a.contact, a.plot, a.song_t0, a.still)
         return
     if a.insert is not None:
         w, h = (int(x) for x in a.size.lower().split("x"))
