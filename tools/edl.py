@@ -120,6 +120,14 @@ def resolve(src):
     sys.exit(f"不认识的素材：{src}")
 
 
+def count_frames(ff, path):
+    """数视频帧（流拷贝，不解码）"""
+    err = subprocess.run([ff, "-i", str(path), "-map", "0:v", "-c", "copy", "-f", "null", "-"], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace").stderr
+    m = re.findall(r"frame=\s*(\d+)", err)
+    return int(m[-1]) if m else -1
+
+
 def preview(edl=None, end=END, out=None, hd=False):
     global PW, PH
     if hd:
@@ -148,15 +156,21 @@ def preview(edl=None, end=END, out=None, hd=False):
                           f":d=1:s={PW}x{PH}:fps={FPS},setsar=1")
                 cmd = [ff, "-loglevel", "error", "-y", "-loop", "1", "-i", str(img), "-vf", vf, "-frames:v", str(nf)]
             else:
+                # 素材不够长时用最后一帧补齐（tpad）：少一帧，后面所有切点都会提前（2026-10-22 实测 13g 漂了 0.71 s）
                 cmd = [ff, "-loglevel", "error", "-y", "-ss", f"{at:.3f}", "-t", f"{dur * speed + 0.1:.3f}", "-i", str(video),
-                       "-vf", f"setpts=PTS/{speed},{vf}", "-frames:v", str(nf)]
+                       "-vf", f"setpts=PTS/{speed},{vf},tpad=stop_mode=clone:stop_duration={dur + 1:.3f}", "-frames:v", str(nf)]
             subprocess.run(cmd + ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p", str(p)], check=True)
+            got = count_frames(ff, p)
+            if got != nf:
+                sys.exit(f"第 {k} 段（{fmt(t)} {src}）帧数 {got} ≠ {nf}：后面的切点会漂，停下")
             parts.append(p)
         lst = Path(td) / "list.txt"
         lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), "utf-8")
         subprocess.run([ff, "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-t", str(END_), "-i", str(S.MUSIC),
-                        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(out)], check=True)
-    print("->", out, len(parts), "段")
+                        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-t", str(END_), str(out)], check=True)
+    total = count_frames(ff, out)
+    want = int(round(END_ * FPS))
+    print("->", out, len(parts), "段", f"帧数 {total}/{want}" + ("" if total == want else "  ⚠️对不上"))
 
 
 if __name__ == "__main__":
