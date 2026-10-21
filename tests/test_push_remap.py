@@ -61,5 +61,48 @@ class TestPushRemap(unittest.TestCase):
         self.assertEqual(P.snap(41.50, [], 0.06), (41.50, False))
 
 
+class TestJump(unittest.TestCase):
+    J = [(40.352, 1.25), (41.789, 1.3)]
+
+    def plan(self, **kw):
+        return P.jump_plan(154, FPS, 38.70, self.J, **kw)
+
+    def test_jump_frames_nearest_to_onsets(self):
+        ts, logz, src, kj = self.plan()
+        self.assertEqual(kj, [40, 74])
+        for (t, _), j in zip(self.J, kj):
+            self.assertLessEqual(abs(ts[j] - t), 0.5 / FPS + 1e-9)
+
+    def test_hard_jump_is_one_frame_and_exact_factor(self):
+        ts, logz, src, kj = self.plan(base=0.03, trans_frames=0)
+        d = np.diff(logz)
+        drift = 0.03 / FPS
+        for (_, f), j in zip(self.J, kj):
+            self.assertAlmostEqual(np.exp(d[j - 1] - drift), f, places=9)   # 跳点那一帧整倍数放大
+        others = np.delete(d, [j - 1 for j in kj])
+        self.assertTrue(np.allclose(others, drift))                           # 其余每帧都在漂（不静止）
+        self.assertAlmostEqual(np.exp(logz[-1] - 0.03 * 153 / FPS), 1.25 * 1.3, places=9)  # 必须相等：总倍数
+
+    def test_transition_within_frames(self):
+        ts, logz, src, kj = self.plan(base=0.0, trans_frames=3)
+        j = kj[0]
+        self.assertAlmostEqual(logz[j - 1], 0.0)
+        self.assertAlmostEqual(logz[j + 2], np.log(1.25))
+        self.assertTrue(0 < logz[j] < logz[j + 1] < logz[j + 2])
+
+    def test_drop_skips_source_time(self):
+        ts, logz, src, kj = self.plan(drop=0.15)
+        d = np.diff(src)
+        for j in kj:
+            self.assertAlmostEqual(d[j - 1], 1 / FPS + 0.15)
+        self.assertTrue(np.all(d > 0))
+        self.assertAlmostEqual(src[-1], 153 / FPS + 0.30)
+
+    def test_short_source_slows_to_fit(self):
+        ts, logz, src, kj = self.plan(drop=0.15, src_dur=6.0)
+        self.assertLessEqual(src[-1], 6.0)
+        self.assertGreater(src[-1], 5.99)
+
+
 if __name__ == "__main__":
     unittest.main()
