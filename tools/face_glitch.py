@@ -972,15 +972,22 @@ def cmd_reframe(a):
     margin = rtop / ref.shape[0] * hc                      # 头顶留白也照参考
     top_s = gauss_smooth(tr[:, 0], a.sigma)
     cx_s = gauss_smooth(tr[:, 2], a.sigma)
-    y0 = np.clip(top_s - margin, 0, H - hc)
-    x0 = np.clip(cx_s - wc / 2, 0, W - wc)
-    out = outname(src.with_name(src.stem + "_裁肩_v1.mp4"))
+    if a.head_x is None:                                   # v1：头居中，裁切框不出源画面
+        y0 = np.clip(top_s - margin, 0, H - hc)
+        x0 = np.clip(cx_s - wc / 2, 0, W - wc)
+    else:                                                  # v2（👤）：头中心放在画宽的 head_x 处；出了源画面就补黑，不拉伸
+        y0 = top_s - margin
+        x0 = cx_s - a.head_x * wc
+    PAD = int(np.ceil(max(0, -x0.min(), -y0.min(), (x0 + wc).max() - W, (y0 + hc).max() - H))) + 2
+    out = outname(src.with_name(src.stem + f"_裁肩_{a.ver}.mp4"))
     pipe = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                              "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p", str(out)],
                             stdin=subprocess.PIPE)
     cropped = []
     for i, f in enumerate(frames):
-        im = to_im(f).resize((W, H), Image.LANCZOS, box=(x0[i], y0[i], x0[i] + wc, y0[i] + hc))
+        fp = np.zeros((H + 2 * PAD, W + 2 * PAD, 3), np.float32)
+        fp[PAD:PAD + H, PAD:PAD + W] = f
+        im = to_im(fp).resize((W, H), Image.LANCZOS, box=(x0[i] + PAD, y0[i] + PAD, x0[i] + PAD + wc, y0[i] + PAD + hc))
         pipe.stdin.write(np.asarray(im).tobytes())
         cropped.append(im)
     pipe.stdin.close()
@@ -988,6 +995,7 @@ def cmd_reframe(a):
     info = {"source": src.name, "crop_h": round(hc, 1), "crop_w": round(wc, 1), "scale": round(H / hc, 3),
             "resampler": "PIL LANCZOS, sub-pixel box", "ref": f"{SRC_VIDEO.name} t=4.0 head width / frame height = {ratio:.3f}",
             "head_width_median": float(np.median(tr[:, 1])), "smooth_sigma_frames": a.sigma,
+            "head_x": a.head_x, "black_pad_px": PAD - 2,
             "path": [{"i": i, "x0": round(float(x0[i]), 2), "y0": round(float(y0[i]), 2)} for i in range(n)]}
     Path(str(out) + ".json").write_text(json.dumps(info, ensure_ascii=False, indent=1), "utf-8")
     # 三帧对比：上排参考（03 抬头），下排裁好的
@@ -1002,7 +1010,7 @@ def cmd_reframe(a):
             label(t, lab, s=0.9, color=(230, 230, 230), pos="tl")
             sheet.paste(t, (j * tw, 40 + r * th_))
     label(sheet, "", s=1.0, pos="tl", color=(170, 174, 180),
-          lines=[f"reframe: crop {wc:.0f}x{hc:.0f} -> 1280x720 (x{H / hc:.2f}, Lanczos), head width / frame height matched to 03 "
+          lines=[f"reframe {a.ver}: head centre at x={a.head_x or 0.5:.2f}W, crop {wc:.0f}x{hc:.0f} -> 1280x720 (x{H / hc:.2f}, Lanczos), head width / frame height matched to 03 "
                  f"({ratio:.2f}); path = gaussian sigma {a.sigma} f on mask top + head centroid"])
     cs = outname(out.with_name(out.stem + "_对比.jpg"))
     sheet.save(cs, quality=90)
@@ -1031,8 +1039,12 @@ def cmd_clip(a):
         src = retime(src, a.fit, a.retime, Path(a.tmp))
         n = int(np.ceil(a.fit * FPS - 1e-9))
     frames = video_frames(src, a.src_t0, n)
+    n_live = len(frames)
+    if a.extend_to:                                       # 👤 v4：原速播放，结尾停在最后一帧（效果照跑）补到 extend_to 秒
+        n_tot = int(np.ceil(a.extend_to * FPS - 1e-9))
+        frames = frames + [frames[-1]] * max(0, n_tot - n_live)   # 同一个对象 → 遮罩也复用
     n = len(frames)
-    dur = a.fit if a.fit else n / FPS
+    dur = a.fit if a.fit else (a.extend_to if a.extend_to else n / FPS)
     tmp = Path(a.tmp)
     tmp.mkdir(parents=True, exist_ok=True)
     # 遮罩缓存（同一段源帧只推理一次；缓存在 --tmp 里，gitignore）
@@ -1053,12 +1065,12 @@ def cmd_clip(a):
                                        "-crf", "16", str(vtmp[key])], stdin=subprocess.PIPE)
     hist = BoundaryHistory()
     off = a.sense_offset
-    side = {"source": src.name, "src_t0": a.src_t0, "fit": a.fit, "retime": a.retime if a.fit else None, "play_start": a.start, "dur": dur,
+    side = {"source": src.name, "src_t0": a.src_t0, "fit": a.fit, "extend_to": a.extend_to, "live_frames": n_live, "held_frames": n - n_live, "retime": a.retime if a.fit else None, "play_start": a.start, "dur": dur,
             "sense_offset": off, "palettes": pals, "waterfall": a.waterfall, "place_dx": a.place_dx,
             "mapping": {"threat": "n_bands = 4 + 22*threat; max_dx = 16 + 300*threat; p_shift = 0.25 + 0.5*threat",
                         "tension": "split d = 2 + 16*tension (R=+d, G=-d/2, B=-d, along normal)",
                         "hunger": "smear L = 40 + 520*hunger px",
-                        "seed": f"new seed every {a.hold} frames and at onsets with threat >= p88 of the clip"},
+                        "seed": f"new seed every {a.hold} frames ({a.hold_held} on held frames) and at onsets with threat >= p88 of the clip"},
             "frames": []}
     t_sense = [a.start + i / FPS - off for i in range(n)]
     i0, i1 = int(round(t_sense[0] * FPS)), int(round(t_sense[-1] * FPS)) + 1
@@ -1078,12 +1090,16 @@ def cmd_clip(a):
     for i, f in enumerate(frames):
         ts = t_sense[i]
         k = min(int(round(ts * FPS)), len(th) - 1)   # round：浮点 84 - 0.0 → 2015.9999 不能落到前一帧
-        if i % a.hold == 0 or any(abs(o - ts) < 0.5 / FPS for o in strong):
+        hold = a.hold_held if i >= n_live else a.hold      # 停住的帧上源不动 → 种子换得勤一点，否则每 4 帧近乎定格
+        if i % hold == 0 or any(abs(o - ts) < 0.5 / FPS for o in strong):
             seed += 1
         p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k],
                               Params(seed=seed, waterfall=a.waterfall, place_dx=a.place_dx))
         if cached is not None:
             mask, msrc = cached[i].astype(np.float32) / 255, "BiRefNet (cached)"
+        elif i > 0 and f is frames[i - 1]:
+            mask, msrc = masks[-1], "BiRefNet (held frame)"
+            masks.append(mask)
         else:
             mask, msrc = get_mask(matter, f)
             masks.append(mask)
@@ -1155,12 +1171,15 @@ def main():
     s2.add_argument("--name", default=None, help="输出名（不含配色后缀）；默认 17_面部瓦解_试_<ver>")
     s2.add_argument("--ver", default="v1")
     s2.add_argument("--hold", type=int, default=4, help="种子保持几帧（强起音处总会换）")
+    s2.add_argument("--hold-held", type=int, default=2, help="--extend-to 停住的那段里种子保持几帧")
     s2.add_argument("--envelope", action="store_true", help="时间包络：前段只在强起音处短脉冲，最后 sustain 秒全开（见 envelope）")
     s2.add_argument("--burst-thr", type=float, default=0.5, help="起音处威胁峰 ≥ 这个才触发脉冲")
     s2.add_argument("--sustain", type=float, default=1.4, help="收尾全开几秒")
     s2.add_argument("--ramp", type=float, default=0.4, help="收尾前升到全开用几秒")
     s2.add_argument("--ramp-start", type=float, default=None, help="收尾从歌里哪一秒开始升（给了就不用 --sustain / 吸附）")
     s2.add_argument("--fit", type=float, default=None, help="把整段源视频变速到这么多秒（配合 --retime）")
+    s2.add_argument("--extend-to", type=float, default=None,
+                    help="原速播放，结尾停在最后一帧补到这么多秒（瓦解效果在停住的帧上照跑）；和 --fit 二选一")
     s2.add_argument("--retime", default="mci", choices=["mci", "blend"], help="变速：mci = 运动补偿插帧，blend = 帧混合")
     s2.add_argument("--sense-offset", type=float, default=SENSE_OFFSET, help="感官.json 时间 + 这个 = 播放时间（当前 感官.json 已是播放时间 → 0）")
     s2.add_argument("--waterfall", action=argparse.BooleanOptionalAction, default=True,
@@ -1170,6 +1189,8 @@ def main():
     s4.add_argument("src")
     s4.add_argument("--height", type=float, default=None, help="裁切高（源像素）；默认按参考头宽比例自动")
     s4.add_argument("--sigma", type=float, default=10.0, help="裁切路径高斯平滑（帧）")
+    s4.add_argument("--head-x", type=float, default=None, help="头中心放在画宽的几成处（如 0.64 = 偏右，左边留给拖影）；不给 = 居中")
+    s4.add_argument("--ver", default="v1", help="输出 <源名>_裁肩_<ver>.mp4")
     s4.add_argument("--tmp", default=str(Path(__file__).resolve().parents[1] / "cache" / "face_glitch"))
     s3 = sp.add_parser("image"); s3.add_argument("src"); s3.add_argument("--mask"); s3.add_argument("--out")
     s3.add_argument("--place-dx", type=int, default=0); s3.add_argument("--palette", default="orig", choices=list(PALETTES))
