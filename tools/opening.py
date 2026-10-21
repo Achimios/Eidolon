@@ -55,10 +55,10 @@ def splat_aa(x, y, w, h, wt=None):
 
 
 def load_audio(dur=40.0, sr=SR):
-    import imageio_ffmpeg
-    raw = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-t", str(dur), "-i", str(S.MUSIC),
-                          "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"], capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.int16).astype(np.float64) / 32768
+    """样本 i ↔ 播放时间 i/sr（走 sensorium.decode：原曲音频晚 0.042 s 开始，从 0 解码要补零）"""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import sensorium
+    return sensorium.decode(S.MUSIC, 0.0, dur, sr)
 
 
 def sense():
