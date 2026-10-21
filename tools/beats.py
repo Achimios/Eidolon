@@ -10,7 +10,6 @@
 """
 import argparse
 import json
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -24,10 +23,10 @@ MUSIC = PROJ / "Assets" / "The Glitch Mob - Can't Kill Us [2020 Edit]_190189282.
 
 
 def decode_mono(path, sr=22050):
-    import imageio_ffmpeg
-    raw = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(sr), "-f", "f32le", "-"],
-                         capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.float32).copy()
+    """样本 i ↔ 播放时间 i/sr（走 sensorium.decode：补上原曲音频晚开始的 0.042 s）"""
+    sys.path.insert(0, str(ROOT / "src"))
+    import sensorium as S
+    return S.decode(path, sr=sr, fmt="f32le").copy()
 
 
 def bpm_of(beats):

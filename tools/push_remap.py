@@ -16,8 +16,8 @@
   python tools/push_remap.py video seedance.mp4 out.mp4 --t0 38.70 --n 154 --push 40.00:1 --push 41.52:1.3
   python tools/push_remap.py video seedance.mp4 out.mp4 --mode jump --t0 38.70 --n 154 --jump 40.352:1.25 --jump 41.789:1.3 --drop 0.15
 
-⚠️歌曲时间：原曲 mp4 的音频第一个样本 pts = 0.042 s。感官.json 的时间是「从第一个样本数」的，
-   比播放器 / -ss 截出来的时间早 42 ms（1 帧）。--snap 时用 --sense-offset 0.042 换到播放时间。
+⚠️歌曲时间 = 播放时间：原曲 mp4 的音频第一个样本 pts = 0.042 s。2026-10-21 起 sensorium.load_audio 在前面补零，
+   感官.json 就是播放时间，--sense-offset 默认 0。只有吸附到 2026-10-21 之前的旧 感官.json（早 42 ms）才要 --sense-offset 0.042。
 """
 import argparse
 import json
@@ -211,7 +211,7 @@ def main():
     ap.add_argument("--push", action="append", default=[], help="时间:强度，如 40.00:1")
     ap.add_argument("--snap", help="感官.json：每个 push 吸附到 ±tol 内最近的 onsets")
     ap.add_argument("--snap-tol", type=float, default=0.060)
-    ap.add_argument("--sense-offset", type=float, default=0.042, help="感官.json 时间 + 这个 = 播放时间")
+    ap.add_argument("--sense-offset", type=float, default=0.0, help="感官.json 时间 + 这个 = 播放时间（旧版 感官.json 早 42 ms 才用 0.042）")
     ap.add_argument("--base", type=float, default=0.04); ap.add_argument("--gain", type=float, default=0.6)
     ap.add_argument("--ramp", type=float, default=2.5, help="进：帧"); ap.add_argument("--tau", type=float, default=0.30, help="缓：秒")
     ap.add_argument("--zoom-k", type=float, default=1.0); ap.add_argument("--zoom0", type=float, default=1.0)

@@ -82,5 +82,71 @@ class TestSensorium(unittest.TestCase):
             self.assertEqual(len(back["channels"]["threat"]), len(d["channels"]["threat"]))
 
 
+SONG = Path(__file__).resolve().parents[3] / "Projekt_Visual" / "Assets" / "The Glitch Mob - Can't Kill Us [2020 Edit]_190189282.mp4"
+
+
+def _lag(a, b, m=2000):
+    """b 在 a 里的位置偏差（样本）；0 = 对齐"""
+    return int(np.argmax(np.correlate(a[:len(b)], b[m:-m], "valid")) - m)
+
+
+class TestLoadAudioPlaybackTime(unittest.TestCase):
+    """样本 i ↔ 播放时间 start + i/sr，即使容器里音频比视频晚开始（原曲：0.042 s）"""
+    LEAD, CLICKS = 0.25, (0.5, 1.5, 2.25)
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        import imageio_ffmpeg
+        import wave
+        cls.td = tempfile.TemporaryDirectory()
+        d = Path(cls.td.name); sr = 48000
+        x = np.zeros(int(3.0 * sr))
+        for c in cls.CLICKS:
+            i = int(c * sr); x[i:i + 48] = np.hanning(48) * 0.9 * (1 if c != 1.5 else -1)
+        with wave.open(str(d / "c.wav"), "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+            w.writeframes((x * 32767).astype(np.int16).tobytes())
+        # mov + PCM：音频起点恰好 = LEAD（无编码器预滚），点击的播放时间 = c + LEAD，答案已知
+        # mp4 + AAC：起点被编码器预滚挪到 LEAD − 1024/48k 左右，只拿来验「从头解码 ≡ -ss 截取」
+        cls.mov, cls.mp4 = d / "late.mov", d / "late.mp4"
+        for out, ca in ((cls.mov, "pcm_s16le"), (cls.mp4, "aac")):
+            subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=64x64:r=24:d=3.5",
+                            "-itsoffset", str(cls.LEAD), "-i", str(d / "c.wav"), "-map", "0:v", "-map", "1:a",
+                            "-c:v", "mpeg4", "-c:a", ca, str(out)], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.td.cleanup()
+
+    def test_lead_is_probed(self):
+        self.assertAlmostEqual(S.audio_lead(self.mov), self.LEAD, delta=1e-6)
+        self.assertGreater(S.audio_lead(self.mp4), 0.2)
+
+    def test_clicks_land_at_playback_time(self):
+        x = S.load_audio(self.mov)
+        hop = S.HOP / SR
+        for c in self.CLICKS:
+            t = c + self.LEAD
+            a, b = int((t - 0.2) * SR), int((t + 0.2) * SR)
+            got = (a + np.argmax(np.abs(x[a:b]))) / SR
+            self.assertLess(abs(got - t), hop, f"click {c}: {got:.4f} vs {t:.4f}")
+
+    def test_start_inside_lead_and_after_agree(self):
+        for f in (self.mov, self.mp4):
+            x = S.load_audio(f)
+            for st in (0.1, 1.0):
+                y = S.load_audio(f, start=st, dur=1.5)
+                i = int(round(st * SR))
+                self.assertLessEqual(abs(_lag(x[i:i + len(y) + 4000], y)), 2, (f.name, st))
+
+    @unittest.skipUnless(SONG.exists(), "原曲不在")
+    def test_song_start40_vs_start0_agree(self):
+        x = S.load_audio(SONG, dur=52.0)
+        y = S.load_audio(SONG, start=40.0, dur=10.0)
+        self.assertAlmostEqual(S.audio_lead(SONG), 2016 / 48000, delta=1e-6)
+        self.assertLessEqual(abs(_lag(x[40 * SR:], y)), 3)   # 修之前 −465 样本（−42 ms）
+
+
 if __name__ == "__main__":
     unittest.main()

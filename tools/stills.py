@@ -6,7 +6,6 @@
 用法：python tools/stills.py [--only name1,name2] [--out 目录]   默认输出到 Projekt_Visual/MV_Cant_Kill_Us/静帧/
 """
 import argparse
-import subprocess
 import time
 from pathlib import Path
 
@@ -94,11 +93,11 @@ def save(img, name, hud, out):
 
 # ---------- 各概念 ----------
 def audio(sr=11025, start=60.0, dur=6.0):
-    import imageio_ffmpeg
-    ff = imageio_ffmpeg.get_ffmpeg_exe()
-    raw = subprocess.run([ff, "-loglevel", "error", "-ss", str(start), "-t", str(dur), "-i", str(MUSIC), "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"],
-                         capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.int16).astype(np.float64) / 32768, sr
+    """样本 i ↔ 播放时间 start + i/sr（走 sensorium.load_audio：start < 0.042 时补零，原曲音频晚开始）"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import sensorium as S
+    return S.load_audio(MUSIC, start, dur, sr), sr
 
 
 def s_delay_embedding():

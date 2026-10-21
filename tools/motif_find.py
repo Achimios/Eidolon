@@ -69,10 +69,11 @@ def main():
     tracks = {"mix": None}
     for f in glob.glob(str(MV / "分轨" / "**" / "*.wav"), recursive=True):
         tracks[os.path.basename(f)[:-4]] = f
-    import imageio_ffmpeg, subprocess
-    raw = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(MV.parent / "Assets" / "The Glitch Mob - Can't Kill Us [2020 Edit]_190189282.mp4"),
-                          "-vn", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"], capture_output=True, check=True).stdout
-    mels = {"mix": logmel(np.frombuffer(raw, np.float32).astype(np.float64), fb)}
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import sensorium as S   # 样本 i ↔ 播放时间（补上原曲音频晚开始的 0.042 s；分轨文件 2026-10-21 起也是播放时间）
+    mix = S.decode(MV.parent / "Assets" / "The Glitch Mob - Can't Kill Us [2020 Edit]_190189282.mp4", sr=SR, fmt="f32le")
+    mels = {"mix": logmel(mix.astype(np.float64), fb)}
     for k, f in tracks.items():
         if f:
             mels[k] = logmel(load(f), fb)

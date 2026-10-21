@@ -26,6 +26,10 @@
  "motifs": {"<名>": {"template": [t0, t1], "track": "other", "hits": [秒, ...]}}
 }
 ```
+- ⭐**2026-10-21：时间 = 播放时间**（修正原曲音频起点 0.042 s 的偏移；之前的 感官.json 早 42 ms）。
+  `sensorium.load_audio / decode` 探测音频流第一个包的 pts，在前面补零 → 样本 i ↔ 播放时间 i/sr；beat_this（`beats.py`）、
+  Demucs 分轨（`separate.py`，旧分轨已在文件头补 1852 个零）、`motif_find.py` 都走它。旧件留 `*.bak_2026-10-21_offset`。
+  ⚠️锚点.json 的 `phrase_grid.start = 13.11` 是当初吸附到**旧**（早 42 ms）起音推出来的；不改它，`phrases` 只吸上 13/47 格（改成 13.15 是 44/47）。
 - ⭐**2026-10-21 升级**（`tools/merge_events.py`，在 sense_song 之后跑）：
   - `beats` 换成 beat_this 的拍（独立模型，150.00 BPM；用户的乐句格子 43 点里 39 点 ±30 ms 内对上重拍）。`bpm` 同步换成 150.0（倍拍问题解决：是 150 不是 75）。
   - `downbeats` = 每小节第一拍。`phrases` = 锚点.json 的乐句格子（用户两个切点推出的 6.4 s = 4 小节），每格吸附到 ±40 ms 内最近的重拍（《Can't Kill Us》47 格吸上 43 格）。

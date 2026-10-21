@@ -26,14 +26,54 @@ T0 = NFFT / 2 / SR         # 分析帧的时间 = 窗口中心，不是窗口起
 T_ON = NON / 2 / SR
 
 
-def load_audio(path, start=0.0, dur=None, sr=SR):
+_LEAD = {}
+
+
+def audio_lead(path):
+    """音频流第一个包的播放时间（秒）。原曲 mp4 的音频从 2016/48000 = 0.042 s 才开始（视频从 0），
+    ffmpeg 从头解码时第一个样本就是那一刻 —— 不补零的话 样本 i ↔ i/sr + 0.042（2026-10-21 抓到：感官.json 整体早 42 ms）。
+    按 (路径, mtime) 缓存。"""
+    import imageio_ffmpeg
+    p = Path(path).resolve()
+    key = (str(p), p.stat().st_mtime)
+    if key not in _LEAD:
+        r = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-nostats", "-loglevel", "error", "-i", str(p),
+                            "-map", "0:a:0", "-c", "copy", "-frames:a", "1", "-f", "framecrc", "-"],
+                           capture_output=True, check=True, text=True).stdout
+        tb, lead = None, 0.0
+        for line in r.splitlines():
+            if line.startswith("#tb 0:"):
+                n, d = line.split(":", 1)[1].strip().split("/")
+                tb = int(n) / int(d)
+            elif line and not line.startswith("#") and tb:
+                lead = max(0.0, int(line.split(",")[2]) * tb)   # 第 3 列 = pts（输出时间轴，已减去文件 start_time = 播放时间）
+                break
+        _LEAD[key] = lead
+    return _LEAD[key]
+
+
+def decode(path, start=0.0, dur=None, sr=SR, ac=1, fmt="s16le"):
+    """解码成 (n,) 或 (n, ac)，样本 i ↔ 播放时间 start + i/sr。
+    start 早于音频起点时，前面补 (起点 − start)·sr 个零（ffmpeg 的 -ss 在起点之后是准的，之前不会补）。"""
     import imageio_ffmpeg
     cmd = [imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-ss", str(start)]
     if dur:
         cmd += ["-t", str(dur)]
-    cmd += ["-i", str(path), "-vn", "-ac", "1", "-ar", str(sr), "-f", "s16le", "-"]
+    cmd += ["-i", str(path), "-vn", "-ac", str(ac), "-ar", str(sr), "-f", fmt, "-"]
     raw = subprocess.run(cmd, capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.int16).astype(np.float64) / 32768
+    x = np.frombuffer(raw, {"s16le": np.int16, "f32le": np.float32}[fmt])
+    x = x.reshape(-1, ac) if ac > 1 else x
+    pad = int(round(max(0.0, audio_lead(path) - start) * sr))
+    if pad:
+        x = np.concatenate([np.zeros((pad,) + x.shape[1:], x.dtype), x])
+    if dur:
+        x = x[:int(round(dur * sr))]
+    return x
+
+
+def load_audio(path, start=0.0, dur=None, sr=SR):
+    """单声道 float64，样本 i ↔ 播放时间 start + i/sr"""
+    return decode(path, start, dur, sr).astype(np.float64) / 32768
 
 
 def _norm(v, lo=1, hi=99):

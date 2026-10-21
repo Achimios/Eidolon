@@ -7,7 +7,6 @@
 读写都不经过 torchaudio（新版 torchaudio 的读写依赖变了），用 ffmpeg 解码、soundfile 写。
 """
 import argparse
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,10 +20,11 @@ MUSIC = PROJ / "Assets" / "The Glitch Mob - Can't Kill Us [2020 Edit]_190189282.
 
 
 def decode(path, sr=44100):
-    import imageio_ffmpeg
-    raw = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-loglevel", "error", "-i", str(path), "-vn", "-ac", "2", "-ar", str(sr), "-f", "f32le", "-"],
-                         capture_output=True, check=True).stdout
-    return np.frombuffer(raw, np.float32).reshape(-1, 2).T.copy()   # (2, n)
+    """(2, n)，样本 i ↔ 播放时间 i/sr（走 sensorium.decode：补上原曲音频晚开始的 0.042 s；
+    2026-10-21 之前的分轨从 0.042 s 起，已在文件前补零对齐，旧件留 .bak_2026-10-21_offset）"""
+    sys.path.insert(0, str(ROOT / "src"))
+    import sensorium as S
+    return S.decode(path, sr=sr, ac=2, fmt="f32le").T.copy()
 
 
 def main():
