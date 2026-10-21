@@ -65,4 +65,5 @@
 ## 五、常见坑（很常见的才放这；其余进 _LEARNINGS.md）
 - Windows：含中文 / 反斜杠的文件用编辑工具写，别经 shell heredoc；中文命令行参数走 Bash 不走 PowerShell 5.1。
 - Python 跑在 `.venv`（torch cu128）；自检 `python -m unittest discover -s tests -q`。
+- ⚠️**样片 / 生成物不覆盖，按版本另起文件名**（`_v2`、`_v3`）：覆盖同名文件时用户会看到「中间文件出现又消失，没有新视频」（👤2026-10-21）。ffmpeg 边渲边写，渲染中的文件也会先出现。
 - 生成服务的内容审核：太像现成 IP（如士官长装甲）会被判版权拦下 → 写成无标志的通用描述。生成链接会过期（Seedream 24 h、Tripo 5 min），封装里已立即下载。
