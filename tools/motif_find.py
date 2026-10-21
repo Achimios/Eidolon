@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--name", default="动机")
     ap.add_argument("--top", type=int, default=12)
     ap.add_argument("--thr", type=float, default=0.45)
+    ap.add_argument("--tracks", default="", help="只在这些分轨上比（逗号分隔，如 bass,other）；鼓每个乐句都重复同一型，混进来会误报（👤 2026-10-21 纠正：1:37 内只有 1:03、1:15）")
     a = ap.parse_args()
     fb = mel_fb(SR, NFFT, NMEL)
     tracks = {"mix": None}
@@ -78,9 +79,10 @@ def main():
     fa, fb_ = int(a.t0 * SR / HOP), int(a.t1 * SR / HOP)
     # 模板在哪一轨能量最大 → 主轨
     energy = {k: float(np.exp(M[:, fa:fb_]).mean()) for k, M in mels.items() if k != "mix"}
-    main_tr = max(energy, key=energy.get)
-    sims = {k: match(M, fa, fb_) for k, M in mels.items()}
-    s = np.maximum(sims["mix"], sims[main_tr])
+    use = [t for t in a.tracks.split(",") if t] or None
+    main_tr = max((k for k in energy if not use or k in use), key=energy.get)
+    sims = {k: match(M, fa, fb_) for k, M in mels.items() if (use is None or k in use)}
+    s = np.min([sims[k] for k in sims], 0) if use else np.maximum(sims["mix"], sims[main_tr])   # 指定分轨时要求每一轨都像
     L = fb_ - fa; hits = []
     order = np.argsort(-s)
     for i in order:
