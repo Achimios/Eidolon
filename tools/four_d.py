@@ -1658,6 +1658,237 @@ def emerge_plot(path, track, fracs, diffs, flows, sp, tag, song_t0=None):
     print(f"  motion plot -> {path}")
 
 
+# ---------- 穿膜而出（--rise）：半个 4D 旋转体，超平面扫过 → 她从一张膜里先伸出手、再整个人被拉过来（👤2026-10-22） ----------
+def rise_frame_of(msh, d, n=128, margin=0.06):
+    """在 SDF 体上找：d 方向的最远点（= 第一个出生的部位，手）、身体重心、膜的位置 o（身体全在 s = (p − o)·d ≥ margin 一侧）。
+    返回 (o, d, s_max, hand, center)：s 都相对 o"""
+    if msh.vol is None:
+        msh.load()
+    B = MESH_B
+    ax = torch.linspace(-B, B, n, device=DEV)
+    X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
+    P = X[msh(X[:, 0], X[:, 1], X[:, 2]) < 0]
+    d = torch.tensor(d, dtype=torch.float32, device=DEV); d = d / d.norm()
+    s = P @ d
+    hand = P[torch.topk(s, min(30, len(s))).indices].mean(0)
+    o = d * (float(s.min()) - margin)
+    return o, d, float(s.max() - (o @ d)), hand, P.mean(0)
+
+
+def mesh_rise(msh, d, o, prefix="mesh"):
+    """>v<🧊四维切片-穿膜-4D 物体 = 身体绕「膜」（过 o、垂直 d 的平面，在 4D 里是 d–w 平面的轴）转出来的半个旋转体：
+        f4(p, w) = max( f3( o + p⊥ + d·sqrt(s² + w²) ),  −s ),   s = (p − o)·d，p⊥ = p − o − s d
+    超平面 w = c 切：身体上离膜 s_b ≥ c 的部分出现，落在 s = sqrt(s_b² − c²)（新出生的部位贴着膜，随 c → 0 被拉到原位）；
+    c 从 s_max 往 0 扫 → 最远的部位（手）先出生，c ≤ 膜到身体的最近距离时 = 完整的她。
+    −s 那一刀（去掉镜像那半）= 真平切面：膜上露出的就是身体在 s_b = c 处的截面（cut-glow 打亮）。
+    (p⊥, s, w) → (p⊥, sqrt(s² + w²)) 是 1-Lipschitz ⇒ 仍是距离下界，可以直接球追踪"""
+    d = d / d.norm()
+
+    def inner(p):
+        x3 = p[:, :3] - o
+        s = x3 @ d
+        q = o + x3 - s[:, None] * d + d * L(s, p[:, 3])[:, None]
+        return msh(q[:, 0], q[:, 1], q[:, 2]), s
+
+    def f(p):
+        m, s = inner(p)
+        return torch.maximum(m, -s)
+
+    def cap(p):
+        m, s = inner(p)
+        return -s - m
+    ds = ",".join(f"{v:+.2f}" for v in d.tolist())
+    return Obj(f"{prefix}_rise", "half-spin about a membrane",
+               f"max( f3( o + p_perp + d sqrt(s^2 + w^2) ), -s ),  s = (p - o).d,  d = ({ds})   ({msh.label})",
+               f, 1.4, bound=1.75, cam=4.3, vbox=1.2, cap=cap)
+
+
+def hermite01(x, a, b):
+    """[0,1] → [0,1] 的三次 Hermite：S(0)=0, S(1)=1, S'(0)=a, S'(1)=b（a、b 小 ⇒ 慢起、慢收，中间最快；a, b > 0 ⇒ 不停）"""
+    return (a + b - 2) * x ** 3 + (3 - 2 * a - b) * x ** 2 + a * x, 3 * (a + b - 2) * x ** 2 + 2 * (3 - 2 * a - b) * x + a
+
+
+class RiseSpec:
+    """穿膜镜头参数。c：c0 → c1 用 Hermite(a0, a1) 走完 grow 秒（慢起、长），之后以同一末速度继续往 0 漂（不停，但 c 不过 0）。
+    相机：距离 d0 → d1 对数匀速拉远（全程），对准点从「手此刻的位置」平滑移到身体重心；yaw 匀速绕，pitch 线性抬高（结尾俯一点 → 孤独）"""
+    def __init__(self, dur, fps=24, size=(1280, 720), grow=4.0, a0=0.22, a1=0.05, c_end=0.012, d0=1.05, d1=20.0,
+                 yaw0=1.45, yaw_rate=0.07, pitch0=-0.04, pitch1=0.14, fov=24.0, key_az=-80.0, key_el=48.0, cut_glow=0.55,
+                 hud_band=96, hud_scale=0.75, cold=0.5, red_gain=1.0):
+        self.dur, self.fps, self.size, self.grow, self.a0, self.a1, self.c_end = dur, fps, size, grow, a0, a1, c_end
+        self.d0, self.d1, self.yaw0, self.yaw_rate, self.pitch0, self.pitch1, self.fov = d0, d1, yaw0, yaw_rate, pitch0, pitch1, fov
+        self.key_az, self.key_el, self.cut_glow, self.hud_band, self.hud_scale, self.cold, self.red_gain = (
+            key_az, key_el, cut_glow, hud_band, hud_scale, cold, red_gain)
+        if not 0 < grow <= dur:
+            raise ValueError("grow 在 (0, dur]")
+        if not (0 < a0 < 1 and 0 < a1 < 1):
+            raise ValueError("a0、a1 在 (0, 1)：大于 0 才不停，小于 1 才慢起慢收")
+        if yaw_rate == 0 or d1 <= d0:
+            raise ValueError("相机必须一直在动（yaw_rate ≠ 0，d1 > d0）")
+
+
+def rise_track(sp, s_max, geo):
+    """>v<🧊四维切片-穿膜-每帧真参数（纯数学）：手（离膜 s_h = s_max）在 d–w 平面里的角度 φ：c = s_h cos φ，手在截面里离膜 s_h sin φ。
+    φ 用 Hermite(a0, a1) 从 φ0（指尖刚露出 0.03）走到 φ1（c = c_end）共 grow 秒，之后同速继续（封顶 < 90°：c 不过 0）。
+    按 φ 而不是按 c 走：出生那一刻 ds/dc 是无穷大（sqrt），按 c 匀走手会弹出来；按 φ 走，手的速度 = s_h φ' 有界、慢起"""
+    o, d, hand, center = geo
+    hs = s_max
+    ph0 = math.asin(min(0.03 / hs, 1.0))
+    ph1 = math.acos(min(max(sp.c_end, 1e-4) / hs, 1.0))
+    n = insert_frames(sp.dur, sp.fps)
+    w_tail = sp.a1 * (ph1 - ph0) / sp.grow
+    tail_T = sp.dur - sp.grow
+    if ph1 + w_tail * tail_T >= math.pi / 2:
+        w_tail = 0.9 * (math.pi / 2 - ph1) / max(tail_T, 1e-9)
+    h_perp = hand - o - float((hand - o) @ d) * d
+    out = []
+    for i in range(n):
+        t = i / sp.fps
+        if t <= sp.grow:
+            S, dS = hermite01(t / sp.grow, sp.a0, sp.a1)
+            ph, w = ph0 + (ph1 - ph0) * S, (ph1 - ph0) * dS / sp.grow
+        else:
+            ph, w = ph1 + w_tail * (t - sp.grow), w_tail
+        c, cv = hs * math.cos(ph), -hs * math.sin(ph) * w
+        hp = o + h_perp + d * (hs * math.sin(ph))            # 手（第一个出生的部位）此刻在截面里的位置
+        u = t / sp.dur
+        dist = sp.d0 * (sp.d1 / sp.d0) ** u
+        m = u * u * (3 - 2 * u)
+        tg = (1 - m) * hp + m * center
+        out.append(dict(i=i, t=t, c=c, cv=cv, v=abs(cv), phi=math.degrees(ph), hand_v=hs * w, th=0.0, dist=dist,
+                        yaw=sp.yaw0 + sp.yaw_rate * t, pitch=sp.pitch0 + (sp.pitch1 - sp.pitch0) * u, target=tuple(float(x) for x in tg)))
+    return out
+
+
+def _rise_frame(obj, sp, k, prev_b, tag, rp=None):
+    Wd, Hd = sp.size
+    R = rot4()
+    key = key_dir(sp.yaw0, sp.pitch0, sp.key_az, sp.key_el)
+    v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, "sculpt", yaw=k["yaw"], pitch=k["pitch"], red_gain=sp.red_gain, dist=k["dist"],
+                    cut_glow=sp.cut_glow, fov=sp.fov, target=k["target"], key=key)
+    rp = rp or RedPoint(*red.shape)
+    red = rp(red)
+    b = betti(obj, R, k["c"], n=64)
+    rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45, cold=sp.cold)
+    rgb = torch.cat([rgb, torch.zeros(sp.hud_band, Wd, 3, device=rgb.device)], 0)
+    changed = prev_b is not None and b != prev_b
+    tg = k["target"]
+    lines = [f"{obj.name} ({obj.op}): {obj.eq}",
+             f"slice w = c = {k['c']:+.3f} = s_hand cos(phi),  phi = {k['phi']:5.1f} deg (Hermite, slow start {sp.a0:g} / end {sp.a1:g}, {sp.grow:g} s)"
+             f"   dc/dt = {k['cv']:+.3f}/s"
+             f"     t = {k['t']:.3f} / {sp.dur:g} s",
+             f"cam: dist {k['dist']:5.2f} (log-uniform pull-back {sp.d0:g} -> {sp.d1:g})  yaw {math.degrees(k['yaw']):6.1f}"
+             f"  pitch {math.degrees(k['pitch']):+.1f}  fov {sp.fov:g}  aim ({tg[0]:+.2f},{tg[1]:+.2f},{tg[2]:+.2f})"
+             f"   key light az {sp.key_az:+.0f} el {sp.key_el:+.0f}",
+             _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
+             "red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32);  glow = cut face on the membrane (s = 0)"]
+    im = to_pil(rgb)
+    hud(im, lines, tag, red_line=3 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
+    return im, rgb, b, rp
+
+
+def rise(obj, sp, track, out, tag, contact=None, plot=None, song_t0=None):
+    """>v<🧊四维切片-穿膜-渲染：视频 + 接触表（隔帧，标 c 与 Betti）+ 速度图（c 速度、相机、实测光流、b0 / b1 随时间）"""
+    Wd, Hd = sp.size
+    sink = Sink(out, sp.fps, sp.size)
+    thumbs, diffs, flows, bs, prev_arr, prev_b, rp = [], [], [], [], None, None, None
+    t0 = time.time()
+    for k in track:
+        im, rgb, b, rp = _rise_frame(obj, sp, k, prev_b, tag, rp)
+        arr = rgb[: Hd - sp.hud_band].mean(-1)
+        diffs.append(float((arr - prev_arr).abs().mean()) if prev_arr is not None else float("nan"))
+        flows.append(normal_flow(prev_arr, arr) if prev_arr is not None else float("nan"))
+        prev_arr, prev_b = arr, b
+        bs.append(b)
+        sink.add(im)
+        if contact and k["i"] % 2 == 0:
+            thumbs.append((im.resize((Wd // 4, Hd // 4), Image.LANCZOS), k, b))
+        if k["i"] % 12 == 0:
+            print(f"  frame {k['i']}/{len(track)}  c={k['c']:+.3f}  b={b}  {time.time() - t0:.1f}s", flush=True)
+    sink.close()
+    print(f"{out}: {sink.i} frames = {sink.i / sp.fps:.4f} s, {time.time() - t0:.1f}s")
+    print("  normal flow (px/frame):", " ".join(f"{d:.2f}" for d in flows[1:]))
+    ev = [(k["t"], a, b) for k, a, b in zip(track[1:], bs, bs[1:]) if a != b]
+    print(f"  topology changes: {len(ev)}  first: " + "  ".join(f"t={t:.2f} {a}->{b}" for t, a, b in ev[:12]))
+    if contact:
+        _rise_contact(contact, thumbs, tag)
+    if plot:
+        rise_plot(plot, track, bs, flows, sp, tag, song_t0)
+    return bs, flows
+
+
+def _rise_contact(path, thumbs, tag, cols=6):
+    tw, th_ = thumbs[0][0].size
+    rows = math.ceil(len(thumbs) / cols)
+    pad, lab = 8, 20
+    im = Image.new("RGB", (cols * (tw + pad) + pad, rows * (th_ + lab + pad) + pad + 30), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 13)
+    prev = None
+    for j, (tb, k, b) in enumerate(thumbs):
+        x, y = pad + (j % cols) * (tw + pad), pad + (j // cols) * (th_ + lab + pad)
+        im.paste(tb, (x, y))
+        d.text((x, y + th_ + 3), f"#{k['i']:03d} t={k['t']:.2f} w=c={k['c']:+.3f} b={b[0]} {b[1]} {b[2]}", font=f,
+               fill=(235, 60, 66) if prev is not None and b != prev else (150, 160, 168))
+        prev = b
+    d.text((pad, im.height - 24), f"{tag}   every 2nd frame   label: slice w = c, Betti b0 b1 b2 (red = changed since previous thumbnail)",
+           font=f, fill=(150, 160, 168))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path, quality=90)
+    print(f"  contact sheet -> {path}")
+
+
+def rise_plot(path, track, bs, flows, sp, tag, song_t0=None):
+    """三栏：① |dc/dt|（4D 切片的速度）② 相机距离（对数轴）③ 实测法向光流 + b0 / b1；song_t0 给了就画重拍竖线"""
+    PW, PH = 1600, 900
+    im = Image.new("RGB", (PW, PH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 15); fs = ImageFont.truetype(FONT, 13)
+    x0, x1 = 90, PW - 40
+    T = track[-1]["t"]
+    tx = lambda t: x0 + (x1 - x0) * t / max(T, 1e-9)  # noqa: E731
+    grey, dim, red, white = (150, 160, 168), (60, 64, 68), (235, 60, 66), (200, 208, 214)
+    panels = [(60, 300), (360, 560), (620, 840)]
+    db, ph_ = song_downbeats(song_t0, song_t0 + T) if song_t0 is not None else ([], [])
+    for ya, yb in panels:
+        d.rectangle([x0, ya, x1, yb], outline=dim)
+        for tb in db:
+            d.line([(tx(tb - song_t0), ya), (tx(tb - song_t0), yb)], fill=(90, 40, 44) if tb in ph_ else (55, 58, 62))
+    for j in range(int(T / 0.5) + 1):
+        d.text((tx(j * 0.5) - 12, panels[2][1] + 8), f"{j * 0.5:.1f}s", font=fs, fill=grey)
+
+    def curve(panel, vals, col, vmax, width=2, ts=None):
+        ya, yb = panel
+        ts = ts or [k["t"] for k in track]
+        d.line([(tx(t), yb - (yb - ya) * v / vmax) for t, v in zip(ts, vals)], fill=col, width=width)
+
+    vs = [k["v"] for k in track]
+    vm = max(vs) * 1.1
+    curve(panels[0], vs, white, vm, 3)
+    d.line([(tx(sp.grow), panels[0][0]), (tx(sp.grow), panels[0][1])], fill=grey)
+    d.text((x0, 16), f"{tag}   4D slice speed |dc/dt| (w-units/s, max {max(vs):.3f}):  c {track[0]['c']:+.3f} -> {track[-1]['c']:+.3f};"
+           f"  slow start a0 = {sp.a0:g}, growth ends at {sp.grow:g} s (grey line), then drift {vs[-1]:.4f}/s (never 0)", font=fs, fill=white)
+    ld = [math.log(k["dist"]) for k in track]
+    lo, hi = min(ld), max(ld)
+    curve(panels[1], [v - lo for v in ld], white, (hi - lo) * 1.1 or 1, 2)
+    d.text((x0, panels[1][0] - 22), f"camera distance, log scale: {sp.d0:g} -> {sp.d1:g} (log-uniform = constant zoom rate);"
+           f"  orbit {math.degrees(sp.yaw_rate):.1f} deg/s;  pitch {math.degrees(sp.pitch0):+.0f} -> {math.degrees(sp.pitch1):+.0f} deg", font=fs, fill=grey)
+    fl = flows[1:]
+    fm = max(fl) * 1.1 if fl and max(fl) > 0 else 1
+    curve(panels[2], fl, red, fm, 3, [k["t"] for k in track[1:]])
+    bm = max(max(b[0] for b in bs), max(b[1] for b in bs), 1) * 1.1
+    curve(panels[2], [b[0] for b in bs], white, bm, 1)
+    curve(panels[2], [b[1] for b in bs], grey, bm, 1)
+    d.text((x0, panels[2][0] - 22), f"measured: red = normal-flow speed (px/frame, max {max(fl):.2f});  white = b0 (pieces, max {max(b[0] for b in bs)}),"
+           f"  grey = b1 (tunnels, max {max(b[1] for b in bs)}) on 64^3 voxels", font=fs, fill=grey)
+    if song_t0 is not None:
+        d.text((x0, PH - 24), f"song time {song_t0:.2f} -> {song_t0 + len(track) / sp.fps:.2f} s; vertical lines = downbeats (dark red = phrase)",
+               font=fs, fill=grey)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path)
+    print(f"  motion plot -> {path}")
+
+
+
 # ---------- 接触表 ----------
 SHEET_ROWS = [
     ("tiger", "rotate", None), ("ditorus", "rotate", None), ("loft_sphere_torus", "slice", None),
@@ -1806,6 +2037,14 @@ def main():
     e.add_argument("--end-off", default="0,0,0", help="结束时对准点 = 身体中心 + 这个偏移（x,y,z）：把人放到画面一侧，留更多空")
     e.add_argument("--emit", type=float, default=0.5, help="生长前沿在皮肤上的亮带强度")
     e.add_argument("--vol-alpha", type=float, default=0.7, help="生长进度里前沿距离的权重（1 = 测地匀速；< 1 = 躯干这种体积大的地方放慢）")
+    r = ap.add_argument_group("穿膜镜头（--rise 秒数）：半个 4D 旋转体，超平面 w = c 从 s_max 扫到 0 → 最远的部位（手）先从膜里出生，再整个人被拉出来")
+    r.add_argument("--rise", type=float, default=None, help="镜头长（秒）；--mesh 给蜷缩模型 + --mesh-lateral sym")
+    r.add_argument("--rise-dir", default="0.25,-0.3,0.92", help="d：膜的法向，指向第一个出生的部位（默认 = 蜷缩模型的手）")
+    r.add_argument("--rise-grow", type=float, default=4.0, help="c 走完（完整的她出现）用几秒；之后继续极慢地漂，不停")
+    r.add_argument("--rise-a", default="0.22,0.05", help="Hermite 起 / 收斜率 a0,a1（小 = 慢起 / 慢收）")
+    r.add_argument("--rise-cam", default="1.05,20", help="相机距离 d0,d1（对数匀速拉远）")
+    r.add_argument("--rise-pitch", default="-0.04,0.14", help="pitch 起,止（弧度）")
+    r.add_argument("--rise-yaw", default="1.45,0.07", help="yaw0（弧度）, 匀速绕（弧度/秒）")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
         MESH.path, MESH.n, MESH.max_faces, MESH.lateral, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, a.sdf_faces, a.mesh_lateral, None
@@ -1833,6 +2072,36 @@ def main():
         return
     if a.sheet:
         sheet(a.out or str(MV / "静帧" / "20_四维切片_总览.jpg"), look=a.look)
+        return
+    if a.rise is not None:
+        msh = MeshSDF(a.mesh or MV / "3D" / "蜷缩_无材质_低模.glb", a.sdf_res, a.sdf_faces, a.mesh_lateral)
+        o, d, s_max, hand, center = rise_frame_of(msh, [float(x) for x in a.rise_dir.split(",")])
+        obj = mesh_rise(msh, d, o)
+        w, h = (int(x) for x in a.size.lower().split("x"))
+        a0, a1 = (float(x) for x in a.rise_a.split(","))
+        d0, d1 = (float(x) for x in a.rise_cam.split(","))
+        p0, p1 = (float(x) for x in a.rise_pitch.split(","))
+        y0, yr = (float(x) for x in a.rise_yaw.split(","))
+        kz, ke = (float(x) for x in a.key.split(","))
+        sp = RiseSpec(a.rise, a.fps, (w, h), a.rise_grow, a0, a1, d0=d0, d1=d1, yaw0=y0, yaw_rate=yr, pitch0=p0, pitch1=p1, fov=a.fov,
+                      key_az=kz, key_el=ke, cut_glow=a.cut_glow, hud_band=a.hud_band or 96, hud_scale=a.hud_scale, cold=a.cold)
+        track = rise_track(sp, s_max, (o, d, hand, center))
+        print(f"  membrane: o = {o.tolist()}, d = {d.tolist()}, s_max = {s_max:.3f}, first-born (hand) = {hand.tolist()}, centre = {center.tolist()}")
+        if a.plan:
+            for k in track:
+                print(f"  #{k['i']:03d} t={k['t']:.3f} phi={k['phi']:.1f} hand_v={k['hand_v']:.3f} c={k['c']:+.4f} dc/dt={k['cv']:+.4f} dist={k['dist']:.2f} target={tuple(round(x, 3) for x in k['target'])}")
+            return
+        out = Path(a.out or "rise.mp4")
+        if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):
+            sys.exit(f"已存在，不覆盖：{out} / {a.contact} / {a.plot}（换版本号）")
+        tag = a.tag or "4D_RISE / MEMBRANE"
+        if a.still is not None:
+            im = _rise_frame(obj, sp, track[a.still], None, tag)[0]
+            out.parent.mkdir(parents=True, exist_ok=True)
+            im.save(out, quality=92)
+            print(f"{out}: frame #{a.still}")
+            return
+        rise(obj, sp, track, str(out), tag, a.contact, a.plot, a.song_t0)
         return
     if a.emerge is not None:
         msh = MeshSDF(a.mesh or MV / "3D" / "她.glb", a.sdf_res, a.sdf_faces, a.mesh_lateral)

@@ -238,6 +238,49 @@ class TestGoldenAge(unittest.TestCase):
         self.assertAlmostEqual(F.normal_flow(f(0), f(1)), 1.0, delta=0.08)
         self.assertAlmostEqual(F.normal_flow(f(0), f(0)), 0.0, places=6)
 
+    def test_rise_operator(self):
+        """穿膜半旋转体（球 r = 0.5，膜在 s = −0.6，d = +z）：c = 0 截面 = 原球；c 里只出现离膜 ≥ c 的部分，落在 sqrt(s_b² − c²)；
+        距离下界：|f(p) − f(q)| ≤ |p − q|（4D 随机点对）；cap > 0 只在膜上"""
+        import torch
+        d = torch.tensor([0.0, 0.0, 1.0], device=F.DEV)
+        o = torch.tensor([0.0, 0.0, -0.6], device=F.DEV)
+        ob = F.mesh_rise(_Sphere(), d, o, prefix="t")
+        g = torch.Generator(device="cpu").manual_seed(0)
+        P3 = (torch.rand(4000, 3, generator=g) * 2.4 - 1.2).to(F.DEV)
+        f0 = ob.f(torch.cat([P3, torch.zeros_like(P3[:, :1])], 1))
+        ins = F.L(P3[:, 0], P3[:, 1], P3[:, 2]) < 0.5
+        self.assertTrue(torch.equal(f0 < 0, ins))
+        c = 0.9                                                    # 球上离膜 ≥ 0.9 的是 z ≥ 0.3 的帽
+        q = torch.tensor([[0.0, 0.0, -0.6 + math.sqrt(1.05 ** 2 - c * c), c]], device=F.DEV)   # s_b = 1.05（z = 0.45）落点
+        self.assertLess(float(ob.f(q).abs()), 0.06)
+        # 贴膜（s = 0.05）的截面 = 球在 s_b ≈ 0.9014（z ≈ 0.30）处的圆，半径 sqrt(0.25 − 0.30²) ≈ 0.40
+        self.assertLess(float(ob.f(torch.tensor([[0.35, 0.0, -0.55, c]], device=F.DEV))), 0)
+        self.assertGreater(float(ob.f(torch.tensor([[0.45, 0.0, -0.55, c]], device=F.DEV))), 0)
+        A = (torch.rand(3000, 4, generator=g) * 2.4 - 1.2).to(F.DEV)
+        B = A + (torch.rand(3000, 4, generator=g) - 0.5).to(F.DEV) * 0.2
+        self.assertTrue(((ob.f(A) - ob.f(B)).abs() <= (A - B).norm(dim=1) + 1e-4).all())
+        mem = torch.tensor([[0.0, 0.0, -0.6 + 1e-3, 1.0]], device=F.DEV)    # 膜上、身体截面里（s_b = 1 处是球内）
+        self.assertGreater(float(ob.cap(mem)), 0)
+
+    def test_rise_track(self):
+        """φ 慢起（首帧手速最小的一档）、c 单调降、永不停、永不过 0；相机距离对数匀速"""
+        import torch
+        sp = F.RiseSpec(5.6, grow=4.0)
+        geo = (torch.zeros(3, device=F.DEV), torch.tensor([0.0, 0.0, 1.0], device=F.DEV),
+               torch.tensor([0.0, 0.0, 1.3], device=F.DEV), torch.tensor([0.0, 0.0, 0.6], device=F.DEV))
+        tr = F.rise_track(sp, 1.3, geo)
+        cs = [k["c"] for k in tr]
+        self.assertEqual(len(tr), 135)
+        self.assertTrue(all(a > b for a, b in zip(cs, cs[1:])))
+        self.assertGreater(min(cs), 0)
+        self.assertLess(tr[0]["hand_v"], 0.25 * max(k["hand_v"] for k in tr))
+        lr = [math.log(b["dist"] / a["dist"]) for a, b in zip(tr, tr[1:])]
+        self.assertLess(max(lr) - min(lr), 1e-9)
+        S, dS = F.hermite01(0.0, 0.2, 0.05)
+        self.assertEqual((S, dS), (0.0, 0.2))
+        S, dS = F.hermite01(1.0, 0.2, 0.05)
+        self.assertAlmostEqual(S, 1.0); self.assertAlmostEqual(dS, 0.05)
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)
