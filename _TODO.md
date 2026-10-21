@@ -17,3 +17,4 @@
 - **Dune 预告片的音乐**：完全不同的节奏 —— 稳、克制，情绪蕴含在相对静止的画面里的场景和元素中。人物动画少，很多画面可以用 Seedream / Seedance 出。用来检验「克制」和「Thymos 驱动」，和 Glitch Mob 的高能量互补。
 - Billie Eilish 那种需要真人动画 / 实拍的 MV：以后再说，先数字。👤2026-10-20：顺序 = Glitch Mob → Dune 预告片 → **Billie 的 MV 作为最后一部**（「to earn the dating chance 😉」）。
 - 实拍感画面怎么来（Billie 用得上）：@anabology 的做法（按原作者说法）= 模仿一套超长 prompt + 给 Midjourney 权限 + 一个 Moodboard，Opus 5.5 跑了 12 小时。我们的路：moodboard 也要（= 图片参考，低熵注入），但 prompt 不靠「超长」，靠 Thymos + 画面语法 + 参考图 + Blender 镜头指导；Seedream/Seedance 补质感。到时两条都试，比分歧点。
+- 👤2026-10-21：再加一部 **Ash Thorp 那种纯 2D motion design**（类似之前的 M O D U L A R 参考）。素材储备：**PCB 设计的视觉词汇**（BGA 扇出、差分对、蛇形等长线、飞线束、铺铜；布线可以「生长」——迷宫 / Lee 波前布线算法当生长过程），参考片《29 届 Mentor Graphics PCB 设计大赛》已交子代理拆（`Projekt_Visual/_参考库/分析_PCB设计大赛.md`），**留给以后，别分散 Glitch Mob 主线**。
