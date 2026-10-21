@@ -306,8 +306,9 @@ def s_attractor(n=6_000_000, a=-1.7, b=1.3, c=-0.1, d=-1.21):
     return glow(np.clip(img, 0, 1), 3, 0.5), [f"Clifford attractor  a={a} b={b} c={c} d={d}", f"points = {n:,}", "kicked out (red) -> pulled back. can't kill us"]
 
 
-def s_optimal_transport(N=60000, iters=60, seed=5):
-    """>v<🖼概念静帧-最优传输-切片最优传输:一团均匀圆盘 → 女孩的亮度分布;画中间时刻 t=0.5 + 流线"""
+def ot_problem(N=60000, seed=5):
+    """最优传输的源 / 目标(静帧 09 与 tools/ot_flow.py 共用):源 = 均匀圆盘(r 0.35,圆心 x=-1.6);
+    目标 = 素材图亮部的亮度分布(x 右移 0.9)。返回 (src, tgt, rng) —— rng 接着给切片用,顺序不能变(静帧可复现)"""
     rng = np.random.default_rng(seed)
     g = np.asarray(Image.open(SRC_IMG).convert("L").resize((320, 240)), np.float64)
     g = np.clip(g / 255 - 0.35, 0, 1) ** 2  # 只要亮的部分(全息人形),不然目标是一整块长方形
@@ -318,13 +319,26 @@ def s_optimal_transport(N=60000, iters=60, seed=5):
     ang = rng.uniform(0, 2 * np.pi, N); rr = np.sqrt(rng.random(N)) * 0.35
     src = np.stack([rr * np.cos(ang) - 1.6, rr * np.sin(ang)], 1)
     tgt[:, 0] += 0.9
+    return src, tgt, rng
+
+
+def sliced_ot(src, tgt, iters, rng, step=0.9):
+    """切片 OT:随机方向上一维排序配对,沿该方向挪。返回 X(src 每个点被送到哪;分布 ≈ tgt)"""
     X = src.copy()
-    for _ in range(iters):   # 切片 OT:随机方向上一维排序配对,沿该方向挪
+    N = len(src)
+    for _ in range(iters):
         th = rng.uniform(0, np.pi); dvec = np.array([np.cos(th), np.sin(th)])
         a, b = X @ dvec, tgt @ dvec
         ia, ib = np.argsort(a), np.argsort(b)
         delta = np.empty(N); delta[ia] = b[ib] - a[ia]
-        X += 0.9 * delta[:, None] * dvec
+        X += step * delta[:, None] * dvec
+    return X
+
+
+def s_optimal_transport(N=60000, iters=60, seed=5):
+    """>v<🖼概念静帧-最优传输-切片最优传输:一团均匀圆盘 → 女孩的亮度分布;画中间时刻 t=0.5 + 流线"""
+    src, tgt, rng = ot_problem(N, seed)
+    X = sliced_ot(src, tgt, iters, rng)
     cost = np.mean(np.sum((X - src) ** 2, 1))
     d = np.zeros((H, W))
     for t in np.linspace(0, 1, 9):   # 位移插值的几个时刻叠在一起 = 流
