@@ -11,6 +11,8 @@ HUD 的 b0 b1 b2 是在粗体素网格上真数的 Betti 数（连通块 / 洞 /
   python tools/four_d.py --obj tiger --op slice  --frames 48 --out out.mp4     # 超平面扫过（c 从 −c_max 到 +c_max）
   python tools/four_d.py --obj tiger --op rotate --frames 168 --out out.mp4    # 在 xw 平面里转，同时 c 缓慢移动
   python tools/four_d.py --obj tesseract --op project --frames 96 --out out.mp4   # 多胞体棱的 4D→3D→2D 透视投影
+  python tools/four_d.py --obj tiger --insert 1.6 --v0 240 --v-end 18 --tau 0.3 --tilt "yw=22,xy=10" --out x.mp4 --contact x.jpg
+      # 插入镜头（1280x720）：帧数 = ceil(槽长×fps)，θ 与 c 先快后缓 v(t) = v_end + (v0−v_end)e^{−t/τ}，物体 4D 倾斜，相机匀速漂移；--plan 只打印参数
   python tools/four_d.py --sheet [--out x.jpg]   # 总览接触表（6 行物体 × 6 列切片 / 角度）
   python tools/four_d.py --list
 --out 以 .mp4 结尾 → 视频（1920x1080, 24 fps）；否则当目录，写 PNG 帧。
@@ -675,13 +677,14 @@ def to_pil(rgb):
 
 
 class Sink:
-    def __init__(self, out, fps=24):
+    def __init__(self, out, fps=24, size=None):
         self.out = Path(out); self.i = 0
+        w, h = size or (W, H)
         if self.out.suffix.lower() == ".mp4":
             import imageio_ffmpeg
             self.out.parent.mkdir(parents=True, exist_ok=True)
             self.proc = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                                          "-s", f"{W}x{H}", "-r", str(fps), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
+                                          "-s", f"{w}x{h}", "-r", str(fps), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16",
                                           "-preset", "slow", str(self.out)], stdin=subprocess.PIPE)
         else:
             self.proc = None; self.out.mkdir(parents=True, exist_ok=True)
@@ -753,6 +756,149 @@ def animate(name, op, frames, out, look="line", theta_max=180.0, c0=None, c1=Non
     for ev in events:
         print("  topology event:", ev)
     print(f"{out}: {sink.i} frames, {time.time() - t0:.1f}s")
+
+
+# ---------- 插入镜头：先快后缓（👤2026-10-21） ----------
+def fast_slow(t, v0, v_end, tau):
+    """>v<🧊四维切片-插入-速度曲线 v(t) = v_end + (v0 − v_end)·e^{−t/τ}：切进来时已在高速，指数缓下来，v_end ≠ 0 所以不停。
+    返回 (位移 x(t) = ∫v = v_end·t + (v0 − v_end)·τ·(1 − e^{−t/τ}),  v(t))"""
+    e = math.exp(-t / tau)
+    return v_end * t + (v0 - v_end) * tau * (1 - e), v_end + (v0 - v_end) * e
+
+
+def insert_frames(dur, fps=24):
+    """槽长 dur 秒 → 帧数：向上取整（盖满剪辑表里的槽，多出的 < 1 帧由剪辑裁掉，不会露黑）"""
+    return max(2, math.ceil(dur * fps - 1e-6))
+
+
+def parse_tilt(spec):
+    """'zw=20,yw=-15,xy=12'（度）→ {平面: 弧度}；物体在 4D 里的固定倾斜摆放"""
+    out = {}
+    for tok in filter(None, (spec or "").replace(" ", "").split(",")):
+        k, _, v = tok.partition("=")
+        if k not in ("xw", "yw", "zw", "xy"):
+            raise ValueError(f"tilt 平面只能是 xw/yw/zw/xy：{tok}")
+        out[k] = math.radians(float(v))
+    return out
+
+
+class InsertSpec:
+    """插入镜头的全部参数（角度：度，角速度：度/秒；c 速度：单位/秒；相机 yaw 速度：弧度/秒，dolly：距离比例/秒）"""
+    def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
+                 tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
+                 red_gain=1.0, look="line", cam_scale=1.0):
+        self.dur, self.fps, self.size = dur, fps, size
+        self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
+        self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
+        self.c_start, self.cv0, self.cv_end = c_start, cv0, cv_end
+        self.tilt, self.tilt_r = tilt, parse_tilt(tilt)
+        self.yaw0, self.yaw_rate, self.pitch, self.dolly = yaw0, yaw_rate, pitch, dolly
+        self.red_gain, self.look, self.cam_scale = red_gain, look, cam_scale
+        if v_end <= 0 or v0 <= v_end:
+            raise ValueError("先快后缓要求 v0 > v_end > 0（v_end = 0 会停住）")
+        if yaw_rate == 0:
+            raise ValueError("相机不能静止：yaw_rate ≠ 0")
+
+
+def insert_track(obj, sp):
+    """>v<🧊四维切片-插入-每帧的真参数（纯数学，不渲染）：t, θ, v, c, dc/dt, yaw, dist。
+    θ 与 c 共用同一条先快后缓曲线（同一个 τ），相机匀速漂移（不从静止开始、不停）"""
+    n = insert_frames(sp.dur, sp.fps)
+    c_start = sp.c_start if sp.c_start is not None else (obj.c_rot if obj.c_rot is not None else 0.0)
+    out = []
+    for i in range(n):
+        t = i / sp.fps
+        dth, v = fast_slow(t, sp.v0, sp.v_end, sp.tau)
+        dc, cv = fast_slow(t, sp.cv0, sp.cv_end, sp.tau) if sp.cv0 != sp.cv_end else (sp.cv0 * t, sp.cv0)
+        out.append(dict(i=i, t=t, th=sp.theta0 + dth, v=v, c=c_start + dc, cv=cv,
+                        yaw=sp.yaw0 + sp.yaw_rate * t, dist=obj.cam * sp.cam_scale * (1 - sp.dolly * t)))
+    return out
+
+
+def insert_R(obj, sp, th_deg):
+    """R = R_plane(θ) · R_plane2(ratio2·θ) · R_tilt（R_tilt 在最靠物体的一侧 = 物体自己的倾斜摆放）"""
+    plane = sp.plane or obj.plane
+    ang = {plane: math.radians(th_deg)}
+    if sp.plane2:
+        if sp.plane2 == plane:
+            raise ValueError("plane2 必须和 plane 不同")
+        ang[sp.plane2] = math.radians(th_deg * sp.ratio2)
+    return rot4(**ang) @ rot4(**sp.tilt_r)
+
+
+def insert(name, sp, out, tag=None, contact=None):
+    """>v<🧊四维切片-插入-渲染一条插入镜头（帧数 = ceil(槽长 × fps)），HUD 写每帧真参数；contact 给了就写接触表（全部帧 + 帧间差分）"""
+    obj = OBJS[name]
+    Wd, Hd = sp.size
+    track = insert_track(obj, sp)
+    plane = sp.plane or obj.plane
+    rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
+    tilt_s = " ".join(f"{k}={math.degrees(v):+.0f}" for k, v in sp.tilt_r.items()) or "none"
+    tag = tag or f"4D_INSERT / {name.upper()}"
+    sink = Sink(out, sp.fps, sp.size)
+    scale = Hd / 1080 * 1.15
+    thumbs, diffs, prev_arr, prev_b = [], [], None, None
+    t0 = time.time()
+    for k in track:
+        R = insert_R(obj, sp, k["th"])
+        v, red = render(obj, R, k["c"], Wd, Hd, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"])
+        b = betti(obj, R, k["c"], n=64)
+        rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45)
+        arr = rgb.mean(-1)
+        diffs.append(float((arr - prev_arr).abs().mean()) if prev_arr is not None else float("nan"))
+        prev_arr = arr
+        lines = [f"{name} ({obj.op}): {obj.eq}",
+                 f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
+                 f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
+                 _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if prev_b is not None and b != prev_b else ""),
+                 "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)"]
+        im = to_pil(rgb)
+        hud(im, lines, tag, red_line=3 if prev_b is not None and b != prev_b else None, scale=scale)
+        sink.add(im)
+        prev_b = b
+        if contact:
+            thumbs.append(im.resize((Wd // 4, Hd // 4), Image.LANCZOS))
+    sink.close()
+    print(f"{out}: {sink.i} frames = {sink.i / sp.fps:.4f} s (slot {sp.dur:g} s), {time.time() - t0:.1f}s")
+    print("  frame-diff (mean |dI|):", " ".join(f"{d:.4f}" for d in diffs[1:]))
+    if contact:
+        _insert_contact(contact, thumbs, track, diffs, sp, name, tag)
+    return track, diffs
+
+
+def _insert_contact(path, thumbs, track, diffs, sp, name, tag, cols=6):
+    """接触表：每帧一格（标 θ、v、帧间差分），底部一条曲线：v(t) 的理论值（灰）与实测帧间差分（红，归一化）"""
+    tw, th_ = thumbs[0].size
+    rows = math.ceil(len(thumbs) / cols)
+    pad, lab, plot_h = 8, 20, 170
+    SW = cols * (tw + pad) + pad
+    SH = rows * (th_ + lab + pad) + pad + plot_h + 40
+    im = Image.new("RGB", (SW, SH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 13)
+    for j, (tb, k) in enumerate(zip(thumbs, track)):
+        x, y = pad + (j % cols) * (tw + pad), pad + (j // cols) * (th_ + lab + pad)
+        im.paste(tb, (x, y))
+        dd = diffs[j]
+        d.text((x, y + th_ + 3), f"#{j:02d} th={k['th']:+.0f} v={k['v']:.0f}" + ("" if dd != dd else f" d={dd * 1000:.1f}"),
+               font=f, fill=(150, 160, 168))
+    y0 = SH - plot_h - 20
+    x0, x1 = 60, SW - 30
+    d.line([(x0, y0 + plot_h - 20), (x1, y0 + plot_h - 20)], fill=(70, 74, 78))
+    n = len(track)
+    vmax = max(k["v"] for k in track)
+    dv = [x for x in diffs[1:]]
+    dmax = max(dv) if dv else 1
+    px = lambda j: x0 + (x1 - x0) * j / max(1, n - 1)  # noqa: E731
+    py = lambda r: y0 + plot_h - 20 - (plot_h - 40) * r  # noqa: E731
+    d.line([(px(j), py(k["v"] / vmax)) for j, k in enumerate(track)], fill=(150, 160, 168), width=2)
+    if len(dv) > 1:
+        d.line([(px(j + 1), py(x / dmax)) for j, x in enumerate(dv)], fill=(235, 60, 66), width=2)
+    d.text((x0, y0 - 4), f"{tag}   {name}   grey: v(t) = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g}) deg/s (max {vmax:.0f})"
+           f"   red: measured mean |frame diff| (normalised, max {dmax * 1000:.1f}e-3)", font=f, fill=(150, 160, 168))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path, quality=90)
+    print(f"  contact sheet -> {path}")
 
 
 # ---------- 接触表 ----------
@@ -848,6 +994,27 @@ def main():
                     "loft_sphere/loft_torus/twist，:rotate / :slice 覆盖默认扫法）")
     ap.add_argument("--rows", default=None, help="--mesh-sheet 主网格的行，格式同上（默认 MESH_SHEET_ROWS）")
     ap.add_argument("--mesh-sheet", action="store_true", help="网格算子接触表（默认写 静帧/21_四维切片_人形.jpg）")
+    g = ap.add_argument_group("插入镜头（--insert 槽长秒数）：θ 与 c 先快后缓 v(t) = v_end + (v0 − v_end) e^{−t/τ}")
+    g.add_argument("--insert", type=float, default=None, help="槽长（秒）；帧数 = ceil(槽长 × fps)")
+    g.add_argument("--fps", type=int, default=24)
+    g.add_argument("--size", default="1280x720")
+    g.add_argument("--plane", default=None, choices=["xw", "yw", "zw", "xy"], help="θ 转哪个平面（默认物体自己的：spin(mesh) = zw）")
+    g.add_argument("--plane2", default=None, choices=["xw", "yw", "zw", "xy"], help="同时转的第二个平面（双旋转）")
+    g.add_argument("--ratio2", type=float, default=0.0, help="第二个平面的角度 = ratio2 × θ")
+    g.add_argument("--theta0", type=float, default=0.0, help="θ 起点（度）")
+    g.add_argument("--v0", type=float, default=240.0, help="θ 初速（度/秒）")
+    g.add_argument("--v-end", type=float, default=25.0, help="θ 渐近速度（度/秒，> 0：不停）")
+    g.add_argument("--tau", type=float, default=0.35, help="缓下来的时间常数（秒）")
+    g.add_argument("--c-start", type=float, default=None, help="超平面位置 c 起点（默认物体的 c_rot 或 0）")
+    g.add_argument("--cv0", type=float, default=0.0, help="c 初速（/秒）")
+    g.add_argument("--cv-end", type=float, default=0.0, help="c 渐近速度（/秒）")
+    g.add_argument("--tilt", default="", help="物体在 4D 里的固定倾斜，度：'zw=20,yw=-15,xy=12'")
+    g.add_argument("--yaw0", type=float, default=0.6); g.add_argument("--yaw-rate", type=float, default=0.10, help="相机匀速漂移（弧度/秒，≠ 0）")
+    g.add_argument("--pitch", type=float, default=0.42); g.add_argument("--dolly", type=float, default=0.04, help="匀速推近（距离比例/秒）")
+    g.add_argument("--red-gain", type=float, default=1.0)
+    g.add_argument("--cam-scale", type=float, default=1.0, help="相机距离 = 物体默认距离 × 这个数（> 1 拉远，碎块不出画、不压 HUD）")
+    g.add_argument("--contact", default=None, help="接触表 jpg 路径（全部帧 + 速度曲线 vs 实测帧间差分）")
+    g.add_argument("--plan", action="store_true", help="只打印每帧 θ / v / c，不渲染")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128:
         MESH.path, MESH.n, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, None
@@ -875,6 +1042,21 @@ def main():
         return
     if a.sheet:
         sheet(a.out or str(MV / "静帧" / "20_四维切片_总览.jpg"), look=a.look)
+        return
+    if a.insert is not None:
+        w, h = (int(x) for x in a.size.lower().split("x"))
+        sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
+                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale)
+        if a.plan:
+            obj = OBJS[a.obj]
+            for k in insert_track(obj, sp):
+                print(f"  #{k['i']:02d} t={k['t']:.3f} theta={k['th']:+7.1f} v={k['v']:6.1f} c={k['c']:+.3f} dc/dt={k['cv']:+.3f}"
+                      + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
+            return
+        out = Path(a.out or f"{a.obj}_insert.mp4")
+        if out.exists():
+            sys.exit(f"已存在，不覆盖：{out}（换版本号）")
+        insert(a.obj, sp, str(out), a.tag, a.contact)
         return
     animate(a.obj, a.op, a.frames, a.out or f"{a.obj}_{a.op}.mp4", a.look, a.theta, a.c0, a.c1, a.tag)
 
