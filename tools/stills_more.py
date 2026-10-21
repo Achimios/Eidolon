@@ -4,8 +4,9 @@
 每张都是真算出来的：Chladni 沙粒、Rosensweig 磁流体尖刺、MEMS 梳齿谐振器一阶模态、本曲频谱瀑布、Kuramoto 瀑布、
 介电击穿 DBM、扫描线撕裂（本曲波形写进她的每一行）、被 threat 通道扰动的分岔图；
 19 = 11 维超立方体 Petrie 投影上随本曲频带颤抖的卡拉比–丘残留意识。
+19b = 同一个 11 维格子，镜头在里面：真透视 + 景深 + 雾，5 个大卡拉比–丘按带通信号沿法向颤抖，红的那个伸向镜头。
 风格：黑底、冷灰、只给一个有含义的红；左下 HUD = 真参数（符号说真话）；右上标签。
-用法：python tools/stills_more.py [--only 11,14] [--out 目录] [--no-sheet]   默认输出到 Projekt_Visual/MV_Cant_Kill_Us/静帧/
+用法：python tools/stills_more.py [--only 11,14] [--out 目录] [--no-sheet]   [--cy-video local,global]   默认输出到 Projekt_Visual/MV_Cant_Kill_Us/静帧/
 """
 import argparse
 import json
@@ -679,9 +680,352 @@ def s_calabi_yau_11d(dim=11, n=5, t_lo=80.0, t_hi=84.0, t_near=82.0, f_lo=40.0, 
         f"red = most agitated inner remnant ({lo_b:.0f}-{hi_b:.0f} Hz, a = {amp[red_i]:.2f})   centre = her"]
 
 
+# ---------- 19b 卡拉比–丘：格子里面的局部 ----------
+def _seg_dens(a, b, wts, w, h, ss=2, k=1.4):
+    """线段 → 抗锯齿密度图（同 _line_dens，但吃线段端点 a, b: (n, 2) 像素坐标，画幅 w×h 可变）"""
+    a = a * ss; b = b * ss
+    ln = np.hypot(*(b - a).T)
+    n = np.maximum(2, np.ceil(ln * k)).astype(int)
+    seg = np.repeat(np.arange(len(a)), n)
+    t = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 0.5) / np.repeat(n, n)
+    q = a[seg] + (b[seg] - a[seg]) * t[:, None]
+    ww = np.repeat(wts * ln / n, n)
+    Wd, Hd = w * ss, h * ss
+    x0 = np.floor(q[:, 0]).astype(int); y0 = np.floor(q[:, 1]).astype(int); fx = q[:, 0] - x0; fy = q[:, 1] - y0
+    d = np.zeros(Wd * Hd)
+    for dx, dy, f in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+        xx, yy = x0 + dx, y0 + dy
+        ok = (xx >= 0) & (xx < Wd) & (yy >= 0) & (yy < Hd)
+        d += np.bincount(yy[ok] * Wd + xx[ok], weights=(ww * f)[ok], minlength=Wd * Hd)
+    return d.reshape(h, ss, w, ss).mean((1, 3)) * ss
+
+
+def _cy_grid(n=5, m=25, ext=1.0, alpha=np.pi / 4):
+    """Hanson 五次截面 z1^n + z2^n = 1 的 25 片参数网格 (25, m, m)，映到 3D：(Re z1, Re z2, cos α Im z1 + sin α Im z2)。
+    返回 (p3 归一化, 法向, z1, z2)"""
+    A = np.linspace(0, np.pi / 2, m); B = np.linspace(-ext, ext, m)
+    Z = A[:, None] + 1j * B[None, :]
+    c1, c2 = np.cos(Z) ** (2 / n), np.sin(Z) ** (2 / n)
+    k = np.arange(n)
+    z1 = (np.exp(2j * np.pi * k / n)[:, None, None, None] * c1).repeat(n, 1).reshape(n * n, m, m)
+    z2 = (np.exp(2j * np.pi * k / n)[None, :, None, None] * c2).repeat(n, 0).reshape(n * n, m, m)
+    p = np.stack([z1.real, z2.real, np.cos(alpha) * z1.imag + np.sin(alpha) * z2.imag], -1)
+    p /= np.linalg.norm(p, axis=-1).max()
+    du = np.gradient(p, axis=1); dv = np.gradient(p, axis=2)
+    nv = np.cross(du, dv)
+    nv /= np.linalg.norm(nv, axis=-1, keepdims=True) + 1e-9
+    return p, nv, z1, z2
+
+
+def _look(fwd, up=(0.0, 0.0, 1.0)):
+    f = np.asarray(fwd, float); f /= np.linalg.norm(f)
+    r = np.cross(f, up); r /= np.linalg.norm(r)
+    return np.stack([r, np.cross(r, f), f])           # 行 = 右、上、前
+
+
+def _cy_local_setup(dim=11, n_cy=5, alpha=np.pi / 4, f_lo=40.0, f_hi=8000.0, t_lo=80.0, dur=5.5, seed=19):
+    """几何 + 声音，静帧和样片共用"""
+    rng = np.random.default_rng(seed)
+    bits = (np.arange(2 ** dim)[:, None] >> np.arange(dim)) & 1
+    V = bits - 0.5
+    # 投影：u3 = 主对角 (1,…,1)/√11 —— 高度 = 汉明重量，12 层楼；u1, u2 = Petrie 平面对 u3 正交化
+    th = np.pi * np.arange(dim) / dim
+    u3 = np.ones(dim) / np.sqrt(dim)
+    U = [u3]
+    for v in (np.cos(th), np.sin(th)):
+        for q in U:
+            v = v - (v @ q) * q
+        U.append(v / np.linalg.norm(v))
+    U = np.stack([U[1], U[2], U[0]], 1)                 # (11, 3)
+    P = V @ U
+    ia, kb = np.nonzero(bits == 0); ib = ia + (1 << kb)
+    nsub = 6                                            # 每条棱切 6 段：长棱从近到远，景深要沿棱变
+    tt = np.arange(nsub + 1) / nsub
+    pts = P[ia][:, None] + (P[ib] - P[ia])[:, None] * tt[None, :, None]
+    lat_a = pts[:, :-1].reshape(-1, 3); lat_b = pts[:, 1:].reshape(-1, 3)
+    lat_e = np.repeat(np.arange(len(ia)), nsub)          # 每小段属于哪条棱
+    # 声音：n_cy 个对数频带，带通信号本身就是弦的位移
+    sr = 22050
+    x, _ = S.audio(sr=sr, start=t_lo, dur=dur)
+    X = np.fft.rfft(x); fq = np.fft.rfftfreq(len(x), 1 / sr)
+    edges = np.geomspace(f_lo, f_hi, n_cy + 1)
+    xb = np.stack([np.fft.irfft(X * ((fq >= edges[i]) & (fq < edges[i + 1])), len(x)) for i in range(n_cy)])
+    win = int(sr * 0.046)
+    env = np.sqrt(_smooth1d(xb ** 2, win))
+    ref = np.median(env, 1)
+    return dict(dim=dim, U=U, P=P, bits=bits, ia=ia, ib=ib, n_edges=len(ia), lat_a=lat_a, lat_b=lat_b, lat_e=lat_e, sr=sr, t_lo=t_lo, xb=xb, env=env,
+                ref=ref, edges=edges, alpha=alpha, rng=rng, n_cy=n_cy, cy=_cy_grid(alpha=alpha))
+
+
+def _hamming(st, v0):
+    return (st["bits"] != st["bits"][v0]).sum(1)
+
+
+def _cy_local_place(st, cam, R, f, w, h, v0, ball=4):
+    """按构图在视锥里找最近的格点（只在家顶点 v0 的汉明球 2..ball 里找 = 局部）：(屏幕 x, 屏幕 y, 深度, 尺寸)；第 0 个 = 最近、红"""
+    plan = [(0.66, 0.54, 0.50, 0.16), (0.31, 0.36, 1.00, 0.15), (0.55, 0.30, 1.60, 0.16),
+            (0.93, 0.12, 2.40, 0.18), (0.16, 0.20, 1.90, 0.17)][:st["n_cy"]]
+    hd = _hamming(st, v0)
+    used, sites = set(np.nonzero((hd < 2) | (hd > ball))[0].tolist()), []
+    for sx, sy, z, sz in plan:
+        pc = np.array([(sx * w - w / 2) / f * z, -(sy * h - h / 2) / f * z, z])
+        pw = cam + pc @ R
+        dd = np.linalg.norm(st["P"] - pw, axis=1)
+        for j in np.argsort(dd):
+            if j not in used:
+                used.add(j); sites.append((j, sz)); break
+    return sites
+
+
+def _cy_local_render(st, t, cam, R, v0, w=W, h=H, ss=2, expo=7, shutter=1 / 60, sites=None, fov=96.0,
+                     z_focus=0.45, k_dof=9.0, z_fog=0.9, gain=0.035, lat_w=0.55, lat_far=0.05, ball=4, z_far=3.2):
+    """一帧：格子 + n_cy 个卡拉比–丘，真透视、景深（按深度分层模糊）、雾。返回 (img, info)"""
+    f = (w / 2) / np.tan(np.radians(fov) / 2)
+    cx, cy = w / 2, h / 2
+    if sites is None:
+        sites = _cy_local_place(st, cam, R, f, w, h, v0, ball)
+    p0, nv, z1, z2 = st["cy"]
+    m = p0.shape[1]; sel = np.arange(0, m, 4)
+    modes = [(1, 1), (2, 1), (2, 3), (3, 4), (5, 4), (6, 5), (7, 7)]
+    i_t = lambda tq: np.clip(((tq - st["t_lo"]) * st["sr"]).astype(int), 0, st["xb"].shape[1] - 1)
+    A_list, B_list, w_list, red_list, info = [st["lat_a"]], [st["lat_b"]], [np.where(np.maximum(*[_hamming(st, v0)[st[k]] for k in ("ia", "ib")])[st["lat_e"]] <= ball, lat_w, lat_far)], [np.zeros(len(st["lat_a"]), bool)], []
+    rng = np.random.default_rng(7)
+    for ci, (vi, sz) in enumerate(sites):
+        pq = modes[ci]
+        psi = (z1 ** pq[0] * z2 ** pq[1]).real
+        psi /= np.abs(psi).max()
+        centre = st["P"][vi]
+        Q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        to_cam = (cam - centre) / np.linalg.norm(cam - centre)
+        if ci == 0:                                      # 红：把它一根"手臂"（最远的叶）转向镜头
+            pf = p0.reshape(-1, 3); tip = pf[np.argmax(pf @ np.array([1.0, 1.0, 0.0]))]
+            tip = tip / np.linalg.norm(tip)
+            tgt = 0.80 * to_cam + 0.50 * R[0] - 0.30 * R[1]       # 斜着伸过来（正对镜头会读成平面星形）
+            to_cam = tgt / np.linalg.norm(tgt)
+            v = np.cross(tip, to_cam); s_, c_ = np.linalg.norm(v), tip @ to_cam
+            K = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+            Q = np.eye(3) + K + K @ K * ((1 - c_) / (s_ ** 2 + 1e-12))
+        nw = nv @ Q.T; pw0 = p0 @ Q.T
+        reach = 1 + 1.2 * np.clip(nw @ to_cam, 0, 1) if ci == 0 else 1.0
+        te = t + np.arange(expo) * shutter / expo
+        ii = i_t(te)
+        disp = st["xb"][ci, ii] / (np.sqrt(2) * st["ref"][ci])   # 1 = 该频带中位电平的峰值
+        amp = st["env"][ci, i_t(np.array([t + shutter / 2]))[0]] / st["ref"][ci]
+        info.append(dict(site=vi, size=sz, mode=pq, amp=amp, lo=st["edges"][ci], hi=st["edges"][ci + 1],
+                         dist=float(np.linalg.norm(centre - cam))))
+        for e in range(expo):
+            pe = centre + sz * (pw0 + (gain * disp[e] * psi * reach)[..., None] * nw)
+            L1 = pe[:, sel].reshape(-1, m, 3); L2 = pe[:, :, sel].transpose(0, 2, 1, 3).reshape(-1, m, 3)
+            Lp = np.concatenate([L1, L2])
+            a = Lp[:, :-1].reshape(-1, 3); b = Lp[:, 1:].reshape(-1, 3)
+            A_list.append(a); B_list.append(b); w_list.append(np.full(len(a), 1.2 / expo)); red_list.append(np.full(len(a), ci == 0))
+    A = np.concatenate(A_list) - cam; B = np.concatenate(B_list) - cam
+    wt = np.concatenate(w_list); red = np.concatenate(red_list)
+    A = A @ R.T; B = B @ R.T
+    near = 0.04
+    ok = (A[:, 2] > near) | (B[:, 2] > near)
+    A, B, wt, red = A[ok], B[ok], wt[ok], red[ok]
+    ta = np.clip((near - A[:, 2]) / (B[:, 2] - A[:, 2] + 1e-12), 0, 1)[:, None] * (A[:, 2] < near)[:, None]
+    tb = np.clip((near - B[:, 2]) / (A[:, 2] - B[:, 2] + 1e-12), 0, 1)[:, None] * (B[:, 2] < near)[:, None]
+    A, B = A + (B - A) * ta, B + (A - B) * tb
+    z = 0.5 * (A[:, 2] + B[:, 2])
+    pa = np.stack([cx + f * A[:, 0] / A[:, 2], cy - f * A[:, 1] / A[:, 2]], 1)
+    pb = np.stack([cx + f * B[:, 0] / B[:, 2], cy - f * B[:, 1] / B[:, 2]], 1)
+    # Liang–Barsky 裁到画幅（留边给模糊）
+    pad = 60; d = pb - pa
+    t0 = np.zeros(len(pa)); t1 = np.ones(len(pa)); keep = np.ones(len(pa), bool)
+    for p_, q_ in ((-d[:, 0], pa[:, 0] + pad), (d[:, 0], w + pad - pa[:, 0]), (-d[:, 1], pa[:, 1] + pad), (d[:, 1], h + pad - pa[:, 1])):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r_ = q_ / p_
+        t0 = np.where(p_ < 0, np.maximum(t0, r_), t0); t1 = np.where(p_ > 0, np.minimum(t1, r_), t1)
+        keep &= ~((p_ == 0) & (q_ < 0))
+    keep &= t0 < t1
+    pa, pb = pa + d * t0[:, None], pa + d * t1[:, None]
+    pa, pb, z, wt, red = pa[keep], pb[keep], z[keep], wt[keep], red[keep]
+    wt = wt * np.where(red, np.exp(-z / 3.0), np.exp(-z / z_fog))                          # 雾
+    zb = np.geomspace(near, 8.0, 11)
+    gl = np.zeros((h, w)); rl = np.zeros((h, w))
+    for k in range(len(zb) - 1):
+        mk = (z >= zb[k]) & (z < zb[k + 1]) & ((z < z_far) | red)
+        if not mk.any():
+            continue
+        zc = np.sqrt(zb[k] * zb[k + 1])
+        r = int(round(k_dof * (w / W) * max(0.0, 1 / zc - 1 / z_focus)))   # 近处弥散圈，远处只交给雾
+        for msk, acc in ((mk & ~red, gl), (mk & red, rl)):
+            if msk.any():
+                dd = _seg_dens(pa[msk], pb[msk], wt[msk], w, h, ss) * (1 + 0.15 * r)   # 弥散圈略补偿：近处的虚线宽而不灭
+                acc += S.blur(S.blur(dd, r), r) if r > 0 else dd
+    return gl, rl, info, f
+
+
+def _cy_local_compose(gl, rl):
+    g = 1 - np.exp(-gl * 0.45)
+    rv = 1 - np.exp(-rl * 0.45)
+    img = S.colorize(g) * (1 - rv[..., None]) + rv[..., None] * S.RED
+    return S.glow(np.clip(img, 0, 1), 3, 0.35)
+
+
+CY_CAM = dict(cam=np.array([0.06, -0.10, -0.55]), fwd=np.array([0.55, 0.25, 1.0]))
+
+
+def _cy_local_cam(st):
+    """家顶点 v0 = 离锚点最近的格点；镜头在它身后 0.15、略高 —— 它的 11 条棱从镜头脚下放射出去"""
+    R = _look(CY_CAM["fwd"])
+    v0 = int(np.argmin(np.linalg.norm(st["P"] - CY_CAM["cam"], axis=1)))
+    return st["P"][v0] - 0.15 * R[2] + 0.04 * R[1], R, v0
+
+
+def s_calabi_yau_local(t_near=82.0):
+    """>v<🖼概念静帧2-卡拉比丘局部-镜头在 11 维格子里面：{±½}^11 投到 3D（u1,u2 = Petrie 平面，u3 = 主对角 → 高度 = 汉明重量，12 层楼），
+    真透视 + 景深 + 雾；5 个大卡拉比–丘五次截面挂在格点上，各分一个对数频带，位移 = 该频带的带通信号本身 × 模态 Re(z1^p z2^q) 沿法向；
+    7 次曝光铺满 1/60 s 快门 —— 节线不动所以最亮。红 = 最近的那个，把一叶伸向镜头（= 她）"""
+    st = _cy_local_setup()
+    # 82 s 附近最强起音（全频带包络和的上升沿）
+    tot = st["env"].sum(0) / st["ref"].sum()
+    tq = st["t_lo"] + np.arange(len(tot)) / st["sr"]
+    nearm = np.abs(tq - t_near) < 0.4
+    dlt = np.r_[0, np.diff(_smooth1d(tot[::64], 3))]
+    nm = nearm[::64]
+    t_at = tq[::64][np.nonzero(nm)[0][np.argmax(dlt[nm])]] + 0.03
+    cam, R, v0 = _cy_local_cam(st)
+    gl, rl, info, f = _cy_local_render(st, t_at, cam, R, v0)
+    img = _cy_local_compose(gl, rl)
+    vb = "".join(str(int(b)) for b in st["bits"][v0][::-1])
+    bands = "  ".join(f"{d['lo']:.0f}-{d['hi']:.0f}Hz a={d['amp']:.2f}" for d in info)
+    r0 = info[0]
+    return img, [
+        f"11-cube {{-1/2,1/2}}^11 -> R^3: u1,u2 = Petrie plane (cos,sin pi k/11) _|_ u3,  u3 = (1,...,1)/sqrt11 = Hamming floor",
+        f"camera (u1,u2,u3) = ({cam[0]:+.2f}, {cam[1]:+.2f}, {cam[2]:+.2f}) behind home vertex {vb} (floor {int(st['bits'][v0].sum())}), fov 96, focus 0.45, fog 0.9",
+        f"local = Hamming ball r <= 4 around home ({int((_hamming(st, v0) <= 4).sum())} vertices) full weight, rest of {st['n_edges']} edges at 5 %",
+        f"Calabi-Yau z1^5 + z2^5 = 1, 25 patches, alpha = pi/4;  N = {len(info)} at vertices, displacement = band signal x_b(t) * Re(z1^p z2^q) n",
+        f"bands: {bands}",
+        f"7 exposures over 1/60 s @ {t_at:.3f} s  Can't Kill Us;  red = nearest ({r0['dist']:.2f} away, {r0['lo']:.0f}-{r0['hi']:.0f} Hz, mode {r0['mode']}) reaching to her = you"]
+
+
+def _mux_audio(tmp, out, t0, dur):
+    """无声视频 + 原曲 t0 起 dur 秒 → out（视频流直接拷贝）"""
+    import subprocess
+    import imageio_ffmpeg
+    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(tmp), "-ss", str(t0), "-t", str(dur),
+                    "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    "-shortest", str(out)], check=True)
+    Path(tmp).unlink()
+    return out
+
+
+def _video_writer(path, w, h, fps):
+    import imageio_ffmpeg
+    wr = imageio_ffmpeg.write_frames(str(path), (w, h), fps=fps, quality=8, macro_block_size=8)
+    wr.send(None)
+    return wr
+
+
+def cy_local_video(out, t0=80.0, dur=5.0, fps=24, w=1280, h=720, push=0.15, gain=0.10):
+    """样片 ①：镜头沿视线慢慢推进 push 个格子单位，CY 按每帧真实的带通信号颤抖（5 次曝光 / 1/48 s），配原曲"""
+    st = _cy_local_setup(t_lo=t0, dur=dur + 0.2)
+    cam0, R, v0 = _cy_local_cam(st)
+    f = (w / 2) / np.tan(np.radians(96.0) / 2)
+    sites = _cy_local_place(st, cam0, R, f, w, h, v0)
+    tmp = Path(out).with_suffix(".tmp.mp4")
+    wr = _video_writer(tmp, w, h, fps)
+    nfr = int(dur * fps)
+    for i in range(nfr):
+        s = i / nfr
+        cam = cam0 + R[2] * push * (0.5 - 0.5 * np.cos(np.pi * s))
+        gl, rl, _, _ = _cy_local_render(st, t0 + i / fps, cam, R, v0, w=w, h=h, ss=1, expo=5, shutter=1 / 48,
+                                        sites=sites, gain=gain)
+        wr.send(np.ascontiguousarray((_cy_local_compose(gl, rl) * 255).astype(np.uint8)))
+    wr.close()
+    return _mux_audio(tmp, out, t0, dur)
+
+
+def cy_global_video(out, t0=80.0, dur=6.0, fps=24, w=1280, h=720, dim=11, n=5, expo=4, shutter=1 / 48,
+                    turn=0.55, plane=(0, 6), f_lo=40.0, f_hi=8000.0, seed=19,
+                    rings=((0.30, 2, 16.0), (0.58, 2, 18.0), (0.80, 1, 19.0), (1.0, 1, 25.0))):
+    """样片 ②（静帧 19 的全局构图）：11 维里在 (x_plane0, x_plane1) 平面转 turn 弧度 → Petrie 投影跟着变；
+    66 个 CY 各分一个对数频带，每次曝光的 平移 + δα = 该频带带通信号本身（频率跟音频走），配原曲"""
+    rng = np.random.default_rng(seed)
+    k_ = h / H
+    bits = (np.arange(2 ** dim)[:, None] >> np.arange(dim)) & 1
+    V = bits - 0.5
+    th = np.pi * np.arange(dim) / dim
+    E = np.stack([np.cos(th), np.sin(th)], 1)
+    ia, kb = np.nonzero(bits == 0); ib = ia + (1 << kb)
+    P0 = V @ E
+    Rmax = np.hypot(*P0.T).max(); sc = 400 / Rmax * k_
+    cx, cy = w / 2 + 130 * k_, h / 2 - 20 * k_
+    r = np.hypot(*P0.T); rk = np.round(r, 6)
+    orbit_r = np.array([q for q in np.unique(rk) if (rk == q).sum() == 2 * dim])
+    sites, ring, size = [], [], []
+    for j, (fr, step, sz) in enumerate(rings):
+        q = orbit_r[np.argmin(np.abs(orbit_r - fr * Rmax))]
+        idx = np.nonzero(rk == q)[0]
+        idx = idx[np.argsort(np.arctan2(P0[idx, 1], P0[idx, 0]))][::step]
+        sites += idx.tolist(); ring += [j] * len(idx); size += [sz * k_] * len(idx)
+    sites = np.array(sites); ring = np.array(ring); size = np.array(size); N = len(sites)
+    sr = 22050
+    x, _ = S.audio(sr=sr, start=t0, dur=dur + 0.2)
+    X = np.fft.rfft(x); fq = np.fft.rfftfreq(len(x), 1 / sr)
+    edges = np.geomspace(f_lo, f_hi, N + 1)
+    xb = np.stack([np.fft.irfft(X * ((fq >= edges[i]) & (fq < edges[i + 1])), len(x)) for i in range(N)]).astype(np.float32)
+    ref = np.median(np.sqrt(_smooth1d(xb[:, ::8].astype(np.float64) ** 2, int(sr / 8 * 0.046))), 1)
+    inner = np.nonzero(ring == 0)[0]
+    red_i = inner[np.argmax((xb[inner] ** 2).mean(1) / ref[inner] ** 2)]
+    z1, z2 = _cy_quintic(n=n, m=5, s=16)
+    ext = max(np.abs(z1.real).max(), np.abs(z2.real).max())
+    Qs = [np.linalg.qr(rng.normal(size=(3, 3)))[0] for _ in range(N)]
+    dirs = rng.normal(size=(N, 2)); dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    yy, xx = np.mgrid[0:h, 0:w]
+    dc = np.hypot(xx - cx, yy - cy)
+    her = np.exp(-(dc / 2.2) ** 2) + 0.25 * np.exp(-(dc / 9) ** 2)
+    hole = np.clip(np.exp(-(dc / (46 * k_)) ** 2) * 0.85, 0, 1)
+    tmp = Path(out).with_suffix(".tmp.mp4")
+    wr = _video_writer(tmp, w, h, fps)
+    nfr = int(dur * fps)
+    for fi in range(nfr):
+        s = fi / nfr
+        ph = turn * (0.5 - 0.5 * np.cos(np.pi * s))
+        G = np.eye(dim); a_, b_ = plane
+        G[a_, a_] = G[b_, b_] = np.cos(ph); G[a_, b_] = -np.sin(ph); G[b_, a_] = np.sin(ph)
+        P = V @ G @ E
+        XY = np.stack([cx + P[:, 0] * sc, cy - P[:, 1] * sc], 1)
+        lat = _seg_dens(XY[ia], XY[ib], np.ones(len(ia)), w, h, 1)
+        lv = np.clip(lat / (1.6 * S.blur(S.blur(lat, 7), 7) + 0.25), 0, 1) ** 1.3 * 0.55
+        te = t0 + fi / fps + np.arange(expo) * shutter / expo
+        ii = np.clip(((te - t0) * sr).astype(int), 0, xb.shape[1] - 1)
+        D = np.clip(xb[:, ii] / (np.sqrt(2) * ref[:, None]), -3, 3)          # (N, expo) 1 = 该频带中位电平的峰值
+        ga, gb, gw, ra, rb, rw = [], [], [], [], [], []
+        for i in range(N):
+            for e in range(expo):
+                d = D[i, e]
+                al = np.pi / 4 + 0.8 * d
+                p3 = np.stack([z1.real, z2.real, np.cos(al) * z1.imag + np.sin(al) * z2.imag], -1) / ext @ Qs[i].T
+                off = 0.7 * d * size[i] * dirs[i]
+                px = XY[sites[i], 0] + off[0] + p3[..., 0] * size[i]
+                py = XY[sites[i], 1] + off[1] + p3[..., 1] * size[i]
+                depth = 0.25 + 0.75 * np.clip(p3[..., 2].mean(-1) * 0.6 + 0.5, 0, 1)
+                Pl = np.stack([px, py], -1)
+                a = Pl[:, :-1].reshape(-1, 2); b = Pl[:, 1:].reshape(-1, 2)
+                wt = np.repeat(depth * 1.3 / expo, Pl.shape[1] - 1)
+                if i == red_i:
+                    ra.append(a); rb.append(b); rw.append(wt)
+                else:
+                    ga.append(a); gb.append(b); gw.append(wt)
+        cyg = _seg_dens(np.concatenate(ga), np.concatenate(gb), np.concatenate(gw), w, h, 1)
+        cyr = _seg_dens(np.concatenate(ra), np.concatenate(rb), np.concatenate(rw), w, h, 1)
+        cv = 1 - np.exp(-cyg * 0.20); rv = 1 - np.exp(-cyr * 0.22)
+        g = np.clip(lv * (1 - hole) + cv + her, 0, 1)
+        img = S.colorize(g) * (1 - rv[..., None]) + rv[..., None] * S.RED
+        img = S.glow(np.clip(img, 0, 1), 2, 0.45)
+        wr.send(np.ascontiguousarray((img * 255).astype(np.uint8)))
+    wr.close()
+    return _mux_audio(tmp, out, t0, dur)
+
+
 STILLS = {"11_chladni": s_chladni, "12_ferrofluid": s_ferrofluid, "13_mems": s_mems, "14_waterfall": s_waterfall,
           "15_kuramoto_waterfall": s_kuramoto_waterfall, "16_lichtenberg": s_lichtenberg, "17_scan_tear": s_scan_tear,
-          "18_bifurcation_tremble": s_bifurcation_tremble, "19_calabi_yau_11d": s_calabi_yau_11d}
+          "18_bifurcation_tremble": s_bifurcation_tremble, "19_calabi_yau_11d": s_calabi_yau_11d,
+          "19b_calabi_yau_local": s_calabi_yau_local}
 
 
 def contact_sheet(out, names, tw=640, th=360, pad=16, lab=30):
@@ -706,7 +1050,15 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default=str(S.MV / "静帧"))
     ap.add_argument("--no-sheet", action="store_true")
+    ap.add_argument("--cy-video", default="", help="卡拉比丘样片（配原曲 80 s 起）：local → 样片/11_卡拉比丘_局部_试.mp4，global → 11b_卡拉比丘_全局_试.mp4，可逗号同时")
     a = ap.parse_args()
+    if a.cy_video:
+        jobs = {"local": (cy_local_video, "11_卡拉比丘_局部_试.mp4"), "global": (cy_global_video, "11b_卡拉比丘_全局_试.mp4")}
+        for k in a.cy_video.split(","):
+            t0 = time.time()
+            p = jobs[k][0](S.MV / "样片" / jobs[k][1])
+            print(f"cy video {k}: {time.time() - t0:.1f}s -> {p}", flush=True)
+        return
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     for name, fn in STILLS.items():
         if a.only and not any(k in name for k in a.only.split(",")):
