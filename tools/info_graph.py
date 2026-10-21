@@ -21,7 +21,7 @@
   python tools/info_graph.py track --src <视频> --start <歌曲时间> [--palette ...] [--name ...] [--v 3]
   例（B 当前版）：track --v 3 --src MV/素材/全息女性视频运镜描述_裁肩_v2.mp4 --start 45.12 --levels 0.45,0.65,0.85
                   --min-area 40,10,3 --name 22_信息图_成分树_她的脸_v3
-  --v（版式版本，旧版可复现）：memory 1 = 首版 / 2 = John 大框常驻 + 右上 z 向量对照；
+  --v（版式版本，旧版可复现）：memory 1 = 首版 / 2 = John 大框常驻 + 右上 z 向量对照 / 3（默认）= 注意力分层标签 + 最小字号 + 开场已在长；
                                track 1 = 遮罩框盖原位 / 2 = 标本栏 + 直方图 / 3 = 标本栏滞回 + 放大镜优先新生高光
 输出：视频（配乐）+ 同名 .json（节点 / 边 / 搜索顺序 / 每帧相机）+ _接触表.jpg。不覆盖已有文件（换 --name）。
 人读版：-给人类的解释/信息可视化怎么做的.md
@@ -144,8 +144,17 @@ def draw_arrow(dr, pts, s, at, col, size=5.0):
     dr.line([tuple(p - d * a + o * a * 0.6), tuple(p), tuple(p - d * a - o * a * 0.6)], fill=col, width=max(1, SS))
 
 
+_MINF = {"on": False}
+READ_MIN, READ_MIN_DIM = 11, 12     # 1080p 实测（scratchpad fonts.png）：Consolas 8–9 px 读不清；10 px 只有亮色勉强；暗色要 ≥ 12
+
+
 def text(dr, xy, s, col, size=11, cn=False, anchor="la", knock=None):
-    """knock = 底色：先在字的外框里铺一块底色（字压在边上时把边挖掉 → 标签永远可读）"""
+    """knock = 底色：先在字的外框里铺一块底色（字压在边上时把边挖掉 → 标签永远可读）。
+    _MINF on（memory v3 起）：字号至少 READ_MIN；调用方负责暗色字用 ≥ READ_MIN_DIM。"""
+    if _MINF["on"]:
+        size = max(size, READ_MIN)
+        if sum(col) / 3 < 100:                            # 暗色字：再大一号，否则读不清
+            size = max(size, READ_MIN_DIM)
     if knock is not None:
         x0, y0, x1, y1 = dr.textbbox((xy[0], xy[1]), s, font=font(size, cn), anchor=anchor)
         pad = 2 * SS
@@ -393,8 +402,13 @@ def ease_pop(dt, tau=0.12):
     return math.exp(-(dt - 2 / FPS) / tau)
 
 
-def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, omega=3.4, v=2):
+def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, omega=3.4, v=3):
     john_big = v >= 2
+    _MINF["on"] = v >= 3
+    nbr = {i: set() for i in range(len(mem.nodes))}
+    for a_, b_, _, _ in mem.edges:
+        nbr[a_].add(b_)
+        nbr[b_].add(a_)
     P = PALETTES[pal]
     dur = seg[1] - seg[0]
     T = n_frames or int(round(dur * FPS))
@@ -440,7 +454,7 @@ def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, om
         targets.append(tg)
         zooms.append(z)
     targets = np.array(targets)
-    start = pos[0] if v < 2 else pos[mem.now] + (pos[0] - pos[mem.now]) * 0.55   # 开场：从故事起点（0:00）那一侧高速扫向「此刻」
+    start = pos[0] if v < 2 else pos[mem.now] + (pos[0] - pos[mem.now]) * (0.55 if v < 3 else 0.32)   # 开场：从故事起点（0:00）那一侧高速扫向「此刻」
     v0 = (pos[mem.now] - start) * (3.0 if v < 2 else 4.2)
     cam = spring_follow(targets, start, v0, omega=omega)        # 每弹出一个节点目标跳一次 → 镜头「进」一下再「缓」
     zs = spring_follow(np.array(zooms)[:, None], [zoom_in * 0.8], [0.25], omega=1.8)[:, 0]
@@ -502,11 +516,22 @@ def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, om
             pts, s = bezier(pa, pb, curv)
             seen = a in popped or b in popped
             if kind == "story":
-                draw_path(dr, pts, s, P["faint"], 1)
+                if v >= 3:                                  # v3 开场：故事线从 0:00 那一侧一路「长」过来，第一帧已经长到三分之一
+                    ta = -0.35 + 1.0 * a / max(1, len(mem.nodes) - 2)
+                    gs = min(1.0, max(0.0, (t - ta) / 0.25))
+                    draw_path(dr, pts, s, P["dim"] if gs < 1 else P["faint"], 1, upto=gs)
+                else:
+                    draw_path(dr, pts, s, P["faint"], 1)
             elif kind == "same":
                 draw_path(dr, pts, s, P["mid"] if seen else P["dim"], 1, dash=(1.2, 3.0))
             else:
                 draw_path(dr, pts, s, P["dim"] if seen else P["faint"], 1, dash=(4, 5), phase=t * 9)
+                if v >= 3 and mem.now in (a, b) and t < 1.2:      # v3 开场：「此刻」的情绪近邻边第一帧就已在往外长（搜索在预热）
+                    g0 = min(1.0, (t + 0.3) / 0.6)
+                    if mem.now == b:
+                        pts, s = pts[::-1], np.concatenate([[0], np.cumsum(np.hypot(*np.diff(pts[::-1], axis=0).T))])
+                    draw_path(dr, pts, s, mix(P["accent"], 0.8 * (1 - max(0.0, t - 0.6) / 0.6), P["bg"]), 1.4, dash=(6, 4),
+                              upto=g0, phase=-t * 14)
         # 搜索树的边：父 → 子，在弹出那一刻「长出来」（0.25 s），箭头跑在生长前沿
         for u, tu in popped.items():
             p = par.get(u, -1)
@@ -585,8 +610,11 @@ def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, om
             if is_j:
                 rr = 4.5 * SS
                 dr.ellipse([p[0] - rr, p[1] - rr, p[0] + rr, p[1] + rr], fill=P["hot"])
-            # 标签：三级 —— 时间（亮）/ 名字（中）/ 特征（暗，只给已访问的）
             lx, ly = p[0] + half + 7 * SS, p[1] - 12 * SS
+            if v >= 3:
+                _label_v3(dr, P, mem, nd, i, lx, ly, p, half, popped, t, seg, red_on, nbr, is_j, is_now)
+                continue
+            # 标签：三级 —— 时间（亮）/ 名字（中）/ 特征（暗，只给已访问的）
             tcol = P["ink"] if vis or is_now else P["mid"]
             if is_j and (vis or red_on):
                 tcol = P["hot"]
@@ -627,7 +655,13 @@ def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, om
                ]
         for k_, line in enumerate(hud):
             text(dr, (56 * SS, (40 + 17 * k_) * SS), line, P["ink"] if k_ == 0 else P["mid"], 12 if k_ == 0 else 11)
-        if red_on:
+        if red_on and v >= 3:
+            dj = next(d for u, d, _ in mem.order if u == mem.john)
+            text(dr, (56 * SS, (40 + 17 * 3 + 8) * SS), f"MATCH: JOHN-117   CONFIDENCE {mem.conf:.2f}", P["hot"], 15)
+            text(dr, (56 * SS, (40 + 17 * 3 + 30) * SS), f"FOUND AT POP {sch['jk'] + 1}/{n}  ·  path {len(mem.path) - 1} hops  ·  d={dj:.2f}",
+                 P["hot"], 12)
+            text(dr, (56 * SS, (40 + 17 * 3 + 48) * SS), "CONFIDENCE = (1 + cos(z_now, z_john)) / 2", P["mid"], 11)
+        elif red_on:
             dj = next(d for u, d, _ in mem.order if u == mem.john)
             text(dr, (56 * SS, (40 + 17 * 3 + 8) * SS), f"MATCH: JOHN-117   CONFIDENCE {mem.conf:.2f}", P["hot"], 15)
             text(dr, (56 * SS, (40 + 17 * 3 + 30) * SS),
@@ -640,6 +674,39 @@ def render_memory(mem, sch, seg, pal, n_frames=None, only=None, zoom_in=1.65, om
 
 def _fmt(t):
     return f"{int(t // 60)}:{t % 60:05.2f}"
+
+
+def _label_v3(dr, P, mem, nd, i, lx, ly, p, half, popped, t, seg, red_on, nbr, is_j, is_now):
+    """v3「注意力」分层（gif 只标约 1/3 的节点）：
+    焦点 = 最新弹出的节点（前沿，0.5 s 内弹出的都算）+ 它的图邻居 + 此刻（+ 找到后：整条路径）→ 时间 13 / 名字 12，前沿再加特征和坐标；
+    已访问的 → 一行：时间 + PCA 坐标（11，中灰）；未访问的 → 只剩 #编号（12，暗）。"""
+    vis = i in popped
+    front = {u for u, tu in popped.items() if t - tu < 0.5}
+    if popped:
+        front.add(max(popped.items(), key=lambda kv: kv[1])[0])
+    near = set().union(*[nbr[u] for u in front]) if front else set()
+    on_path = red_on and i in mem.path
+    focus = i in front or i in near or is_now or on_path or (is_j and red_on)
+    hot = is_j and (vis or red_on)
+    if focus:
+        col = P["hot"] if hot else (P["accent"] if i in front and not red_on else P["ink"])
+        tt = f"{_fmt(nd['t0'])}" if not is_now else f"{_fmt(seg[0])}–{_fmt(seg[1])}"
+        text(dr, (lx, ly - 2 * SS), f"#{i}  {tt}", col, 13, knock=P["bg"])
+        nm = nd["name"] + ("  · JOHN" if is_j else "")
+        if nd.get("note") and nd["note"] not in nm:
+            nm += "  " + nd["note"]
+        text(dr, (lx, ly + 15 * SS), nm, mix(col, 0.8, P["bg"]), 12, cn=True, knock=P["bg"])
+        if i in front or is_now or on_path:
+            fz = nd["feat"]
+            fl = " ".join(f"{SYM[k_]}{fz[k_]:.2f}" for k_ in CH) + f" ρ{fz['rho']:.1f}/s"
+            dd = next(d for u, d, _ in mem.order if u == i)
+            text(dr, (lx, ly + 33 * SS), fl, P["mid"], 11, knock=P["bg"])
+            text(dr, (lx, ly + 48 * SS), f"[{nd['pca'][0]:+.2f}, {nd['pca'][1]:+.2f}]  d={dd:.2f}", P["mid"], 11, knock=P["bg"])
+    elif vis:
+        text(dr, (lx, ly + 2 * SS), f"{_fmt(nd['t0'])}  [{nd['pca'][0]:+.2f}, {nd['pca'][1]:+.2f}]",
+             P["hot"] if hot else P["mid"], 11, knock=P["bg"])
+    else:
+        text(dr, (p[0] + 6 * SS, p[1] - 6 * SS), f"#{i}", P["dim"], READ_MIN_DIM)
 
 
 def _draw_compare(dr, P, mem, popped, red_on, t, sch):
@@ -705,7 +772,9 @@ def _draw_strip(dr, P, ch, fps, ev, st, tl0, tl1, mem, popped, t, seg, red_on):
         xa = X(a_)
         dr.line([(xa, (y0 - 36) * SS), (xa, (y0 - 26) * SS)], fill=P["mid"], width=SS)
         cur = a_ <= seg[0] + t < b_
-        text(dr, (xa + 3 * SS, (y0 - 38) * SS), f"{sg['id']} {sg['名']}", P["ink"] if cur else P["dim"], 9, cn=True)
+        room = (X(min(b_, tl1)) - xa) / SS                  # 段太短放不下名字 → 只写编号（不叠字）
+        lab = f"{sg['id']} {sg['名']}" if room > 90 else sg["id"]
+        text(dr, (xa + 3 * SS, (y0 - 38) * SS), lab, P["ink"] if cur else P["dim"], 9, cn=True)
     dr.line([(x0 * SS, y1 * SS), (x1 * SS, y1 * SS)], fill=P["dim"], width=SS)
     for ot, os_ in onset_list():                                              # 起音刻度：高 ∝ 威胁峰
         if tl0 <= ot <= tl1:
@@ -1241,7 +1310,8 @@ def main():
     m.add_argument("--seg0", type=float, default=115.51)
     m.add_argument("--seg1", type=float, default=128.31)
     m.add_argument("--k", type=int, default=3)
-    m.add_argument("--v", type=int, default=2, help="版式版本：1 = 首版；2 = John 大框常驻 + 右上 z 向量对照 + 开场更近更快")
+    m.add_argument("--v", type=int, default=3, help="版式版本：1 = 首版；2 = John 大框常驻 + 右上 z 向量对照 + 开场更近更快；"
+                                                    "3 = 注意力分层标签 + 1080p 最小字号 + 开场故事线已在长 + FOUND AT POP")
     m.add_argument("--thr", type=float, default=0.3, help="起音威胁峰 ≥ thr 才弹出一个节点")
     m.add_argument("--still", type=float, default=None, help="只渲这一秒（相对段首）的一帧")
     m.add_argument("--out", default=None)
