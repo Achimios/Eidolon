@@ -10,10 +10,12 @@
     原片@m:ss.ss            原版 MV 从这一秒开始
     第二章:shot5@3.2        第二章素材里文件名含 shot5 的视频，从 3.2 秒开始
     样片:文件名@秒          样片文件夹里的视频
+    作品:相对作品文件夹的路径@秒  作品文件夹里任意视频（如 情绪大图/_情绪大图_动态_0-97.mp4）
     图:相对作品文件夹的路径  静帧
     文字:要显示的话          黑底文字卡（需要 3D / 还没有画面的地方）
     黑                      黑场
   速度：可选，默认 1（0.5 = 慢放，2 = 快放）
+  preview 选项：--edl 另一份剪辑表  --end 只出到第几秒  --out 输出  --hd（1280×720）
 """
 import argparse
 import re
@@ -66,9 +68,9 @@ def export(force=False):
 LINE = re.compile(r"^\s*(\d+:\d+(?:\.\d+)?)\s+(\S.*?)(?:\s+([\d.]+))?\s*(?:#.*)?$")
 
 
-def read_edl():
+def read_edl(edl=None):
     rows = []
-    for raw in EDL.read_text("utf-8").splitlines():
+    for raw in Path(edl or EDL).read_text("utf-8").splitlines():
         s = raw.strip()
         if not s or s.startswith("#"):
             continue
@@ -95,7 +97,10 @@ def resolve(src):
         d.text(((PW - tw) / 2, PH / 2 - 16), txt, font=f, fill=(225, 225, 225))
         return None, 0, im
     if src.startswith("图:"):
-        return None, 0, Image.open(MV / src[2:].strip()).convert("RGB").resize((PW, PH))
+        im = Image.open(MV / src[2:].strip()).convert("RGB")
+        w, h = im.size; r = max(PW / w, PH / h)                      # 铺满后居中裁（不拉伸）
+        im = im.resize((round(w * r), round(h * r)), Image.LANCZOS); x0, y0 = (im.width - PW) // 2, (im.height - PH) // 2
+        return None, 0, im.crop((x0, y0, x0 + PW, y0 + PH))
     path, at = src, "0"
     if "@" in src:
         path, at = src.rsplit("@", 1)
@@ -104,24 +109,30 @@ def resolve(src):
         return S.MUSIC, t, None
     if path.startswith("第二章:"):
         key = path.split(":", 1)[1]
-        hits = sorted((S.PROJ / "第二章_墙里的东西" / "素材").glob(f"*{key}*.mp4"))
+        hits = sorted((S.MV / "素材").glob(f"*{key}*.mp4"))
         if not hits:
             sys.exit(f"第二章素材里找不到：{key}")
         return hits[0], t, None
     if path.startswith("样片:"):
         return MV / "样片" / path.split(":", 1)[1], t, None
+    if path.startswith("作品:"):
+        return MV / path.split(":", 1)[1], t, None
     sys.exit(f"不认识的素材：{src}")
 
 
-def preview():
+def preview(edl=None, end=END, out=None, hd=False):
+    global PW, PH
+    if hd:
+        PW, PH = 1280, 720
     import imageio_ffmpeg
     ff = imageio_ffmpeg.get_ffmpeg_exe()
-    rows = read_edl()
-    out = MV / "样片" / "预览_剪辑表.mp4"
+    rows = [r for r in read_edl(edl) if r[0] < end]
+    out = Path(out) if out else MV / "样片" / "预览_剪辑表.mp4"
+    END_ = end
     with tempfile.TemporaryDirectory() as td:
         parts = []
         for k, (t, src, speed) in enumerate(rows):
-            nxt = rows[k + 1][0] if k + 1 < len(rows) else END
+            nxt = min(rows[k + 1][0], END_) if k + 1 < len(rows) else END_
             # 按绝对帧号切：每段帧数 = round(结束×fps) − round(开始×fps)，误差不累积（按秒四舍五入时全曲漂了快 1 秒）
             nf = int(round(nxt * FPS)) - int(round(t * FPS))
             dur = nf / FPS
@@ -132,6 +143,9 @@ def preview():
             vf = f"scale={PW}:{PH}:force_original_aspect_ratio=increase,crop={PW}:{PH},setsar=1,fps={FPS}"
             if still is not None:
                 img = Path(td) / f"{k:04d}.png"; still.save(img)
+                if src.startswith("图:"):   # 静帧不静止（👤镜头不从静止开始）：匀速慢推，速度列 = 推多少（默认 1 → 推 8%）
+                    vf = (f"scale={PW * 2}:{PH * 2},zoompan=z='1+{0.08 * speed:.3f}*on/{nf}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                          f":d=1:s={PW}x{PH}:fps={FPS},setsar=1")
                 cmd = [ff, "-loglevel", "error", "-y", "-loop", "1", "-i", str(img), "-vf", vf, "-frames:v", str(nf)]
             else:
                 cmd = [ff, "-loglevel", "error", "-y", "-ss", f"{at:.3f}", "-t", f"{dur * speed + 0.1:.3f}", "-i", str(video),
@@ -140,7 +154,7 @@ def preview():
             parts.append(p)
         lst = Path(td) / "list.txt"
         lst.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), "utf-8")
-        subprocess.run([ff, "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-t", str(END), "-i", str(S.MUSIC),
+        subprocess.run([ff, "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-t", str(END_), "-i", str(S.MUSIC),
                         "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest", str(out)], check=True)
     print("->", out, len(parts), "段")
 
@@ -149,5 +163,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["export", "preview"])
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--edl", default=None); ap.add_argument("--end", type=float, default=END)
+    ap.add_argument("--out", default=None); ap.add_argument("--hd", action="store_true")
     a = ap.parse_args()
-    export(a.force) if a.cmd == "export" else preview()
+    export(a.force) if a.cmd == "export" else preview(a.edl, a.end, a.out, a.hd)

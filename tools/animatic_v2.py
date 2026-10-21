@@ -30,7 +30,7 @@ PH0, PHASE_LEN = 13.11, 6.4
 BAR = PHASE_LEN / 4
 RISE = PH0 + 4 * PHASE_LEN          # 38.71
 MEM_DIR = S.MV / "cache" / "记忆帧"
-CH2 = S.PROJ / "第二章_墙里的东西" / "素材"
+CH2 = S.MV / "素材"
 F = A.F
 
 
