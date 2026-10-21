@@ -970,10 +970,11 @@ def _push_kernel(tau, rise=0.035, decay=0.30):
 
 
 def cy_cam_path(t0, t1, R0, cam0, hits=CY_HITS, v_base=0.022, A=(0.075, 0.065, 0.085, 0.14),
-                yaw=(1.4, -1.9, 1.2, -2.6), roll=(-1.1, 1.6, -0.9, 2.4), pitch=(0.5, -0.4, 0.3, -0.7),
+                yaw=(0, 0, 0, 0), roll=(0, 0, 0, 0), pitch=(0, 0, 0, 0),
                 drift=(0.5, 0.3, 0.0), dt=1 / 2400):
     """机位：速度 v(t) = v_base + Σ A_k g(t − t_k)（格子单位/秒，永不为 0 → 开头结尾都在动）；
-    朝向 = 匀速漂移 drift（°/s 偏航, 滚转, 俯仰）+ 每一推各自一点偏航/滚转/俯仰（形状 = g 的积分，跟推同步拐），
+    朝向 = 匀速漂移 drift（°/s 偏航, 滚转, 俯仰）+ 每一推可选的偏航/滚转/俯仰（形状 = g 的积分，跟推同步拐）——
+    👤2026-10-21：四推四缓只要速度变化，不要左右晃 → 默认全 0（v1 是 yaw (1.4, −1.9, 1.2, −2.6)° 等），
     位置 = ∫ v · 当前视线 dt（不是 smoothstep）。返回 (ts, cams, Rs, v, hit_idx)"""
     ts = np.arange(t0, t1 + dt, dt)
     gk = np.stack([_push_kernel(ts - tk) for tk in hits])            # (4, n)
@@ -993,7 +994,7 @@ def cy_cam_path(t0, t1, R0, cam0, hits=CY_HITS, v_base=0.022, A=(0.075, 0.065, 0
     return ts, cams, Rs, v, hit
 
 
-def cy_local_video(out, t_cut=CY_EERIE[0], t_end=86.3, n_local=97, fps=24, w=1280, h=720, gain=0.10, back=0.15):
+def cy_local_video(out, t_cut=CY_EERIE[0], t_end=86.3, n_local=97, fps=24, w=1280, h=720, gain=0.10, back=0.15, only=None):
     """样片 11c：① 局部 CY 镜头（四推四缓，对 1:21+17f 起的四下鼓点）一直到 84.909 s 硬切；② 诡异声独立镜头到 ~86.3 s。配原曲。
     t0 = t_cut − n_local/fps，让硬切正好落在帧边界上。焦点每帧跟住红 CY 的深度（不再糊成一团）"""
     t0 = t_cut - n_local / fps
@@ -1017,6 +1018,8 @@ def cy_local_video(out, t_cut=CY_EERIE[0], t_end=86.3, n_local=97, fps=24, w=128
     wr = _video_writer(tmp, w, h, fps)
     vb = "".join(str(int(b)) for b in st["bits"][v0][::-1])
     for i in range(nfr):
+        if only is not None and i not in only:               # 预览：只渲这些帧
+            continue
         t = t0 + i / fps
         if t < t_cut - 1e-6:
             cam, R = cam_fn(t + shutter / 2)
@@ -1083,8 +1086,18 @@ def _eerie_setup(t0, t1, w, h, spacing=0.021, seed=23, flat=0.15, m=12, fov=52.0
     red = int(np.argmin(np.linalg.norm(C - np.array([-0.03, 0.20]), axis=1)))
     size[red] *= 1.2
     src = np.array([C[red]] + [np.array([rng.uniform(-0.25, 0.25), rng.uniform(0.12, 0.5)]) for _ in CY_EERIE[1:]])
-    kk = rng.uniform(40, 260, 40); ph = rng.uniform(0, 2 * np.pi, 40); am = rng.uniform(0.3, 1, 40) * 0.09
-    kd = rng.uniform(6, 40, 12); pd = rng.uniform(0, 2 * np.pi, 12)        # 光带下沿"挂下来"的长短
+    # 光带的"挂丝"：不再是 40 条正弦叠出的梳子，而是一根根独立的丝 —— 成簇的方位、对数正态的粗细和亮度、
+    # 指数分布的下垂长度、各自一点斜度和慢摆（👤2026-10-21：竖条纹太规律）
+    nT = 110
+    cl = rng.uniform(-0.8, 0.8, 9)
+    az_t = np.where(rng.random(nT) < 0.7, cl[rng.integers(0, 9, nT)] + rng.normal(0, 0.05, nT), rng.uniform(-0.9, 0.9, nT))
+    wd_t = np.exp(rng.normal(np.log(0.0035), 0.6, nT))
+    am_t = np.exp(rng.normal(0, 0.7, nT)) * 0.22
+    ln_t = 0.004 + rng.exponential(0.030, nT)
+    top_t = rng.uniform(0.09, 0.16, nT)                                 # 丝从带里挂下来，不顶到画框外
+    sl_t = rng.normal(0, 0.12, nT); sw_t = rng.uniform(0, 2 * np.pi, nT)
+    kk, ph, am = az_t, wd_t, am_t
+    kd, pd = np.stack([ln_t, top_t, sl_t]), sw_t
     kl = rng.uniform(2.5, 9, 5); pl = rng.uniform(0, 2 * np.pi, 5)          # 光带亮度沿方位的大起伏（不要梳子一样匀）
     f = (w / 2) / np.tan(np.radians(fov) / 2)
     pr = np.radians(pitch)
@@ -1092,7 +1105,7 @@ def _eerie_setup(t0, t1, w, h, spacing=0.021, seed=23, flat=0.15, m=12, fov=52.0
     T = lambda a: torch.as_tensor(np.asarray(a), dtype=torch.float32, device=dev)
     dists = np.stack([np.linalg.norm(C - s, axis=1) for s in src])
     return dict(t0=t0, tf=tf, flux=flux, hi=hi, a_on=a_on, C=C, size=size, p=T(p), nv=T(nv), phi=phi, tilt0=tilt0, ax_ang=ax_ang,
-                Theta=Theta, red=red, src=src, dists=dists, sk=(T(kk), T(ph), T(am), T(kd), T(pd), T(kl), T(pl)), f=f, R=R, Rt=T(R), w=w, h=h,
+                Theta=Theta, red=red, src=src, dists=dists, sk=(kk, ph, am, kd, pd, T(kl), T(pl)), f=f, R=R, Rt=T(R), w=w, h=h,
                 height=height, nF=nF, flat=flat, dev=dev, T=T)
 
 
@@ -1103,20 +1116,25 @@ def _band(e, d, tq):
     kk, ph, am, kd, pd, kl, pl = e["sk"]
     el = torch.arcsin(torch.clip(d[..., 2], -1, 1)); az = torch.arctan2(d[..., 0], d[..., 1])
     sm = lambda x, a, b: (lambda u: u * u * (3 - 2 * u))(torch.clip((x - a) / (b - a), 0, 1))
-    drip = torch.zeros_like(az)
-    for k_, p_ in zip(kd, pd):
-        drip += torch.sin(k_ * az + p_)
-    lo = 0.045 - 0.018 * torch.clip(drip / 3, -1, 1)
-    win = sm(el, lo - 0.03, lo + 0.03) * (1 - sm(el, 0.15, 0.27)) * (1 - sm(torch.abs(az), 0.45, 0.95))
-    stre = 0.75 * torch.exp(-(az / 0.45) ** 2) + 0.25
-    for a_, k_, p_ in zip(am, kk, ph):
-        stre += a_ * torch.sin(k_ * az + p_ + 0.6 * tq)
     lowm = torch.zeros_like(az)
     for k_, p_ in zip(kl, pl):
         lowm += torch.sin(k_ * az + p_)
-    stre = stre * torch.clip(0.8 + 0.18 * lowm, 0.35, 1.2)
+    lo = 0.045 - 0.010 * torch.clip(lowm / 2.5, -1, 1)               # 下沿只有大尺度的起伏
+    win = sm(el, lo - 0.025, lo + 0.025) * (1 - sm(el, 0.15, 0.27)) * (1 - sm(torch.abs(az), 0.45, 0.95))
+    body = (0.75 * torch.exp(-(az / 0.45) ** 2) + 0.25) * 0.55
+    thr = torch.zeros_like(az)
+    ln_t, top_t, sl_t = kd
+    for j in range(len(kk)):                                         # 一根根挂丝：从带里某高度垂到下沿以下 ln_j
+        azj = float(kk[j]) + float(sl_t[j]) * (el - 0.045) + 0.004 * float(np.sin(0.8 * tq + float(pd[j])))
+        g = torch.exp(-((az - azj) / float(ph[j])) ** 2)
+        bot = 0.045 - float(ln_t[j])
+        vert = sm(el, bot, bot + 0.35 * float(ln_t[j]) + 0.004) * (1 - sm(el, float(top_t[j]) - 0.04, float(top_t[j])))
+        vert = vert * (0.3 + 0.7 * sm(el, bot, 0.065))                # 根部（带里）亮，越往下垂越淡、越细
+        thr += float(am[j]) * g * vert
+    side = 1 - sm(torch.abs(az), 0.5, 1.0)
+    out = (win * body + thr * side) * torch.clip(0.8 + 0.18 * lowm, 0.35, 1.2)
     hq = float(np.interp(tq, e["tf"], e["hi"]))
-    return win * torch.clip(stre, 0, None) * (0.8 + 0.2 * np.tanh(hq - 1))
+    return out * (0.8 + 0.2 * np.tanh(hq - 1))
 
 
 def _box_t(x, r):
@@ -1128,7 +1146,7 @@ def _box_t(x, r):
     return x
 
 
-def _eerie_render(e, t, shutter=1 / 48, expo=3, z_focus=0.20, K=5.0, c_wave=0.55, ell=0.45, v_cam=(0.010, 0.004, 0.0)):
+def _eerie_render(e, t, shutter=1 / 48, expo=3, z_focus=0.22, K=0.8, c_wave=0.55, ell=0.45, v_cam=(0.010, 0.004, 0.0)):
     """一帧：expo 次曝光（片在翻、镜头在漂）→ 点泼溅（权 = 投影面积 × 亮度）→ 按弥散圈 K|1/z − 1/z_f| 分 12 层模糊 → 光带背景"""
     import torch
     w, h, f, Rt, dev, T = e["w"], e["h"], e["f"], e["Rt"], e["dev"], e["T"]
@@ -1195,9 +1213,9 @@ def _eerie_render(e, t, shutter=1 / 48, expo=3, z_focus=0.20, K=5.0, c_wave=0.55
     yy, xx = torch.meshgrid(torch.arange(h, device=dev, dtype=torch.float32), torch.arange(w, device=dev, dtype=torch.float32), indexing="ij")
     dcam = torch.stack([(xx - w / 2) / f, -(yy - h / 2) / f, torch.ones_like(xx)], -1) @ Rt
     dcam = dcam / torch.linalg.norm(dcam, dim=-1, keepdim=True)
-    bg = _box_t(_band(e, dcam, t), int(8 * w / 1280))
+    bg = _box_t(_band(e, dcam, t), int(2 * w / 1280))
     import torch.nn.functional as F
-    rv_ = int(26 * h / 720)
+    rv_ = int(6 * h / 720)
     bgv = F.avg_pool2d(bg[None, None], (2 * rv_ + 1, 1), 1, (rv_, 0), count_include_pad=False)[0, 0]
     bg = (0.6 * bgv + 0.4 * bg).cpu().numpy()
     gl = gl.cpu().numpy(); rl = rl.cpu().numpy()
@@ -1215,21 +1233,49 @@ def _eerie_render(e, t, shutter=1 / 48, expo=3, z_focus=0.20, K=5.0, c_wave=0.55
     return img, lines
 
 
-def cy_global_video(out, t0=80.0, dur=6.0, fps=24, w=1280, h=720, dim=11, n=5, expo=4, shutter=1 / 48,
-                    turn=0.55, plane=(0, 6), f_lo=40.0, f_hi=8000.0, seed=19,
+def _box_mean(x, k):
+    """沿最后一轴的居中盒式均值（cumsum，O(n)，边缘按实际样本数平均）"""
+    k = max(1, int(k)); h = k // 2
+    c = np.cumsum(np.pad(x, [(0, 0)] * (x.ndim - 1) + [(1, 0)]), -1)
+    n = x.shape[-1]; i = np.arange(n)
+    lo = np.clip(i - h, 0, n); hi = np.clip(i + h + 1, 0, n)
+    return (c[..., hi] - c[..., lo]) / (hi - lo)
+
+
+def cy_lattice_wave(dim, sites, drive, dt, c=2.5, gamma=0.8, w0=0.6):
+    """11-cube 上的离散波动方程（耦合振子网络）：u_tt = c² L u − γ u_t − ω0² u + Σ_i s_i(t) δ_{v_i}，
+    L = A − dim·I（图拉普拉斯，谱 −2k，k = 0..dim），c 单位 = 棱/秒；ω0 只是把 k = 0 的整体漂移钉住。
+    半隐式欧拉（辛），稳定条件 c·dt·√(2·dim) < 2。drive: (N_src, n_steps) 每步的源；返回 u: (n_steps, 2^dim)"""
+    nV = 2 ** dim
+    nb = np.arange(nV)[:, None] ^ (1 << np.arange(dim))[None]     # 每个顶点的 dim 个邻居 = 翻一位
+    assert c * dt * np.sqrt(2 * dim) < 2
+    u = np.zeros(nV); v = np.zeros(nV); out = np.empty((drive.shape[1], nV), np.float32)
+    for n in range(drive.shape[1]):
+        a = c * c * (u[nb].sum(1) - dim * u) - gamma * v - w0 * w0 * u
+        a[sites] += drive[:, n]                                     # sites 互不相同
+        v += dt * a; u += dt * v
+        out[n] = u
+    return out
+
+
+def cy_global_video(out, t0=80.0, dur=6.0, fps=24, w=1280, h=720, dim=11, n=5, sub=3, shutter=1 / 48,
+                    turn=0.55, plane=(0, 6), f_lo=40.0, f_hi=8000.0, seed=19, c=1.5, gamma=1.5, w0=0.6, warm=1.5, F=6.0, only=None,
                     rings=((0.30, 2, 16.0), (0.58, 2, 18.0), (0.80, 1, 19.0), (1.0, 1, 25.0))):
-    """样片 ②（静帧 19 的全局构图）：11 维里在 (x_plane0, x_plane1) 平面转 turn 弧度 → Petrie 投影跟着变；
-    66 个 CY 各分一个对数频带，每次曝光的 平移 + δα = 该频带带通信号本身（频率跟音频走），配原曲"""
+    """样片 11b v2（静帧 19 的全局构图）：格子 = 耦合振子网络。66 个 CY 是 66 个源：各自对数频带的能量抬升
+    s_i = F (o_i − ⟨o_i⟩_1s)，o_i = (e_i − ⟨e_i⟩_0.25s)₊（e = 46 ms 带能量包络 / 中位；o = 起音 → 一个个波包；减 1 s 均值保证零均值，否则 k = 0 整体模态被顶起来）注入所在顶点；波沿棱传播、干涉，到达别的 CY，
+    CY 按所在顶点的 u 变形（转 δα + 鼓胀）。棱的亮度/粗细 = 两端 |u| 的对数压缩（超立方体里波包每走一步摊到 C(11,k) 个顶点，
+    振幅掉一两个量级，线性显示只看得见源本身），顶点沿第二 Petrie 平面 e'_k = (cos 3πk/11, sin 3πk/11) 位移 ∝ u。
+    11 维里在 (x_a, x_b) 平面慢转 turn 弧度。红 = 离中心最近的那个 CY（她）。从 t0 − warm 起算（开场时格子里已经有波），配原曲"""
     rng = np.random.default_rng(seed)
     k_ = h / H
     bits = (np.arange(2 ** dim)[:, None] >> np.arange(dim)) & 1
     V = bits - 0.5
     th = np.pi * np.arange(dim) / dim
-    E = np.stack([np.cos(th), np.sin(th)], 1)
+    E = np.stack([np.cos(th), np.sin(th)], 1); E3 = np.stack([np.cos(3 * th), np.sin(3 * th)], 1)
     ia, kb = np.nonzero(bits == 0); ib = ia + (1 << kb)
     P0 = V @ E
-    Rmax = np.hypot(*P0.T).max(); sc = 400 / Rmax * k_
-    cx, cy = w / 2 + 130 * k_, h / 2 - 20 * k_
+    Rmax = np.hypot(*P0.T).max(); sc = 345 / Rmax * k_
+    cx, cy = w / 2 + 170 * k_, h / 2
     r = np.hypot(*P0.T); rk = np.round(r, 6)
     orbit_r = np.array([q for q in np.unique(rk) if (rk == q).sum() == 2 * dim])
     sites, ring, size = [], [], []
@@ -1237,63 +1283,104 @@ def cy_global_video(out, t0=80.0, dur=6.0, fps=24, w=1280, h=720, dim=11, n=5, e
         q = orbit_r[np.argmin(np.abs(orbit_r - fr * Rmax))]
         idx = np.nonzero(rk == q)[0]
         idx = idx[np.argsort(np.arctan2(P0[idx, 1], P0[idx, 0]))][::step]
-        sites += idx.tolist(); ring += [j] * len(idx); size += [sz * k_] * len(idx)
+        sites += idx.tolist(); ring += [j] * len(idx); size += [sz * 0.86 * k_] * len(idx)
     sites = np.array(sites); ring = np.array(ring); size = np.array(size); N = len(sites)
+    nfr = int(dur * fps)
+    turns = turn * (0.5 - 0.5 * np.cos(np.pi * np.arange(nfr) / nfr))
+    Gs = []
+    for ph in turns:
+        G = np.eye(dim); a_, b_ = plane
+        G[a_, a_] = G[b_, b_] = np.cos(ph); G[a_, b_] = -np.sin(ph); G[b_, a_] = np.sin(ph)
+        Gs.append(G)
+    # 红 = 整段里平均离中心最近的 CY（内圈 11 个半径相同，转起来才分出远近）
+    red_i = int(np.argmin(np.array([np.hypot(*(V[sites] @ G @ E).T) for G in Gs]).mean(0)))
+    # --- 声音 → 66 个源 ---
     sr = 22050
-    x, _ = S.audio(sr=sr, start=t0, dur=dur + 0.2)
+    x, _ = S.audio(sr=sr, start=t0 - warm, dur=dur + warm + 0.2)
     X = np.fft.rfft(x); fq = np.fft.rfftfreq(len(x), 1 / sr)
     edges = np.geomspace(f_lo, f_hi, N + 1)
-    xb = np.stack([np.fft.irfft(X * ((fq >= edges[i]) & (fq < edges[i + 1])), len(x)) for i in range(N)]).astype(np.float32)
-    ref = np.median(np.sqrt(_smooth1d(xb[:, ::8].astype(np.float64) ** 2, int(sr / 8 * 0.046))), 1)
-    inner = np.nonzero(ring == 0)[0]
-    red_i = inner[np.argmax((xb[inner] ** 2).mean(1) / ref[inner] ** 2)]
+    sim_hz = int(fps * sub * 40)                                   # 2880 Hz：每个子曝光正好 40 步
+    dt = 1 / sim_hz
+    n_steps = int((dur + warm) * sim_hz)
+    ts_sim = (np.arange(n_steps) + 1) * dt                          # 相对 t0 − warm
+    e = np.empty((N, n_steps))
+    for i in range(N):
+        xb = np.fft.irfft(X * ((fq >= edges[i]) & (fq < edges[i + 1])), len(x))
+        en = np.sqrt(_box_mean(xb[None] ** 2, sr * 0.046)[0])
+        e[i] = np.interp(ts_sim, np.arange(len(x)) / sr, en)
+    e /= np.median(e, 1, keepdims=True) + 1e-12
+    o = np.clip(e - _box_mean(e, 0.25 * sim_hz), 0, None)            # 能量抬升 = 起音
+    drive = F * (o - _box_mean(o, 1.0 * sim_hz))                       # 减 1 s 均值：零均值，不顶起 k = 0 模态
+    t_sim = time.time()
+    U = cy_lattice_wave(dim, sites, drive, dt, c, gamma, w0)
+    t_sim = time.time() - t_sim
+    i_f = lambda tq: int(np.clip(round((tq - t0 + warm) * sim_hz) - 1, 0, n_steps - 1))
+    Uw = U[i_f(t0)::40]
+    rms = np.sqrt((Uw.astype(np.float64) ** 2).mean(0))                # 每个顶点自己的 RMS
+    u0 = float(np.percentile(np.abs(Uw[:, sites]), 90))                 # CY 变形的尺度
+    lg = lambda a: np.clip(np.abs(a) / (3.0 * rms), 0, 1)              # 显示 = 相对本顶点 RMS 的激励：源不再永远最亮，波包到哪哪亮
+    print(f"cy global wave: sim {n_steps} steps in {t_sim:.1f}s, rms site/non-site = {np.median(rms[sites]) / np.median(rms):.1f}, "
+          f"u0(site p90) {u0:.4f}, red site {sites[red_i]} ring {ring[red_i]}", flush=True)
     z1, z2 = _cy_quintic(n=n, m=5, s=16)
     ext = max(np.abs(z1.real).max(), np.abs(z2.real).max())
     Qs = [np.linalg.qr(rng.normal(size=(3, 3)))[0] for _ in range(N)]
-    dirs = rng.normal(size=(N, 2)); dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
-    yy, xx = np.mgrid[0:h, 0:w]
-    dc = np.hypot(xx - cx, yy - cy)
-    her = np.exp(-(dc / 2.2) ** 2) + 0.25 * np.exp(-(dc / 9) ** 2)
-    hole = np.clip(np.exp(-(dc / (46 * k_)) ** 2) * 0.85, 0, 1)
     tmp = Path(out).with_suffix(".tmp.mp4")
     wr = _video_writer(tmp, w, h, fps)
-    nfr = int(dur * fps)
     for fi in range(nfr):
-        s = fi / nfr
-        ph = turn * (0.5 - 0.5 * np.cos(np.pi * s))
-        G = np.eye(dim); a_, b_ = plane
-        G[a_, a_] = G[b_, b_] = np.cos(ph); G[a_, b_] = -np.sin(ph); G[b_, a_] = np.sin(ph)
-        P = V @ G @ E
+        if only is not None and fi not in only:              # 预览：只渲这些帧
+            continue
+        t = t0 + fi / fps
+        G = Gs[fi]
+        uf = U[i_f(t + shutter / 2)]                                  # 帧中心的场（波比快门慢得多）
+        lu = lg(uf)
+        P = V @ G @ E; D3 = V @ G @ E3
         XY = np.stack([cx + P[:, 0] * sc, cy - P[:, 1] * sc], 1)
+        XY = XY + (np.sign(uf) * lu)[:, None] * D3 * np.array([1, -1]) * 0.06 * sc   # 顶点被波推进"另一个投影平面"
         lat = _seg_dens(XY[ia], XY[ib], np.ones(len(ia)), w, h, 1)
-        lv = np.clip(lat / (1.6 * S.blur(S.blur(lat, 7), 7) + 0.25), 0, 1) ** 1.3 * 0.55
-        te = t0 + fi / fps + np.arange(expo) * shutter / expo
-        ii = np.clip(((te - t0) * sr).astype(int), 0, xb.shape[1] - 1)
-        D = np.clip(xb[:, ii] / (np.sqrt(2) * ref[:, None]), -3, 3)          # (N, expo) 1 = 该频带中位电平的峰值
+        den = 1.6 * S.blur(S.blur(lat, 7), 7) + 0.25
+        lv = np.clip(lat / den, 0, 1) ** 1.3 * 0.22                   # 静止的格子压暗，只当底
+        ae = (0.5 * (lu[ia] + lu[ib])) ** 3                          # 只有被波包扫到的棱亮，背景场压下去
+        wd = _seg_dens(XY[ia], XY[ib], ae, w, h, 1) / np.sqrt(den)
+        dots = _seg_dens(XY, XY + 0.7, lu ** 3 * 2.5, w, h, 1)          # 顶点本身：被扫到的格点亮成一粒
+        wd = wd + S.blur(dots, 1) * 3
+        wv = np.clip(wd * 0.9 + 0.8 * S.blur(wd, 2), 0, None)        # 振得越狠越粗
+        wv = 1 - np.exp(-wv * 1.1)
         ga, gb, gw, ra, rb, rw = [], [], [], [], [], []
         for i in range(N):
-            for e in range(expo):
-                d = D[i, e]
-                al = np.pi / 4 + 0.8 * d
+            for s_ in range(sub):
+                d = np.tanh(U[i_f(t + (s_ + 0.5) * shutter / sub), sites[i]] / u0 * 0.8)
+                al = np.pi / 4 + 0.9 * d
                 p3 = np.stack([z1.real, z2.real, np.cos(al) * z1.imag + np.sin(al) * z2.imag], -1) / ext @ Qs[i].T
-                off = 0.7 * d * size[i] * dirs[i]
-                px = XY[sites[i], 0] + off[0] + p3[..., 0] * size[i]
-                py = XY[sites[i], 1] + off[1] + p3[..., 1] * size[i]
+                sz = size[i] * (1 + 0.35 * abs(d))
+                px = XY[sites[i], 0] + p3[..., 0] * sz
+                py = XY[sites[i], 1] + p3[..., 1] * sz
                 depth = 0.25 + 0.75 * np.clip(p3[..., 2].mean(-1) * 0.6 + 0.5, 0, 1)
                 Pl = np.stack([px, py], -1)
                 a = Pl[:, :-1].reshape(-1, 2); b = Pl[:, 1:].reshape(-1, 2)
-                wt = np.repeat(depth * 1.3 / expo, Pl.shape[1] - 1)
+                wt = np.repeat(depth * (0.9 + 0.6 * abs(d)) / sub, Pl.shape[1] - 1)
                 if i == red_i:
                     ra.append(a); rb.append(b); rw.append(wt)
                 else:
                     ga.append(a); gb.append(b); gw.append(wt)
         cyg = _seg_dens(np.concatenate(ga), np.concatenate(gb), np.concatenate(gw), w, h, 1)
         cyr = _seg_dens(np.concatenate(ra), np.concatenate(rb), np.concatenate(rw), w, h, 1)
-        cv = 1 - np.exp(-cyg * 0.20); rv = 1 - np.exp(-cyr * 0.22)
-        g = np.clip(lv * (1 - hole) + cv + her, 0, 1)
+        cv = 1 - np.exp(-cyg * 0.15); rv = 1 - np.exp(-cyr * 0.30)            # CY 略压暗，让格子上的波读得出
+        g = np.clip(lv + wv * 0.85 + cv, 0, 1)
         img = S.colorize(g) * (1 - rv[..., None]) + rv[..., None] * S.RED
         img = S.glow(np.clip(img, 0, 1), 2, 0.45)
-        wr.send(np.ascontiguousarray((img * 255).astype(np.uint8)))
+        act = int((lu > 0.5).sum())
+        lines = ["u_tt = c^2 L u - g u_t - w0^2 u + sum_i s_i(t) d(v_i)",
+                 f"L = A - 11 I   11-cube: {2 ** dim} v x 11 nbrs, {len(ia)} edges",
+                 f"c = {c} edge/s   g = {gamma} /s   w0 = {w0} /s   dt = 1/{sim_hz} s",
+                 f"N = {N} sources: s_i = {F:g} (o_i - <o_i>_1s), o = (e - <e>_0.25s)+",
+                 f"e_i = band energy, {f_lo:.0f} Hz - {f_hi / 1000:.0f} kHz, log bands",
+                 f"edge ~ (|u| / 3 rms_v)^3  shift ~ u along e'_k (3pi k/11)",
+                 f"lit vertices {act:4d}   11D turn {np.degrees(turns[fi]):4.1f} deg (x{plane[0]},x{plane[1]})",
+                 f"red = CY nearest centre = her   t = {t:.3f} s"]
+        img = _hud_light(img, lines, "11B  LATTICE WAVE", w / 1280)
+        wr.send(np.ascontiguousarray(img))
+        if fi % 24 == 0:
+            print(f"  frame {fi}/{nfr}  t = {t:.3f}", flush=True)
     wr.close()
     return _mux_audio(tmp, out, t0, dur)
 
@@ -1326,13 +1413,16 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default=str(S.MV / "静帧"))
     ap.add_argument("--no-sheet", action="store_true")
-    ap.add_argument("--cy-video", default="", help="卡拉比丘样片（配原曲 80 s 起）：local → 样片/11c_卡拉比丘_局部_四推+诡异独立镜头.mp4（80.87–86.3 s，84.909 硬切到诡异声独立镜头），global → 11b_卡拉比丘_全局_试.mp4，可逗号同时")
+    ap.add_argument("--cy-video", default="", help="卡拉比丘样片（配原曲 80 s 起）：local → 样片/11c_卡拉比丘_局部_v3.mp4（80.87–86.3 s，四推只变速，84.909 硬切到诡异声独立镜头），global → 11b_卡拉比丘_全局_v2_晶格传播.mp4（格子上的波动方程），可逗号同时")
     a = ap.parse_args()
     if a.cy_video:
-        jobs = {"local": (cy_local_video, "11c_卡拉比丘_局部_四推+诡异独立镜头.mp4"), "global": (cy_global_video, "11b_卡拉比丘_全局_试.mp4")}
+        jobs = {"local": (cy_local_video, "11c_卡拉比丘_局部_v3.mp4"), "global": (cy_global_video, "11b_卡拉比丘_全局_v2_晶格传播.mp4")}   # 每版新文件名，绝不覆盖旧样片
         for k in a.cy_video.split(","):
             t0 = time.time()
-            p = jobs[k][0](S.MV / "样片" / jobs[k][1])
+            dst = S.MV / "样片" / jobs[k][1]
+            if dst.exists():
+                sys.exit(f"{dst.name} 已存在 —— 样片不覆盖，改版请换新文件名")
+            p = jobs[k][0](dst)
             print(f"cy video {k}: {time.time() - t0:.1f}s -> {p}", flush=True)
         return
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
