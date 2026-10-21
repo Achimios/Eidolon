@@ -20,7 +20,10 @@
   脸内饱和拉高、色相偏（palette_orig 的 saturate）。
 
 配色（PALETTES 表，视频 / 静帧共用）：ours 本片（冷灰白 + 只在轮廓外侧留一个红）/ orig 原配色（饱和 RGB）/
-  micro_fringe·micro_streaks·micro_redcyan 微彩（颜色只在轮廓圈 / 少数拖影行里）/ heavy_false·heavy_bands 重彩（接近参考图）。
+  micro_fringe·micro_streaks·micro_redcyan 微彩（颜色只在轮廓圈 / 少数拖影行里）/ heavy_false·heavy_bands 重彩（接近参考图）/
+  ref_blue·ref_blue_ramp 参考图配色往蓝偏。⭐👤最喜欢：瀑布图行 + 本片（ours）→ clip 的默认。
+时间包络（envelope，clip --envelope；👤：暴力的东西不能一直开）：前段只在强起音（威胁峰 ≥ 0.5）处脉冲
+  （满幅 2 帧 + exp 衰减 τ = 1.5 帧），末尾 0.4 s 升到全开（吸到小节首拍）后持续 1.4 s；g < 1 时参数按 g 缩 + 和干净帧混。
 时间：感官.json 2026-10-21 起已是播放时间 → --sense-offset 默认 0（旧 感官.json 才要 0.042）。
 人读版：-给人类的解释/面部瓦解怎么做的.md
 
@@ -476,6 +479,31 @@ def palette_heavy(img, mask, mode="false", seed=0, sat=2.2, frac=0.35, mix=0.6):
     raise ValueError(mode)
 
 
+# 参考图配色、往冷（蓝）偏：红 → 紫 / 品红，绿 → 青绿，蓝更深，白 → 冷白（白点归一到 COLD_WHITE）
+COLD_MIX = np.array([[0.55, 0.10, 0.05],
+                     [0.05, 0.80, 0.20],
+                     [0.45, 0.25, 1.10]], np.float32)
+COLD_WHITE = np.array([0.80, 0.93, 1.00], np.float32)
+COLD_STOPS = [(0.0, (0, 0, 0)), (0.22, (0.02, 0.05, 0.35)), (0.45, (0.10, 0.25, 0.85)), (0.68, (0.30, 0.70, 1.0)),
+              (0.86, (0.75, 0.92, 1.0)), (1.0, (1, 1, 1))]
+
+
+def palette_ref_blue(img, mask, mode="mix", sat=2.0, mix=0.6):
+    """参考图式的饱和 RGB，但整体偏冷：
+      mix ：饱和 ×1.3·sat 后过 3×3 冷色矩阵 COLD_MIX（每行按白点缩放到 COLD_WHITE），再混 30% 冷色梯度 —— 红边变紫 / 品红，绿变青，保留参考图的多色
+      ramp：亮度 → 冷色梯度（黑→深蓝→蓝→青→冷白）按 mix 混饱和原色 —— 更单一的蓝，色差边仍是 RGB"""
+    s_img = saturate(img, sat)
+    if mode == "mix":
+        M = COLD_MIX * (COLD_WHITE / COLD_MIX.sum(1))[:, None]
+        cold = np.clip(saturate(img, sat * 1.3) @ M.T, 0, 1)
+        fc = false_colour(np.clip(lum(img), 0, 1) ** 0.85, COLD_STOPS)
+        return np.clip(cold * 0.7 + fc * 0.3, 0, 1)
+    if mode == "ramp":
+        fc = false_colour(np.clip(lum(img), 0, 1) ** 0.85, COLD_STOPS)
+        return np.clip(fc * mix + s_img * (1 - mix), 0, 1)
+    raise ValueError(mode)
+
+
 # 配色表：名字 → (中文名, 函数(img, mask, seed))；视频 / 静帧都从这里取
 PALETTES = {
     "ours": ("本片", lambda x, m, sd: palette_ours(x, m)),
@@ -485,6 +513,8 @@ PALETTES = {
     "micro_redcyan": ("微彩C_红青", lambda x, m, sd: palette_micro(x, m, "redcyan", sd)),
     "heavy_false": ("重彩A_假色", lambda x, m, sd: palette_heavy(x, m, "false", sd)),
     "heavy_bands": ("重彩B_条带染色", lambda x, m, sd: palette_heavy(x, m, "bands", sd)),
+    "ref_blue": ("参考偏蓝A_矩阵", lambda x, m, sd: palette_ref_blue(x, m, "mix")),
+    "ref_blue_ramp": ("参考偏蓝B_冷梯度", lambda x, m, sd: palette_ref_blue(x, m, "ramp")),
 }
 
 
@@ -593,6 +623,94 @@ def run(img, mask, p: Params, hist: BoundaryHistory = None, stages=False):
     x = edge_bar(x, p.bar_w)
     st.append((f"7  swap/invert {len(ops)} bands  posterize {p.levels}  clip y>{p.clip_y0}  dust {p.n_dust}  red bar", x))
     return (x, m, st) if stages else (x, m)
+
+
+# ---------------------------------------------------------------- 时间包络（👤：暴力的东西不能一直开）
+def envelope(t, onsets, threat, fps=FPS, t_end=None, thr=0.5, hold=2, tau=1.5, a_min=0.6,
+             sustain=1.4, ramp=0.4, downbeats=(), snap=0.2):
+    """门控 g(t) ∈ [0,1]，每帧一个值（t = 每帧的播放时间）。规律：
+      · 脉冲（前段，稀疏）：起音 o 处的威胁峰 s = max threat[o·fps−1 … o·fps+1]；s ≥ thr 才触发。
+        幅度 a = a_min + (1−a_min)·(s−thr)/(1−thr)；从 o 所在帧起满幅 hold 帧，之后 a·exp(−k/tau)（k = 衰减了几帧）。
+      · 收尾（持续）：r0 = t_end − sustain − ramp（若 ±snap 秒内有小节首拍，吸到那拍上）；
+        r0 → r0+ramp 平滑升到 1（smoothstep），之后一直 = 1 到 t_end。
+      · g = max(脉冲, 收尾)。收尾段之后的起音不再单独触发（已经全开）。
+    返回 (g, info)：info = {"bursts": [(o, s, a)], "ramp_start": r0, "full_from": r0+ramp}"""
+    t = np.asarray(t, np.float64)
+    n = len(t)
+    if t_end is None:
+        t_end = t[-1] + 1.0 / fps
+    r0 = t_end - sustain - ramp
+    db = [d for d in downbeats if abs(d - r0) <= snap]
+    if db:
+        r0 = min(db, key=lambda d: abs(d - r0))
+    g = np.zeros(n)
+    bursts = []
+    th = np.asarray(threat)
+    for o in onsets:
+        if not (t[0] - 0.5 / fps <= o < r0):
+            continue
+        c = int(round(o * fps))
+        s = float(th[max(0, c - 1):c + 2].max())
+        if s < thr:
+            continue
+        a = a_min + (1 - a_min) * (s - thr) / max(1e-9, 1 - thr)
+        j0 = int(np.searchsorted(t, o - 0.5 / fps))
+        k = np.arange(n) - j0
+        b = np.where((k >= 0) & (k < hold), a, 0.0)
+        tail = k >= hold
+        b[tail] = a * np.exp(-(k[tail] - hold + 1) / tau)
+        g = np.maximum(g, b)
+        bursts.append((float(o), round(s, 3), round(a, 3)))
+    u = np.clip((t - r0) / ramp, 0, 1)
+    g = np.maximum(g, u * u * (3 - 2 * u))
+    return g, {"bursts": bursts, "ramp_start": round(float(r0), 3), "full_from": round(float(r0 + ramp), 3),
+               "law": f"burst: onset threat peak >= {thr}, a = {a_min}+{1 - a_min:.1f}(s-thr)/(1-thr), hold {hold} f, "
+                      f"exp decay tau {tau} f; final: smoothstep ramp {ramp}s from {r0:.3f} (snapped to downbeat within "
+                      f"{snap}s), then 1 until {t_end:.3f}; g = max"}
+
+
+def scale_params(p: Params, g):
+    """g < 1 时把「暴力程度」按 g 缩：横移、分离、拖影、错位、色块、换道都乘 g；种子 / 切片数不变"""
+    q = Params(**asdict(p))
+    q.max_dx = int(round(p.max_dx * g))
+    q.p_shift = p.p_shift * g
+    q.split_d = tuple(int(round(v * g)) for v in p.split_d)
+    q.smear_len = max(1.0, p.smear_len * g)
+    q.jitter_amp = int(round(p.jitter_amp * g))
+    q.jitter_gain = p.jitter_gain * g
+    q.n_triplets, q.n_dashes, q.n_blocks = (int(round(v * g)) for v in (p.n_triplets, p.n_dashes, p.n_blocks))
+    q.p_swap, q.p_invert = p.p_swap * g, p.p_invert * g
+    q.clip_gain = p.clip_gain * g
+    return q
+
+
+def gate_plot(path, t, g, threat, onsets, info, downbeats=(), w=1280, h=300):
+    """逐帧门控图：灰 = 威胁，白填充 = g，竖线 = 起音（红 = 触发了脉冲），虚线 = 小节首拍，蓝块 = 收尾段"""
+    im = Image.new("RGB", (w, h), (10, 10, 12))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 13)
+    t0, t1 = t[0], t[-1] + 1 / FPS
+    X = lambda x: int(40 + (x - t0) / (t1 - t0) * (w - 60))  # noqa: E731
+    Y = lambda v: int(h - 40 - v * (h - 80))                  # noqa: E731
+    d.rectangle([X(info["ramp_start"]), Y(1), X(t1), Y(0)], fill=(18, 26, 44))
+    for i in range(len(t)):
+        d.rectangle([X(t[i]), Y(g[i]), X(t[i] + 1 / FPS) - 1, Y(0)], fill=(200, 205, 210))
+    pts = [(X(x), Y(threat[int(round(x * FPS))])) for x in np.linspace(t0, t1 - 1e-6, 400)]
+    d.line(pts, fill=(110, 115, 120), width=2)
+    fired = {b[0] for b in info["bursts"]}
+    for o in onsets:
+        if t0 <= o <= t1:
+            d.line([X(o), Y(1.05), X(o), Y(0)], fill=(230, 40, 50) if o in fired else (70, 74, 80), width=1)
+    for db in downbeats:
+        if t0 <= db <= t1:
+            for yy in range(Y(1.1), Y(0), 6):
+                d.line([X(db), yy, X(db), yy + 2], fill=(120, 140, 200))
+    for x in np.arange(np.ceil(t0 * 2) / 2, t1, 0.5):
+        d.text((X(x) - 14, h - 32), f"{x:.1f}", font=f, fill=(140, 144, 150))
+    d.text((40, 8), "gate g(t) (white)   threat (grey)   onsets (red = burst)   downbeats (blue dash)   final ramp (blue)",
+           font=f, fill=(170, 174, 180))
+    d.text((40, 24), info["law"][:150], font=f, fill=(120, 124, 130))
+    im.save(path)
 
 
 # ---------------------------------------------------------------- IO
@@ -727,9 +845,12 @@ def cmd_palettes(a):
     p = Params()
     out, m = run(img, mask, p)
     dst = S.MV / "静帧"
-    letters = dict(micro_fringe="23e", micro_streaks="23f", micro_redcyan="23g", heavy_false="23h", heavy_bands="23i")
+    letters = dict(micro_fringe="23e", micro_streaks="23f", micro_redcyan="23g", heavy_false="23h", heavy_bands="23i",
+                   ref_blue="23k", ref_blue_ramp="23l")
     tiles = []
-    for key in ["ours", "micro_fringe", "micro_streaks", "micro_redcyan", "orig", "heavy_false", "heavy_bands"]:
+    keys = a.keys.split(",") if a.keys else ["ours", "micro_fringe", "micro_streaks", "micro_redcyan", "orig",
+                                               "heavy_false", "heavy_bands", "ref_blue", "ref_blue_ramp"]
+    for key in keys:
         zh, fn = PALETTES[key]
         im = to_im(fn(out, m, p.seed))
         tiles.append((key, im))
@@ -738,7 +859,7 @@ def cmd_palettes(a):
             label(im.copy(), "", lines=p.hud() + [f"palette {key}"]).save(o, quality=94)
             print("->", o)
     tw, th_ = 640, 360
-    sheet = Image.new("RGB", (2 * tw, 4 * th_ + 40), (8, 8, 10))
+    sheet = Image.new("RGB", (2 * tw, ((len(tiles) + 1) // 2) * th_ + 40), (8, 8, 10))
     for i, (name, im) in enumerate(tiles):
         t = im.resize((tw, th_), Image.LANCZOS)
         label(t, name, s=0.9, color=(220, 224, 228))
@@ -802,6 +923,13 @@ def cmd_clip(a):
     i0, i1 = int(round(t_sense[0] * FPS)), int(round(t_sense[-1] * FPS)) + 1
     loc = on[(on >= t_sense[0]) & (on < t_sense[-1] + 1 / FPS)]
     strong = [o for o in loc if th[int(round(o * FPS))] >= np.percentile(th[i0:i1], 88)]
+    t_play = np.array(t_sense) + off
+    if a.envelope:
+        gate, ginfo = envelope(t_play, np.array(on) + off, th, t_end=t_play[-1] + 1 / FPS, thr=a.burst_thr,
+                               sustain=a.sustain, ramp=a.ramp, downbeats=np.array(sn["events"]["downbeats"]) + off)
+        side["envelope"] = ginfo
+    else:
+        gate = np.ones(n)
     seed, t0 = 1000, time.time()
     thumbs = {k: [] for k in pals}
     every = max(1, n // 16)
@@ -817,16 +945,25 @@ def cmd_clip(a):
         else:
             mask, msrc = get_mask(matter, f)
             masks.append(mask)
-        out, m = run(f, mask, p, hist=hist)
+        gi = float(gate[i])
+        if gi < 1.0:
+            p = scale_params(p, gi)
+        out, m = run(f, mask, p, hist=hist)        # 门关着也跑（瀑布图历史要连续），只是不显示
+        alpha = min(1.0, 1.5 * gi)
+        if alpha < 1.0:
+            clean, cm = place(f, mask, p.place_dx)
         for key in pals:
-            im = to_im(PALETTES[key][1](out, m, seed))
-            label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   threat {p.sense['threat']:.2f}  "
+            x = PALETTES[key][1](out, m, seed)
+            if alpha < 1.0:
+                x = x * alpha + PALETTES[key][1](clean, cm, seed) * (1 - alpha)
+            im = to_im(x)
+            label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   gate {gi:.2f}   threat {p.sense['threat']:.2f}  "
                                         f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   "
                                         f"mask {msrc}   palette {key}"] + p.hud())
             pipes[key].stdin.write(np.asarray(im).tobytes())
             if i % every == 0:
-                thumbs[key].append((f"{ts + off:.2f}s  threat {p.sense['threat']:.2f}", im))
-        side["frames"].append({"i": i, "t_play": round(ts + off, 3), **p.sense, "seed": seed,
+                thumbs[key].append((f"{ts + off:.2f}s  gate {gi:.2f}  threat {p.sense['threat']:.2f}", im))
+        side["frames"].append({"i": i, "t_play": round(ts + off, 3), "gate": round(gi, 3), **p.sense, "seed": seed,
                                "n_bands": p.n_bands, "max_dx": p.max_dx, "split_d": list(p.split_d),
                                "smear_len": round(p.smear_len, 1)})
     for key in pals:
@@ -835,6 +972,10 @@ def cmd_clip(a):
     if cached is None and matter is not None:
         np.save(mcache, (np.stack(masks) * 255 + 0.5).astype(np.uint8))
     print(f"{n} 帧 × {len(pals)} 配色  {time.time() - t0:.1f}s")
+    if a.envelope:
+        gp = outname(S.MV / "样片" / f"{name}_门控.png")
+        gate_plot(gp, t_play, gate, th, np.array(on) + off, ginfo, np.array(sn["events"]["downbeats"]) + off)
+        print("->", gp, ginfo["bursts"], ginfo["ramp_start"], ginfo["full_from"])
     for key in pals:
         suffix = f"_{PALETTES[key][0]}" if (len(pals) > 1 or a.name) else ""
         out = outname(S.MV / "样片" / f"{name}{suffix}.mp4")
@@ -864,6 +1005,7 @@ def main():
     s1 = sp.add_parser("sheet"); s1.add_argument("--t", type=float, default=4.0)
     s1b = sp.add_parser("palettes")
     s1b.add_argument("--t", type=float, default=4.0)
+    s1b.add_argument("--keys", default=None, help="只出这些配色（逗号分隔）；默认全部")
     s2 = sp.add_parser("clip")
     s2.add_argument("--src", default=str(SRC_VIDEO), help="源视频（她）")
     s2.add_argument("--start", type=float, default=84.0, help="歌里的播放时间（容器时间）= 第 0 帧")
@@ -874,8 +1016,13 @@ def main():
     s2.add_argument("--name", default=None, help="输出名（不含配色后缀）；默认 17_面部瓦解_试_<ver>")
     s2.add_argument("--ver", default="v1")
     s2.add_argument("--hold", type=int, default=4, help="种子保持几帧（强起音处总会换）")
+    s2.add_argument("--envelope", action="store_true", help="时间包络：前段只在强起音处短脉冲，最后 sustain 秒全开（见 envelope）")
+    s2.add_argument("--burst-thr", type=float, default=0.5, help="起音处威胁峰 ≥ 这个才触发脉冲")
+    s2.add_argument("--sustain", type=float, default=1.4, help="收尾全开几秒")
+    s2.add_argument("--ramp", type=float, default=0.4, help="收尾前升到全开用几秒")
     s2.add_argument("--sense-offset", type=float, default=SENSE_OFFSET, help="感官.json 时间 + 这个 = 播放时间（当前 感官.json 已是播放时间 → 0）")
-    s2.add_argument("--waterfall", action="store_true")
+    s2.add_argument("--waterfall", action=argparse.BooleanOptionalAction, default=True,
+                    help="瀑布图行（默认开；👤 2026-10-21 最喜欢「瀑布图行 + 本片配色」：不累眼、只一点颜色）；--no-waterfall = 方法一的拖影")
     s2.add_argument("--tmp", default=str(Path(__file__).resolve().parents[1] / "cache" / "face_glitch"))
     s3 = sp.add_parser("image"); s3.add_argument("src"); s3.add_argument("--mask"); s3.add_argument("--out")
     s3.add_argument("--place-dx", type=int, default=0); s3.add_argument("--palette", default="orig", choices=list(PALETTES))

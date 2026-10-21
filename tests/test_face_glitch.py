@@ -156,6 +156,35 @@ class TestStages(unittest.TestCase):
             self.assertEqual(out.shape, img.shape, key)
             self.assertTrue(np.all((out >= 0) & (out <= 1)), key)
 
+    def test_envelope_bursts_and_final(self):
+        """脉冲：只在威胁峰 ≥ thr 的起音处，满幅 hold 帧后指数衰减；收尾：吸到小节首拍，ramp 后恒 = 1"""
+        fps = 24
+        t = 10 + np.arange(120) / fps                       # 10.000 … 14.958
+        threat = np.zeros(20 * fps)
+        threat[int(round(10.5 * fps))] = 0.9                # 强
+        threat[int(round(11.5 * fps))] = 0.3                # 弱，不触发
+        g, info = F.envelope(t, [10.5, 11.5], threat, fps=fps, thr=0.5, hold=2, tau=1.5, a_min=0.6,
+                             sustain=1.4, ramp=0.4, downbeats=[13.25])
+        a = 0.6 + 0.4 * (0.9 - 0.5) / 0.5
+        j0 = int(np.searchsorted(t, 10.5 - 0.5 / fps))
+        np.testing.assert_allclose(g[j0:j0 + 2], a)
+        self.assertAlmostEqual(g[j0 + 2], a * np.exp(-1 / 1.5), places=9)
+        self.assertEqual(g[j0 - 1], 0.0)
+        self.assertEqual(len(info["bursts"]), 1)
+        # 收尾：t_end = 15.0 → r0 = 13.2 → 吸到 13.25
+        self.assertAlmostEqual(info["ramp_start"], 13.25)
+        np.testing.assert_array_equal(g[t >= 13.65], 1.0)
+        self.assertTrue(np.all(np.diff(g[(t >= 13.25) & (t <= 13.65)]) >= 0))
+        # 稀疏：收尾之前门开（> 0.05）的帧不到 15 %
+        self.assertLess(np.mean(g[t < 13.25] > 0.05), 0.15)
+
+    def test_scale_params_zero_is_calm(self):
+        p = F.scale_params(F.params_from_sense(0.9, 0.9, 0.9), 0.0)
+        self.assertEqual(p.max_dx, 0)
+        self.assertEqual(p.split_d, (0, 0, 0))
+        self.assertEqual(p.n_triplets + p.n_dashes + p.n_blocks, 0)
+        self.assertEqual(p.p_swap + p.p_invert + p.p_shift, 0)
+
     def test_pipeline_runs_deterministic(self):
         img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
         p = F.Params(place_dx=10, n_dust=50, grid=8)
