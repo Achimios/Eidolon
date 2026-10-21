@@ -4,7 +4,15 @@
 每级一个函数、参数显式。⭐👤：这个效果比之前的 glitch 更适合片中所有「电磁干扰」时刻 → 做成可复用效果，感官驱动。
 图像约定：float32 HxWx3 ∈ [0,1]；坐标 = 像素下标（x 向右、y 向下）。纯 numpy（系统 python 也能跑自检）。
 
-⭐当前 = v3（👤2026-10-21 反馈 v1「现在就是方块」：按列分段常数 → 12–14 px 硬边竖条，抛物面透镜在格边跳变）。
+⭐当前 = v4（Params.model = "v4"，函数在「v4」一节：ref_texture / texture_candidates / tile_texture / vertical_fields /
+  vertical_ghost / film_layer / soft_shoulder / run_v4）。v3 放大看是「波浪帘子 + 稀疏规整点阵」→ v4：
+  ① 磨砂膜纹理**取自参考图本身**（低熵注入）：瓦解4.jpg 亮度高通（σ 3）+ 局部对比度归一，只从「整块都亮」的区域取 96 px 补丁，
+     Hann 窗随机拼贴铺满（暗区取补丁会把参考图里的头形印进来 —— 24*_v4 那组的毛病，24*_v4b 修好）；
+     梯度 = 微折射（|D| 99 分位 = micro_px），本身 = 颗粒明暗，亮峰 = 闪点；
+  ② 大重影**纯竖向**（dx ≡ 0）：两个离散的像 I(y ± d(x)) + K 个抽头均匀铺在 ±S(x) 的竖向拉开分量；S、d 只随 x 低频变化（corr_v 500 px）；
+  ③ 色散作用在竖向位移上（横边出彩色色块）；④ 曝光后软肩（顶光热点不死白）；⑤ 起音脉冲：威胁 ≥ 0.6 必触发，≥ 0.5 的每隔一个。
+  v4 感官映射：威胁 → S_max = (60+300θ)·H/720 px、d = (10+50θ)·H/720 px、拉开权重 w = 0.3+0.5θ；张力 / 饥饿同下。
+以下是 v3 的说明（v3 = 👤2026-10-21 反馈 v1「现在就是方块」之后的版本：按列分段常数 → 12–14 px 硬边竖条，抛物面透镜在格边跳变）。
 物理模型：每个像素看到的是源图上 p = x + s(λ)·D(x) 处的颜色（采样点偏移 = 折射），D = 微透镜项 + 平滑的竖向重影项；全程 2× 超采样。
   1 cap_field / micro_offset / specular   微透镜阵列（周期 period_x × period_y，可错开 stagger）：每格一个 C¹ 圆顶
         h = cos²(πu/2)·cos²(πv/2)（格边上高度和斜率都 = 0 → 没有接缝），D_micro = micro·(P_x/2·sin(πu)cos²(πv/2), P_y/2·cos²(πu/2)sin(πv))；
@@ -38,9 +46,10 @@
 人读版：-给人类的解释/透镜重影怎么做的.md；效果库行：_设计/效果库.md「透镜重影」。
 
 用法（仓库 .venv 或系统 python；sheet / clip 有 CUDA 时采样走 torch GPU，模糊仍是 numpy FFT）：
-  python tools/lens_ghost.py sheet [--t 4.0] [--ver v3]   # 静帧/24_分解 + 24b 冷蓝 + 24c 接近参考 + 24d 3× 放大对比（参考 / 本版 / v1）
-  python tools/lens_ghost.py clip [--src 视频] [--start 45.12] [--dur 0] [--palette cold] [--name 18_透镜重影_全息女性_v2] [--hud]
-         [--exposure 1.6 --gamma 1.4]（全息女性源偏暗时）[--burst-thr 0.5]
+  python tools/lens_ghost.py sheet [--t 4.0] [--ver v4b] [--model v4|v3] [--compare v3,v4]
+         # 静帧/24_分解 + 24b 冷蓝 + 24c 接近参考 + 24d 3× 放大对比（参考 / --compare 里的旧版 24b / 本版）
+  python tools/lens_ghost.py clip [--src 视频] [--start 45.12] [--dur 0] [--palette cold] [--name 18_透镜重影_全息女性_v3] [--hud]
+         [--exposure 1.6 --gamma 1.4]（全息女性源偏暗时）[--burst-thr 0.5 --burst-every 2 --burst-always 0.6] [--model v4]
          # → 样片/<name>.mp4（配乐）+ .json（逐帧参数）+ _接触表.jpg
   python tools/lens_ghost.py image 图 [--palette cold] [--out 路径]
   python tools/lens_ghost.py measure 图          # 打印纹理周期（FFT）
@@ -96,6 +105,7 @@ def bilinear(img, px, py):
     """img (H,W,C) 在浮点坐标 (px, py)（各 HxW）处双线性采样；出界 = 0（黑底）"""
     if USE_TORCH:
         return _bilinear_torch(img, px, py)
+    px, py = np.broadcast_arrays(px, py)
     H, W, C = img.shape
     x0 = np.floor(px).astype(np.int64)
     y0 = np.floor(py).astype(np.int64)
@@ -380,19 +390,39 @@ class Params:
     vignette: float = 0.35
     strength: float = 1.0
     ss: int = 2                 # 超采样倍数
+    # v4
+    model: str = "v4"           # v4（当前）| v3
+    S_max: float = 240.0        # 竖向拉开的最大半宽 px
+    d_copy: float = 40.0        # 两个离散像的竖向错位幅度 px
+    w_s: float = 0.6            # 拉开分量的权重
+    K: int = 9                  # 拉开分量的离散抽头数
+    corr_v: float = 500.0       # S(x)、d(x) 的横向相关长 px（低频 → 横线不弯）
+    n_lambda_v: int = 5
+    tex_scale: float = 1.0      # 参考图纹理缩放（1 = 参考图像素 1:1，颗粒 2–3 px）
+    micro_px: float = 1.5       # 磨砂膜微折射（|D| 99 分位）px
+    grain: float = 0.35
+    spark: float = 1.5
+    spark_q: float = 99.0
+    shoulder: float = 0.75      # 软肩拐点
     seed: int = 3
     t: float = 0.0
     origin_x: float = 0.0
     sense: dict = field(default_factory=dict)
 
     def hud(self, dk_mul=1.0):
+        if self.model == "v4":
+            return [f"v4 film = REF 瓦解4.jpg texture x{self.tex_scale}: micro-refraction {self.micro_px}px  grain {self.grain}  sparkle {self.spark}  ss {self.ss}x",
+                    f"vertical only (dx=0): 2 copies +-{self.d_copy:.0f}px  spread K={self.K} +-{self.S_max:.0f}px  w {self.w_s:.2f}  corr {self.corr_v:.0f}px",
+                    f"dispersion dk={self.dk * dk_mul:.3f}{f' (={self.dk:.3f}x{dk_mul})' if dk_mul != 1 else ''} on y  "
+                    f"defocus {self.defocus:.1f}px  exp {self.exposure:.2f} shoulder {self.shoulder}  gamma {self.gamma:.2f}"]
         return [f"micro-lens C1 caps {self.period_x:.0f}x{self.period_y:.0f}px  refraction {self.micro:+.2f}  spec {self.spec:.2f}  ss {self.ss}x",
                 f"vertical ghosts {self.n_ghost}  shear A={self.A:.0f}px  stretch m={self.stretch:.2f}  corr {self.corr:.0f}px  column scatter {self.scatter:.2f}",
                 f"dispersion dk={self.dk * dk_mul:.3f}{f' (={self.dk:.3f}x{dk_mul})' if dk_mul != 1 else ''} n_lambda={self.n_lambda}  "
                 f"defocus {self.defocus:.1f}px  bloom {self.bloom_gain:.2f}  exp {self.exposure:.2f} gamma {self.gamma:.2f}"]
 
 
-LENGTHS = ("period_x", "period_y", "A", "col_w", "seam", "corr", "defocus", "soften", "bloom_sigma", "origin_x")
+LENGTHS = ("period_x", "period_y", "A", "col_w", "seam", "corr", "defocus", "soften", "bloom_sigma", "origin_x",
+           "S_max", "d_copy", "corr_v", "micro_px")
 
 
 def scaled(p: Params, s):
@@ -407,18 +437,23 @@ def params_from_sense(threat, tension, hunger, H=720, base=None, **kw):
     """感官 → 参数（映射表见模块 docstring）"""
     p = Params(**{**(asdict(base) if base else {}), **kw})
     s = H / 720
-    p.A = (4 + 20 * threat) * s
-    p.stretch = 0.15 + 0.55 * threat
+    p.A = (4 + 20 * threat) * s                 # v3
+    p.stretch = 0.15 + 0.55 * threat            # v3
+    p.S_max = (60 + 300 * threat) * s           # v4
+    p.d_copy = (10 + 50 * threat) * s           # v4
+    p.w_s = 0.3 + 0.5 * threat                  # v4
     p.dk = 0.04 + 0.12 * tension
     p.defocus = (0.5 + 2.5 * hunger) * s
     p.sense = {"threat": round(float(threat), 3), "tension": round(float(tension), 3), "hunger": round(float(hunger), 3)}
     return p
 
 
-MAPPING = {"threat": "shear A = (4 + 20*threat)*H/720 px; vertical stretch m = 0.15 + 0.55*threat (smooth across x)",
+MAPPING = {"threat": "v4: vertical spread S_max = (60 + 300*threat)*H/720 px, copies d = (10 + 50*threat)*H/720 px, spread weight w = 0.3 + 0.5*threat; "
+                     "(v3: shear A = (4 + 20*threat)*H/720 px; vertical stretch m = 0.15 + 0.55*threat)",
            "tension": "dk = 0.04 + 0.12*tension (blue end refracts dk more than red end)",
            "hunger": "defocus sigma = (0.5 + 2.5*hunger)*H/720 px (before the lens)",
-           "onsets": "burst e(t) = sum exp(-(t-o)/tau) over onsets with threat >= thr; A *= 1+gain*e, dk *= 1+0.5*e, reseed xi"}
+           "onsets": "burst e(t) = sum exp(-(t-o)/tau) over onsets with threat >= always_thr, plus every other onset with threat >= thr; "
+                     "S_max, d *= 1+gain*e (v3: A, m), dk *= 1+0.5*e, reseed fields"}
 
 
 def displacements(H, W, p: Params):
@@ -460,8 +495,13 @@ def downsample(img, s):
     return img[:H * s, :W * s].reshape(H, s, W, s, -1).mean((1, 3))
 
 
-def run(img, p: Params, palette="cold", stages=False):
-    """整条管线（v2）。stages=True → 额外返回 [(名字, 图)]（累积，每级都过同一个 post + grade）"""
+def run(img, p, palette="cold", stages=False):
+    """按 p.model 分派：v4（当前）/ v3"""
+    return (run_v4 if p.model == "v4" else run_v3)(img, p, palette, stages)
+
+
+def run_v3(img, p: Params, palette="cold", stages=False):
+    """整条管线（v2 / v3）。stages=True → 额外返回 [(名字, 图)]（累积，每级都过同一个 post + grade）"""
     _, pre, post, dk_mul = PALETTES[palette]
     H0, W0, _ = img.shape
     s = max(1, int(p.ss))
@@ -498,6 +538,164 @@ def run(img, p: Params, palette="cold", stages=False):
     return out
 
 
+# ---------------------------------------------------------------- v4（2026-10-21：v3 放大看是「波浪帘子 + 稀疏规整点阵」）
+# v4：① 纹理不再程序生成，**取自参考图本身**（低熵注入）：瓦解4.jpg 亮度高通 + 局部对比度归一 → 高度图，镜像平铺；
+#        它的梯度 = 像面上一层磨砂膜的微折射（≤ micro_px），它的亮峰 = 闪点，它本身 = 颗粒明暗；
+#     ② 大重影 = **纯竖向**采样（dx ≡ 0），随 x 只做低频变化（corr_v ≈ 500 px）→ 横线不弯成波浪：
+#        两个离散的像（±d(x)）+ 一个竖向拉开的分量（K 个离散抽头均匀铺在 [−S(x), +S(x)]，像横轴柱镜把光竖着摊开）；
+#     ③ 色散作用在竖向位移上 → 横向边界出彩色色块；
+#     ④ 曝光后先过一个软肩（顶光热点不再死白）。
+_TEX_CACHE = {}
+
+
+def ref_texture(scale=1.0, hp=3.0, norm=8.0, path=None):
+    """参考图的高频纹理：t = (L − G_hp∗L) / sqrt(G_norm∗(…)²)（局部对比度归一 → 亮处暗处颗粒一样强），
+    再按 scale 缩放（1 = 参考图像素 1:1）、减均值除标准差。参考图缺失 → 返回 None"""
+    key = (scale, hp, norm, str(path or REF))
+    if key in _TEX_CACHE:
+        return _TEX_CACHE[key]
+    pth = Path(path or REF)
+    if not pth.exists():
+        return None
+    g = lum(load(pth))
+    t = g - gaussian_blur(g, hp)
+    t = t / np.sqrt(gaussian_blur(t * t, norm) + 1e-4)
+    if scale != 1.0:
+        im = Image.fromarray(t.astype(np.float32), mode="F")
+        t = np.asarray(im.resize((int(round(t.shape[1] * scale)), int(round(t.shape[0] * scale))), Image.BICUBIC), np.float32)
+    t = ((t - t.mean()) / t.std()).astype(np.float32)
+    _TEX_CACHE[key] = t
+    return t
+
+
+def texture_candidates(scale=1.0, patch=96, min_lum=0.35, path=None):
+    """参考图里「整块都亮」的地方才有可信的颗粒（暗处只剩 JPEG 噪声，且会把她的头形印进纹理）：
+    亮度高斯 σ=patch/4 后 ≥ min_lum 的像素作为补丁中心候选（按 scale 换算到纹理坐标）。返回 (纹理, [(cy, cx)])"""
+    tex = ref_texture(scale, path=path)
+    if tex is None:
+        return None, []
+    g = lum(load(Path(path or REF)))
+    m = gaussian_blur(g, patch / 4 / scale) >= min_lum
+    ys, xs = np.nonzero(m)
+    ok = []
+    h, w = tex.shape
+    for y, x in zip(ys[::37], xs[::37]):
+        cy, cx = int(y * scale), int(x * scale)
+        if patch // 2 <= cy < h - patch // 2 and patch // 2 <= cx < w - patch // 2:
+            ok.append((cy, cx))
+    return tex, ok
+
+
+def tile_texture(tex, H, W, ox=0, oy=0, cands=None, patch=96, seed=0):
+    """把纹理铺满 H×W。有 cands（亮区补丁中心）→ 随机补丁拼贴：步长 patch/2 的网格上，每格贴一块 patch×patch 的补丁，
+    乘 Hann² 窗（50% 重叠时窗和 ≈ 常数）后归一，再按局部标准差归一（重叠处方差不掉）。ox 让整张随玻璃滑动。
+    没有 cands → 镜像平铺（旧做法；暗区会把参考图里的头形印进来 —— 24*_v4 第一张的问题）"""
+    if not cands:
+        h, w = tex.shape
+        m = np.concatenate([tex, tex[::-1]], 0)
+        m = np.concatenate([m, m[:, ::-1]], 1)
+        ys = (np.arange(H) + int(oy)) % (2 * h)
+        xs = (np.arange(W) + int(ox)) % (2 * w)
+        return m[ys[:, None], xs[None, :]]
+    rng = np.random.default_rng(seed)
+    st = patch // 2
+    win = np.hanning(patch)
+    win = np.outer(win, win) ** 1.0
+    sx = int(ox) % st
+    acc = np.zeros((H + 2 * patch, W + 3 * patch), np.float32)
+    wsum = np.zeros_like(acc)
+    for y0 in range(0, H + patch, st):
+        for x0 in range(-sx, W + patch, st):
+            cy, cx = cands[rng.integers(len(cands))]
+            pt = tex[cy - st:cy + st, cx - st:cx + st]
+            if rng.random() < 0.5:
+                pt = pt[:, ::-1]
+            acc[y0:y0 + patch, x0 + patch:x0 + 2 * patch] += pt * win
+            wsum[y0:y0 + patch, x0 + patch:x0 + 2 * patch] += win
+    t = (acc / np.maximum(wsum, 1e-3))[patch // 2:patch // 2 + H, patch:patch + W]
+    t = t / np.sqrt(gaussian_blur(t * t, 8.0) + 1e-4)
+    return ((t - t.mean()) / t.std()).astype(np.float32)
+
+
+def soft_shoulder(x, knee=0.75):
+    """< knee 恒等；之上 knee + (1−knee)·tanh((x−knee)/(1−knee))：连续、一阶导连续、≤ 1（数学上 < 1）"""
+    return np.where(x < knee, x, knee + (1 - knee) * np.tanh((x - knee) / (1 - knee))).astype(np.float32)
+
+
+def vertical_fields(W, S_max=240.0, d_copy=40.0, corr_v=500.0, t=0.0, omega=0.6, seed=0, origin_x=0.0):
+    """S(x) = S_max·(½ + ½N₁(x))（拉开的半宽），d(x) = d_copy·N₂(x)（两个像的竖向错位）。只随 x 低频变化，形状 (1, W)"""
+    x = np.arange(W, dtype=np.float64) - origin_x
+    S = S_max * (0.5 + 0.5 * fourier_noise(x, t, corr_v, omega, seed=seed))
+    d = d_copy * fourier_noise(x, t, corr_v, omega, seed=seed + 1)
+    return S[None, :], d[None, :]
+
+
+def vertical_ghost(src, S, d, K=9, w_s=0.6, dk=0.1, n_lambda=5):
+    """纯竖向重影：out = (1−w_s)·½[I(y+d) + I(y−d)] + w_s·(1/K)Σ_k I(y + κ_k·S)，κ_k 均匀铺在 [−1, 1]；
+    每次采样都带色散 s(λ)（只在 y 上）。dx ≡ 0"""
+    W = src.shape[1]
+    z = np.zeros((1, W))
+    copies = 0.5 * (disperse_sample(src, z, d, dk, n_lambda) + disperse_sample(src, z, -d, dk, n_lambda))
+    if w_s <= 0:
+        return copies
+    st = 0
+    for kk in np.linspace(-1, 1, K):
+        st = st + disperse_sample(src, z, kk * S, dk, n_lambda)
+    return (1 - w_s) * copies + w_s * st / K
+
+
+def film_layer(img, tex, micro_px=1.5, grain=0.35, spark=1.5, spark_q=99.0, spark_blur=3.0):
+    """像面上的磨砂膜：① 按纹理梯度做微折射（|D| 的 99 分位 = micro_px）② 颗粒明暗 ×(1 + grain·clip(t,−2,2)/2)
+    ③ 纹理最高的 (100 − spark_q)% 处加闪点 = spark·((t−q)/(max−q))^½ × 局部亮度（黑处不闪）"""
+    H, W, _ = img.shape
+    gy, gx = np.gradient(tex)
+    sc = micro_px / max(1e-6, np.percentile(np.hypot(gx, gy), 99))
+    out = bilinear(img, np.arange(W)[None, :] + gx * sc, np.arange(H)[:, None] + gy * sc)
+    out = out * (1 + grain * np.clip(tex, -2, 2)[..., None] / 2)
+    q = np.percentile(tex, spark_q)
+    sp = np.clip((tex - q) / max(1e-6, tex.max() - q), 0, 1) ** 0.5
+    return out + spark * sp[..., None] * gaussian_blur(out, spark_blur)
+
+
+def run_v4(img, p, palette="cold", stages=False):
+    """v4 整条管线。stages=True → 额外返回 [(名字, 图)]、纹理、(S, d)"""
+    _, pre, post, dk_mul = PALETTES[palette]
+    s = max(1, int(p.ss))
+    q = scaled(p, s)
+    x0 = soft_shoulder(np.clip(pre(img) * p.exposure, 0, None), p.shoulder)
+    src = upsample(x0, s)
+    H, W, _ = src.shape
+    tex, cands = texture_candidates(p.tex_scale * s, 96 * s)
+    if tex is None:                                         # 参考图不在：退回无纹理
+        tex = np.zeros((H, W), np.float32)
+    else:
+        tex = tile_texture(tex, H, W, q.origin_x, 0, cands, 96 * s, seed=p.seed % 1000)
+    S, d = vertical_fields(W, q.S_max, q.d_copy, q.corr_v, p.t, p.omega, p.seed, q.origin_x)
+    dk = p.dk * dk_mul
+    fin = lambda x: grade(post(downsample(x, s)), p.black, p.gamma, p.vignette)  # noqa: E731
+    blurred = gaussian_blur(src, q.defocus)
+    st = []
+    if stages:
+        st.append((f"0  source  exposure {p.exposure} + soft shoulder knee {p.shoulder}", fin(src)))
+        st.append((f"1  two vertical copies  +-d(x), d_copy={p.d_copy:.0f}px  (dx = 0)", fin(vertical_ghost(src, S, d, w_s=0))))
+        st.append((f"2  + vertical spread  K={p.K} taps in +-S(x), S_max={p.S_max:.0f}px  w={p.w_s:.2f}  corr {p.corr_v:.0f}px",
+                   fin(vertical_ghost(src, S, d, p.K, p.w_s, 0))))
+        st.append((f"3  + dispersion on y  dk={dk:.3f}  n_lambda={p.n_lambda_v}",
+                   fin(vertical_ghost(src, S, d, p.K, p.w_s, dk, p.n_lambda_v))))
+    x = vertical_ghost(blurred, S, d, p.K, p.w_s, dk, p.n_lambda_v)
+    if stages:
+        st.append((f"4a + defocus {p.defocus:.1f}px (before)", fin(x)))
+    x = film_layer(gaussian_blur(x, q.soften), tex, q.micro_px, p.grain, p.spark, p.spark_q, 3.0 * s)
+    if stages:
+        st.append((f"4b + film from REF texture (x{p.tex_scale}): micro-refraction {p.micro_px}px, grain {p.grain}, sparkle {p.spark}", fin(x)))
+    x = bloom(x, p.bloom_thr, q.bloom_sigma, p.bloom_gain)
+    out = fin(x)
+    if stages:
+        st.append((f"5  + bloom {p.bloom_gain} -> grade black={p.black} gamma={p.gamma}", out))
+        return out, st, tex, (S, d)
+    return out
+
+
 # ---------------------------------------------------------------- v1（保留以便复现 24/24b/24c 与样片 18_v1）
 def displacements_v1(H, W, p, k=0.7, bow=0.3):
     """v1：抛物面微透镜（格边跳变）+ 按列分段常数的竖向位移（硬边）。只给自检 / 复现用"""
@@ -509,15 +707,23 @@ def displacements_v1(H, W, p, k=0.7, bow=0.3):
 
 
 # ---------------------------------------------------------------- 时间演化
-def bursts(t, onsets, threat, fps=FPS, thr=0.3, tau=0.25):
-    """强起音脉冲：e(t) = Σ exp(−(t − o)/tau)（t ≥ o），只算该处威胁峰 ≥ thr 的起音。返回 (e, 触发的起音列表)"""
+def bursts(t, onsets, threat, fps=FPS, thr=0.3, tau=0.25, every=1, always_thr=None):
+    """强起音脉冲：e(t) = Σ exp(−(t − o)/tau)（t ≥ o）。起音处威胁峰 s = max threat[c−1..c+1]：
+    s ≥ always_thr 一定触发；否则 s ≥ thr 的起音里每 every 个触发一个（第 0、every、2·every … 个）。返回 (e, 触发的起音列表)"""
     t = np.asarray(t, np.float64)
     th = np.asarray(threat)
     e = np.zeros_like(t)
     fired = []
+    n_strong = 0
     for o in onsets:
         c = int(round(o * fps))
-        if c < 0 or c >= len(th) or th[max(0, c - 1):c + 2].max() < thr:
+        if c < 0 or c >= len(th):
+            continue
+        sv = th[max(0, c - 1):c + 2].max()
+        if sv < thr:
+            continue
+        n_strong += 1
+        if not ((always_thr is not None and sv >= always_thr) or (n_strong - 1) % every == 0):
             continue
         m = t >= o - 0.5 / fps
         e[m] += np.exp(-np.clip(t[m] - o, 0, None) / tau)
@@ -532,6 +738,8 @@ def evolve_params(p: Params, t, e, n_fired, drift_x=4.0, burst_gain=0.8):
     q.origin_x = drift_x * t
     q.A = p.A * (1 + burst_gain * e)
     q.stretch = min(0.9, p.stretch * (1 + 0.5 * burst_gain * e))
+    q.S_max = p.S_max * (1 + burst_gain * e)
+    q.d_copy = p.d_copy * (1 + burst_gain * e)
     q.dk = p.dk * (1 + 0.5 * e)
     q.seed = p.seed + 1000 * n_fired
     return q
@@ -580,28 +788,24 @@ def load(path):
     return np.asarray(Image.open(path).convert("RGB"), np.float32) / 255
 
 
-def zoom_sheet(ref, ours, v1, path, F, z=3, box=170, ver="new"):
-    """3× 放大对比：同样像素大小的方块（参考图 / v2 / v1），最近邻放大，看纹理颗粒"""
+def zoom_sheet(ref, rows_imgs, path, F, z=3, box=170, title="24d  LENS GHOST zoom comparison"):
+    """3× 放大对比：同样像素大小的方块，最近邻放大，看颗粒。rows_imgs = [(名字, 图 1280×720)]，第一行固定是参考图"""
+    from PIL import ImageDraw, ImageFont
+
     def crops(img, centers):
-        out = []
-        for cx, cy in centers:
-            c = img[cy - box // 2:cy + box // 2, cx - box // 2:cx + box // 2]
-            out.append(F.to_im(c).resize((box * z, box * z), Image.NEAREST))
-        return out
-    rows = [("REF 瓦解4.jpg (736 wide)", crops(ref, [(560, 300), (180, 380), (470, 860)])),
-            (f"OURS {ver} 24b (1280x720)", crops(ours, [(560, 250), (470, 360), (760, 470)]))]
-    if v1 is not None:
-        rows.append(("OURS v1 24b (old, blocks)", crops(v1, [(560, 250), (470, 360), (760, 470)])))
+        return [F.to_im(img[cy - box // 2:cy + box // 2, cx - box // 2:cx + box // 2]).resize((box * z, box * z), Image.NEAREST)
+                for cx, cy in centers]
+    rows = [("REF 瓦解4.jpg (736 wide)", crops(ref, [(560, 300), (180, 380), (470, 860)]))]
+    rows += [(name, crops(im, [(560, 250), (470, 360), (760, 470)])) for name, im in rows_imgs]
     S = box * z
     sheet = Image.new("RGB", (3 * S, len(rows) * (S + 30) + 40), (8, 8, 10))
+    font = ImageFont.truetype(F.FONT, 18)
     for r, (name, ims) in enumerate(rows):
         for c, im in enumerate(ims):
             sheet.paste(im, (c * S, 40 + r * (S + 30) + 30))
-        from PIL import ImageDraw, ImageFont
-        ImageDraw.Draw(sheet).text((10, 40 + r * (S + 30) + 6), f"{name}   {box}x{box}px crops, {z}x nearest",
-                                   font=ImageFont.truetype(F.FONT, 18), fill=(220, 224, 228))
-    F.label(sheet, "", s=1.1, color=(160, 166, 172), pos="tl",
-            lines=["24d  LENS GHOST zoom comparison — same pixel size crops, 3x. tools/lens_ghost.py sheet"])
+        ImageDraw.Draw(sheet).text((10, 40 + r * (S + 30) + 6), f"{name}   {box}x{box}px crops, {z}x nearest", font=font,
+                                   fill=(220, 224, 228))
+    F.label(sheet, "", s=1.1, color=(160, 166, 172), pos="tl", lines=[f"{title} — same pixel size crops, {z}x. tools/lens_ghost.py sheet"])
     sheet.save(path, quality=93)
 
 
@@ -612,33 +816,44 @@ def cmd_sheet(a):
     H, W, _ = img.shape
     ref = load(REF)
     mp = measure_period(ref[550:1000, 380:700])
-    p = params_from_sense(a.threat, a.tension, a.hunger, H, Params())
-    out, st, cells, cols = run(img, p, "cold", stages=True)
-    # 必须相等：同一套微透镜项作用在斜坡图上（和 tests 同一个量），FFT 周期 == 设定周期。真实画面上 FFT 会被内容（等高线）带偏，不拿来比
-    Hr, Wr = int(p.period_y * 24), int(p.period_x * 20)
-    _, (lx, ly), _ = displacements(Hr, Wr, Params(**{**asdict(p), "A": 0}))
-    ramp = (0.3 * (np.arange(Wr)[None, :] + lx) / Wr + 0.7 * (np.arange(Hr)[:, None] + ly) / Hr)[..., None].repeat(3, -1)
-    ours = measure_period(ramp.astype(np.float32), min_period=4)
+    p = params_from_sense(a.threat, a.tension, a.hunger, H, Params(model=a.model))
+    out, st, aux1, aux2 = run(img, p, "cold", stages=True)
     s = max(1, p.ss)
-    panels = [(f"ref crop  FFT: y {mp['y']:.1f}px  x {mp['x']:.1f}px  peak (fx,fy)=({abs(mp['peak'][0]):.3f},{abs(mp['peak'][1]):.3f})",
-               F.to_im(ref[250:250 + 414, 0:736]).resize((W, H), Image.LANCZOS)),
-              ("C1 dome height h (grey) + ghost-1 dy (blue down / orange up), smooth across x",
-               F.to_im(downsample(field_panel(cells, cols), s)))]
+    if p.model == "v4":
+        tx, cands = texture_candidates(p.tex_scale, 96)
+        tex = tile_texture(tx, 414, 736, 0, 0, cands, 96, seed=p.seed)
+        mt = measure_period(tex[..., None].repeat(3, -1) * 0.2 + 0.5)
+        Sx = aux2[0][0]
+        fp = np.repeat(np.clip(downsample(aux1[..., None], s)[..., 0] * 0.15 + 0.3, 0, 1)[..., None], 3, -1)
+        for xx in range(0, W):
+            yy = int(H - 1 - (Sx[xx * s] / max(1e-6, Sx.max())) * (H - 40))
+            fp[max(0, yy - 1):yy + 2, xx] = (1.0, 0.55, 0.15)
+        panels = [(f"ref crop  FFT: y {mp['y']:.1f}px  x {mp['x']:.1f}px", F.to_im(ref[250:250 + 414, 0:736]).resize((W, H), Image.LANCZOS)),
+                  (f"film texture = REF high-pass (tiled, mirrored) FFT y {mt['y']:.1f}px x {mt['x']:.1f}px; orange = S(x)", F.to_im(fp))]
+        extra = ""
+    else:
+        cells, cols = aux1, aux2
+        Hr, Wr = int(p.period_y * 24), int(p.period_x * 20)
+        _, (lx, ly), _ = displacements(Hr, Wr, Params(**{**asdict(p), "A": 0}))
+        ramp = (0.3 * (np.arange(Wr)[None, :] + lx) / Wr + 0.7 * (np.arange(Hr)[:, None] + ly) / Hr)[..., None].repeat(3, -1)
+        ours = measure_period(ramp.astype(np.float32), min_period=4)
+        panels = [(f"ref crop  FFT: y {mp['y']:.1f}px  x {mp['x']:.1f}px", F.to_im(ref[250:250 + 414, 0:736]).resize((W, H), Image.LANCZOS)),
+                  ("C1 dome height h (grey) + ghost-1 dy (blue down / orange up), smooth across x",
+                   F.to_im(downsample(field_panel(cells, cols), s)))]
+        extra = f" | ramp FFT {ours['x']:.1f}x{ours['y']:.1f}"
     for i, (name, x) in enumerate(st):
-        if i == 1:
-            name += f" | ramp FFT {ours['x']:.1f}x{ours['y']:.1f}"
-        panels.append((name, F.to_im(x)))
+        panels.append((name + (extra if i == 1 else ""), F.to_im(x)))
     pw_, ph_ = 640, 360
     cols_n = 3
     rows = (len(panels) + cols_n - 1) // cols_n
     sheet = Image.new("RGB", (cols_n * pw_, rows * ph_ + 40), (8, 8, 10))
     for i, (name, im) in enumerate(panels):
         th = im.resize((pw_, ph_), Image.LANCZOS)
-        F.label(th, name[:100], s=0.8, color=(215, 218, 222))
+        F.label(th, name[:104], s=0.8, color=(215, 218, 222))
         sheet.paste(th, ((i % cols_n) * pw_, 40 + (i // cols_n) * ph_))
     F.label(sheet, "", s=1.1, color=(160, 166, 172), pos="tl",
-            lines=[f"24 {a.ver}  LENS GHOST — C1 micro-lens caps + smooth vertical ghosts + dispersion, {s}x supersampled. tools/lens_ghost.py  "
-                   f"t={a.t}s 03_headlift_v3  threat {a.threat} tension {a.tension} hunger {a.hunger}"])
+            lines=[f"24 {a.ver}  LENS GHOST ({p.model}) — tools/lens_ghost.py  t={a.t}s 03_headlift_v3  "
+                   f"threat {a.threat} tension {a.tension} hunger {a.hunger}  {s}x supersampled"])
     dst = F.S.MV / "静帧"
     o1 = F.outname(dst / f"24_透镜重影_分解_{a.ver}.jpg"); sheet.save(o1, quality=92)
     o2 = F.outname(dst / f"24b_透镜重影_冷蓝_{a.ver}.jpg")
@@ -647,13 +862,17 @@ def cmd_sheet(a):
     o3 = F.outname(dst / f"24c_透镜重影_接近参考配色_{a.ver}.jpg")
     F.label(F.to_im(out_ref), "", s=1.0, color=(200, 200, 200),
             lines=p.hud(PALETTES["ref"][3]) + ["palette ref: source colour, saturation x2"]).save(o3, quality=94)
-    v1p = dst / "24b_透镜重影_冷蓝.jpg"
-    v1 = load(v1p) if v1p.exists() and v1p != o2 else None
+    rows = []
+    for v in (a.compare or "").split(","):
+        f = dst / f"24b_透镜重影_冷蓝_{v}.jpg" if v and v != "v1" else dst / "24b_透镜重影_冷蓝.jpg"
+        if v and f.exists():
+            rows.append((f"OURS {v} 24b", load(f)))
+    rows.append((f"OURS {a.ver} 24b (this run)", out))
     o4 = F.outname(dst / f"24d_透镜重影_放大对比_{a.ver}.jpg")
-    zoom_sheet(ref, out, v1, o4, F, ver=a.ver)
+    zoom_sheet(ref, rows, o4, F)
     for o in (o1, o2, o3, o4):
         print("->", o)
-    print("ref period", mp, " ours micro (set %.0fx%.0f)" % (p.period_x, p.period_y), ours, "torch", USE_TORCH)
+    print("ref period", mp, "torch", USE_TORCH)
 
 
 def cmd_clip(a):
@@ -677,19 +896,20 @@ def cmd_clip(a):
     t_play = a.start + np.arange(n) / FPS
     th = np.array(ch["threat"])
     on = np.array(sn["events"]["onsets"])
-    e, fired = bursts(t_play, on[(on >= t_play[0] - 0.5 / FPS) & (on <= t_play[-1])], th, thr=a.burst_thr, tau=a.burst_tau)
+    e, fired = bursts(t_play, on[(on >= t_play[0] - 0.5 / FPS) & (on <= t_play[-1])], th, thr=a.burst_thr, tau=a.burst_tau,
+                      every=a.burst_every, always_thr=a.burst_always)
     side = {"source": src.name, "src_t0": a.src_t0, "play_start": a.start, "dur": dur, "palette": a.palette,
             "time": "感官.json is in playback time (no offset)", "mapping": MAPPING,
             "evolution": {"drift_x_px_s": a.drift, "burst_gain": a.burst_gain, "burst_tau_s": a.burst_tau,
-                          "burst_thr": a.burst_thr, "fired_onsets": fired, "omega_rad_s": Params().omega},
-            "exposure": a.exposure, "gamma": a.gamma, "model": "v2 (C1 micro-lens caps, smooth column ghosts, 2x supersampled)",
+                          "burst_thr": a.burst_thr, "burst_every": a.burst_every, "burst_always": a.burst_always, "fired_onsets": fired, "omega_rad_s": Params().omega},
+            "exposure": a.exposure, "gamma": a.gamma, "model": a.model,
             "frames": []}
     thumbs, every = [], max(1, n // 16)
     t0 = time.time()
     for i, f in enumerate(frames):
         t = float(t_play[i])
         kf = min(int(round(t * FPS)), len(th) - 1)
-        base = params_from_sense(ch["threat"][kf], ch["tension"][kf], ch["hunger"][kf], H, Params(seed=a.seed, exposure=a.exposure, gamma=a.gamma))
+        base = params_from_sense(ch["threat"][kf], ch["tension"][kf], ch["hunger"][kf], H, Params(seed=a.seed, exposure=a.exposure, gamma=a.gamma, model=a.model))
         nf = sum(1 for o in fired if o <= t + 0.5 / FPS)
         p = evolve_params(base, t - a.start, float(e[i]), nf, a.drift, a.burst_gain)
         im = F.to_im(run(f, p, a.palette))
@@ -700,7 +920,7 @@ def cmd_clip(a):
         if i % every == 0:
             thumbs.append((f"{t:.2f}s thr {p.sense['threat']:.2f} ten {p.sense['tension']:.2f} burst {e[i]:.2f}", im))
         side["frames"].append({"i": i, "t_play": round(t, 3), **p.sense, "burst": round(float(e[i]), 3),
-                               "A": round(p.A, 1), "dk": round(p.dk, 4), "dk_effective": round(p.dk * PALETTES[a.palette][3], 4),
+                               "A": round(p.A, 1), "S_max": round(p.S_max, 1), "d_copy": round(p.d_copy, 1), "w_s": round(p.w_s, 3), "dk": round(p.dk, 4), "dk_effective": round(p.dk * PALETTES[a.palette][3], 4),
                                "defocus": round(p.defocus, 2),
                                "seed": p.seed, "origin_x": round(p.origin_x, 2)})
     pipe.stdin.close()
@@ -735,19 +955,24 @@ def main():
     s1.add_argument("--threat", type=float, default=0.6)
     s1.add_argument("--tension", type=float, default=0.6)
     s1.add_argument("--hunger", type=float, default=0.35)
-    s1.add_argument("--ver", default="v3", help="静帧文件名版本后缀（不覆盖：已存在再自动加 _v2 …）")
+    s1.add_argument("--ver", default="v4", help="静帧文件名版本后缀（不覆盖：已存在再自动加 _v2 …）")
+    s1.add_argument("--model", default="v4", choices=["v4", "v3"])
+    s1.add_argument("--compare", default="v3", help="24d 里一起放大对比的旧版 24b（逗号分隔，如 v1,v3）")
     s2 = sp.add_parser("clip")
     s2.add_argument("--src", default=None, help="源视频；默认 素材/全息女性视频运镜描述.mp4")
     s2.add_argument("--src-t0", type=float, default=0.0)
     s2.add_argument("--start", type=float, default=45.12, help="歌里的播放时间 = 第 0 帧（感官.json 已是播放时间）")
     s2.add_argument("--dur", type=float, default=0.0, help="秒；0 = 整段")
     s2.add_argument("--palette", default="cold", choices=list(PALETTES))
-    s2.add_argument("--name", default="18_透镜重影_全息女性_v2", help="不覆盖：已存在会自动加 _v2、_v3 …")
+    s2.add_argument("--name", default="18_透镜重影_全息女性_v3", help="不覆盖：已存在会自动加 _v2、_v3 …")
     s2.add_argument("--seed", type=int, default=3)
     s2.add_argument("--drift", type=float, default=4.0, help="玻璃横向滑动 px/s")
     s2.add_argument("--burst-gain", type=float, default=0.8)
     s2.add_argument("--burst-tau", type=float, default=0.25)
     s2.add_argument("--burst-thr", type=float, default=0.5, help="v1 = 0.3（9 个起音全触发，太密）")
+    s2.add_argument("--burst-every", type=int, default=2, help="≥ burst-thr 的起音里每几个触发一个（v2 视频 = 1 → 8/9 触发）")
+    s2.add_argument("--burst-always", type=float, default=0.6, help="威胁 ≥ 这个的起音一定触发")
+    s2.add_argument("--model", default="v4", choices=["v4", "v3"])
     s2.add_argument("--exposure", type=float, default=1.0, help="进透镜前的曝光（暗的源拉高）")
     s2.add_argument("--gamma", type=float, default=1.7)
     s2.add_argument("--hud", action="store_true", help="画面上写参数")

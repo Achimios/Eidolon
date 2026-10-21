@@ -172,6 +172,98 @@ class TestMicroLens(unittest.TestCase):
         np.testing.assert_allclose(out[35:45], img[35:45], atol=1e-6)
 
 
+class TestV4(unittest.TestCase):
+    def test_vertical_ghost_is_purely_vertical(self):
+        """⭐v4 大重影 dx ≡ 0：竖直的明暗边逐像素不变（任意 S、d、色散）；w_s = 0、d = 0 → 恒等"""
+        H, W = 80, 120
+        img = np.zeros((H, W, 3), np.float32)
+        img[:, 60:] = 1
+        S, d = L.vertical_fields(W, 30, 10, 200, seed=2)
+        out = L.vertical_ghost(img, S, d, K=7, w_s=0.6, dk=0.15, n_lambda=5)
+        np.testing.assert_allclose(out[35:45], img[35:45], atol=1e-6)
+        rnd = rand_img(H, W, 4)
+        np.testing.assert_allclose(L.vertical_ghost(rnd, 0 * S, 0 * d, w_s=0, dk=0.1), rnd, atol=1e-6)
+
+    def test_spread_equals_mean_of_shifted_copies(self):
+        """⭐必须相等：拉开分量 = K 个整数竖移副本的平均（S 取整数、K 使抽头落在整数上 → 逐像素相等）"""
+        H, W = 60, 30
+        img = rand_img(H, W, 6)
+        S = np.full((1, W), 6.0)
+        d = np.zeros((1, W))
+        out = L.vertical_ghost(img, S, d, K=7, w_s=1.0, dk=0)
+        ref = np.zeros_like(img)
+        for k in range(-3, 4):
+            sh = np.zeros_like(img)
+            if k >= 0:
+                sh[:H - 2 * k] = img[2 * k:]
+            else:
+                sh[-2 * k:] = img[:H + 2 * k]
+            ref += sh / 7
+        np.testing.assert_allclose(out[8:-8], ref[8:-8], atol=1e-5)
+
+    def test_fields_low_frequency_in_x(self):
+        """S(x)、d(x) 只随 x 低频变化：一阶差分 ≤ 幅度 × 2π/corr × 4（4σ 余量）→ 横线不会弯成波浪"""
+        W, corr = 1280, 500.0
+        S, d = L.vertical_fields(W, 240, 40, corr, seed=3)
+        self.assertLessEqual(np.abs(np.diff(S)).max(), 120 * 2 * np.pi / corr * 4)
+        self.assertLessEqual(np.abs(np.diff(d)).max(), 40 * 2 * np.pi / corr * 4)
+
+    def test_dispersion_on_y_orders_channels(self):
+        """色散作用在竖向位移上：一条横向亮线竖移 30 px，R/G/B 的质心位移 = k_c·30，R < G < B（横边上出彩色色块）"""
+        H, W = 120, 20
+        img = np.zeros((H, W, 3), np.float32)
+        img[80] = 1
+        S, d = np.zeros((1, W)), np.full((1, W), 30.0)
+        z = np.zeros((1, W))
+        out = L.disperse_sample(img, z, d, 0.2, 5)
+        ys = np.arange(H)[:, None]
+        sh = [80 - (out[..., c] * ys).sum() / out[..., c].sum() for c in range(3)]
+        kc = L.channel_scale(0.2, 5)
+        for c in range(3):
+            self.assertAlmostEqual(sh[c], 30 * kc[c], delta=0.05)
+        self.assertLess(sh[0], sh[1]); self.assertLess(sh[1], sh[2])
+
+    def test_soft_shoulder(self):
+        """软肩：拐点以下恒等；单调；永远 < 1；拐点处一阶导连续（= 1）"""
+        x = np.linspace(0, 3, 3001, dtype=np.float32)
+        y = L.soft_shoulder(x, 0.75)
+        np.testing.assert_array_equal(y[x < 0.75], x[x < 0.75])
+        self.assertTrue(np.all(np.diff(y) >= 0))
+        self.assertLessEqual(y.max(), 1.0)
+        self.assertLess(y[x <= 1.5].max(), 1.0)
+        i = np.searchsorted(x, 0.75)
+        self.assertAlmostEqual(float((y[i + 1] - y[i]) / (x[i + 1] - x[i])), 1.0, places=2)
+
+    def test_film_layer_zero_is_identity_and_black_stays_black(self):
+        img = rand_img(50, 70, 8)
+        tex = np.random.default_rng(1).normal(size=(50, 70)).astype(np.float32)
+        np.testing.assert_allclose(L.film_layer(img, np.zeros_like(tex), 1.5, 0, 0), img, atol=1e-6)
+        blk = np.zeros_like(img)
+        self.assertEqual(float(np.abs(L.film_layer(blk, tex, 1.5, 0.35, 1.5)).max()), 0.0)   # 颗粒和闪点都乘亮度
+
+    def test_quilt_texture_unit_stats_and_seamless(self):
+        """补丁拼贴：均值 0、标准差 1；行 / 列相邻差的统计在补丁边界处和补丁内部一样（没有接缝）"""
+        rng = np.random.default_rng(0)
+        tex = L.gaussian_blur(rng.normal(size=(300, 300)).astype(np.float32), 1.0)
+        tex = (tex - tex.mean()) / tex.std()
+        cands = [(int(y), int(x)) for y, x in rng.integers(60, 240, size=(50, 2))]
+        t = L.tile_texture(tex, 200, 320, 0, 0, cands, patch=48, seed=1)
+        self.assertAlmostEqual(float(t.mean()), 0.0, places=5)
+        self.assertAlmostEqual(float(t.std()), 1.0, places=5)
+        dcol = np.abs(np.diff(t, axis=1)).mean(0)
+        at_seam = dcol[[c - 1 for c in range(24, 319, 24) if 0 < c - 1 < len(dcol)]].mean()
+        self.assertLess(at_seam, dcol.mean() * 1.3)
+
+    @unittest.skipUnless(L.REF.exists(), "参考图不在这台机器上")
+    def test_ref_texture_keeps_reference_period(self):
+        """⭐必须相等（低熵注入的检验）：纹理取自参考图，拼贴后 FFT 竖向周期仍 = 参考图本身的 9.2 px（±1 个 bin）"""
+        tex, cands = L.texture_candidates(1.0, 96)
+        t = L.tile_texture(tex, 414, 736, 0, 0, cands, 96, seed=3)
+        m = L.measure_period(t[..., None].repeat(3, -1) * 0.2 + 0.5)
+        ref = L.measure_period(L.load(L.REF)[550:1000, 380:700])
+        self.assertAlmostEqual(m["y"], ref["y"], delta=0.25)
+
+
 class TestTime(unittest.TestCase):
     def test_time_evolution_slow_and_bursts(self):
         x = np.linspace(0, 500, 200)
@@ -180,6 +272,10 @@ class TestTime(unittest.TestCase):
         t = np.arange(48) / 24
         th = np.zeros(100); th[12] = 0.9; th[30] = 0.1
         e, fired = L.bursts(t, [0.5, 1.25], th, thr=0.5, tau=0.25)
+        # 每隔一个：4 个强起音（威胁 0.55）→ 第 0、2 个触发；威胁 0.7 的一定触发
+        th2 = np.zeros(200); th2[[24, 48, 72, 96]] = 0.55; th2[120] = 0.7
+        _, f2 = L.bursts(np.arange(200) / 24, [1, 2, 3, 4, 5], th2, thr=0.5, every=2, always_thr=0.6)
+        self.assertEqual(f2, [1.0, 3.0, 5.0])
         self.assertEqual(fired, [0.5])
         self.assertAlmostEqual(e[12], 1.0)
         self.assertAlmostEqual(e[18], np.exp(-0.25 / 0.25))

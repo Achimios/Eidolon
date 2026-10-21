@@ -382,13 +382,14 @@ class Look:
         self.L_I = 2.2
         self.SMAP, self.L_f = 2048, 0.5 * 2048 / np.tan(np.radians(36))
         # 头顶长条柔光箱（方向空间里的一条带）：中心仰角 / 方位、半高 / 半宽
-        self.box_dir = np.array([0.05, 0.37, 0.93]); self.box_dir /= np.linalg.norm(self.box_dir)
+        self.box_dir = np.array([0.05, 0.37, 0.93]) if BOX_DIR is None else np.asarray(BOX_DIR, float)
+        self.box_dir = self.box_dir / np.linalg.norm(self.box_dir)
         # 拉丝 + 斑驳纹理（世界 xy，±230 一张）
         n = torch.rand(1, 1, 1024, 1024, generator=g, device=dev)
         k = torch.exp(-0.5 * (torch.arange(-24, 25, device=dev).float() / 9) ** 2); k /= k.sum()
         brushed = F.conv2d(F.pad(n, (24, 24, 0, 0), mode="circular"), k.view(1, 1, 1, -1))
         mott = sum(F.interpolate(torch.rand(1, 1, s, s, generator=g, device=dev), size=1024, mode="bicubic", align_corners=False) * w
-                   for s, w in ((24, 0.35), (96, 0.35), (384, 0.3)))
+                   for s, w in MOTT)
         self.tex = torch.cat([(brushed - brushed.mean()) / brushed.std(), (mott - mott.mean()) / mott.std()], 1)   # [1, 2, 512, 512]
         # 雾：3D fBm（64³）
         self.fog = sum(F.interpolate(torch.rand(1, 1, s, s, s, generator=g, device=dev), size=(64, 64, 64), mode="trilinear", align_corners=False) * w
@@ -516,8 +517,36 @@ EYE0 = np.array([0.0, -153.0, 265.0]); TGT0 = np.array([0.0, 3.0, 0.0])
 PUSH_TO = np.array([4.0, 6.0, 1.0])      # 推向梳齿区（略偏右上，红点那边）
 
 
-def camera(n, fps, t0, hits, travel=0.30, aim=0.5):
+TRAVEL = 0.30
+GRAIN, CRF = 0.012, 15
+REF, REF_LABEL = A2, "参考 A2_暗_v1a"
+BOX_DIR = None
+MOTT = ((24, 0.35), (96, 0.35), (384, 0.3))   # 斑驳纹理各倍频程权重（格数, 权重）
+HIT_BOOST = 0.0                          # 抽搐窗内能量大的频带显示增益（0 = v2 原样）
+
+
+def variant_closeup():
+    """>v<🎬运动参考-MEMS v3 特写：对 MEMS_首帧_特写裁切_v1.jpg（A2 裁切，梳齿排占满画面）。改模块常量，力学不变。
+    齿长 9.5（裁切图里齿长 ≈ 8.7 齿距投影）、近乎顶视（约 68°）、菱形长板 ≈ 66% 画宽；推进幅度减小（特写里推多了齿尖出画）；
+    颗粒减弱、CRF 20（≤ ~10 MB）；HIT_BOOST：按各带在抽搐窗内的平均驱动加一点显示增益（基频那组再甩大一点）"""
+    global LF, EYE0, TGT0, PUSH_TO, TRAVEL, GRAIN, CRF, REF, REF_LABEL, HIT_BOOST, OUT, BOX_DIR, MOTT
+    LF = 9.5
+    el = np.radians(68); D = 142.0
+    TGT0 = np.array([0.0, 0.5, 0.0])
+    EYE0 = TGT0 + D * np.array([0.0, -np.cos(el), np.sin(el)])
+    PUSH_TO = np.array([3.0, 3.0, 1.0])
+    TRAVEL = 0.16
+    GRAIN, CRF = 0.005, 20
+    REF = MV / "生成" / "给网页端_运动参考_v1" / "MEMS_首帧_特写裁切_v1.jpg"; REF_LABEL = "参考 特写裁切_v1"
+    HIT_BOOST = 0.3
+    MOTT = ((24, 0.1), (96, 0.25), (384, 0.65))      # 特写里大块斑驳像脏污 → 偏细颗粒
+    BOX_DIR = [0.0, np.cos(np.radians(77)), np.sin(np.radians(77))]   # 柔光箱比镜面方向高 ~9°（同 v2 的相对关系），平面不全白
+    OUT = MV / "生成" / "给网页端_运动参考_v3" / "MEMS_参考视频_特写_v3.mp4"
+
+
+def camera(n, fps, t0, hits, travel=None, aim=0.5):
     """push_remap.curve 的「进/缓」→ 相机沿 EYE0→PUSH_TO 直线推 travel 比例，注视点 TGT0→PUSH_TO 走 aim 比例。返回 (eye[n,3], tgt[n,3], v[n])"""
+    travel = TRAVEL if travel is None else travel
     _, v, pos = P.curve(n, fps, t0, [(h, 1.0) for h in hits], base=0.05, gain=0.7, ramp_frames=2.5, tau=0.45)
     p = pos / pos[-1]
     eye = EYE0[None] + (PUSH_TO - EYE0)[None] * (travel * p)[:, None]
@@ -594,7 +623,7 @@ def render_frame(look, static, state_fn, t_frame, eye_fn, nsub=4, shutter=0.5, h
     img = img * (1 - 0.45 * (xx ** 2 * 0.6 + yy ** 2 * 0.9).clamp(0, 1))[None]
     img = img.clamp(0, 1) ** (1 / 2.2)
     gen = torch.Generator(device=dev).manual_seed(1000 + seed)
-    img = img + 0.012 * torch.randn(1, H, W, generator=gen, device=dev)
+    img = img + GRAIN * torch.randn(1, H, W, generator=gen, device=dev)
     return (img.clamp(0, 1) * 255).byte().permute(1, 2, 0).cpu().numpy()
 
 
@@ -616,11 +645,15 @@ def prepare(hit=62.624, pre=1.0, dur=4.5, fps=FPS, fs=2400.0):
     m = (ts >= t0) & (ts <= t1)
     mt = (ts >= hit) & (ts <= hit + 1.04)                      # 抽搐模板窗
     xmax = np.abs(X[:, mt]).max(); wmax = np.abs(Wsp[:, :, m]).max(); ymax = np.abs(ysh_raw[m]).max()
+    # 抽搐组显示增益（xmax 已按未增益的算好 → 被增益的那几根可以超过 PEAK，软限幅兜住）
+    dm = D[:, (tt >= hit) & (tt <= hit + 1.04)].mean(1)
+    gain = 1 + HIT_BOOST * dm / dm.max()
+    X = X * gain[:, None]; Q = Q * gain[:, None]
     ft = t0 + np.arange(n) / fps
     in_clip = [h for h in hits if ft[0] <= h <= ft[-1]]
     eye, tgt, vel = camera(n, fps, t0, in_clip)
     return dict(ts=ts, X=X, Q=Q, Wsp=Wsp, ysh=ysh_raw, xmax=xmax, wmax=wmax, ymax=ymax, t0=t0, n=n, ft=ft,
-                hits=in_clip, eye=eye, tgt=tgt, vel=vel, hit=hit)
+                hits=in_clip, eye=eye, tgt=tgt, vel=vel, hit=hit, gain=gain)
 
 
 def make_fns(pl):
@@ -651,7 +684,7 @@ def contact(frames, pl, out, cols=4, rows=3):
     sheet = Image.new("RGB", (cols * tw, rows * (th + 22)), (12, 12, 14))
     d = ImageDraw.Draw(sheet)
     fz = ImageFont.truetype("C:/Windows/Fonts/msyh.ttc", 15)
-    tiles = [("参考 A2_暗_v1a", Image.open(A2))] + [(f"#{k:03d}  t={pl['ft'][k]:.3f}", Image.fromarray(frames[k])) for k in ks]
+    tiles = [(REF_LABEL, Image.open(REF))] + [(f"#{k:03d}  t={pl['ft'][k]:.3f}", Image.fromarray(frames[k])) for k in ks]
     for i, (lab, im) in enumerate(tiles):
         x, y = (i % cols) * tw, (i // cols) * (th + 22)
         sheet.paste(im.convert("RGB").resize((tw, th), Image.LANCZOS), (x, y + 22))
@@ -662,12 +695,15 @@ def contact(frames, pl, out, cols=4, rows=3):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hit", type=float, default=62.624)
-    ap.add_argument("--out", default=str(OUT))
+    ap.add_argument("--variant", choices=["wide", "closeup"], default="wide", help="wide = v2 全景（A2）；closeup = v3 特写（特写裁切图）")
+    ap.add_argument("--out", default="", help="默认按 variant 的 OUT")
     ap.add_argument("--work", required=True)
     ap.add_argument("--only", default="", help="只渲这些帧号 PNG 到 --work")
     ap.add_argument("--nsub", type=int, default=4)
     a = ap.parse_args()
-    out = Path(a.out)
+    if a.variant == "closeup":
+        variant_closeup()
+    out = Path(a.out) if a.out else OUT
     if out.exists() and not a.only:
         sys.exit(f"已存在，不覆盖：{out}")
     work = Path(a.work); work.mkdir(parents=True, exist_ok=True)
@@ -690,7 +726,7 @@ def main():
     import imageio_ffmpeg
     out.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                             "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "15",
+                             "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", str(CRF),
                              "-preset", "slow", "-movflags", "+faststart", "-an", str(out)], stdin=subprocess.PIPE)
     frames = []
     for k in range(pl["n"]):
@@ -701,7 +737,8 @@ def main():
     proc.stdin.close(); proc.wait()
     contact(frames, pl, out.with_name(out.stem + "_接触表.jpg"))
     j_of = lambda t: int(np.clip(np.searchsorted(pl["ts"], t), 0, len(pl["ts"]) - 1))  # noqa: E731
-    side = {"t0": pl["t0"], "fps": FPS, "n": pl["n"], "hit": a.hit, "hits_in_clip": pl["hits"],
+    side = {"variant": a.variant, "t0": pl["t0"], "fps": FPS, "n": pl["n"], "hit": a.hit, "hits_in_clip": pl["hits"],
+            "hit_boost_gain": [round(float(g), 3) for g in pl["gain"]],
             "bands_Hz": [round(float(f), 1) for f in f_band], "band_layout": "第 k 带 → 排 k%2（0=上, 1=下），齿号 k//2（左→右）",
             "visible_Hz": [round(float(f), 2) for f in FV],
             "说明": f"无 HUD。齿：显示挠度 = sign·(|x|/max)^{GAMMA}·{PEAK_X} 齿距（横向）、{PEAK_Z}（离面）；梭子峰值 {SHUTTLE_VMAX} 齿距；脊起伏峰值 {SPINE_ZMAX}。第 k 帧 = 歌曲时间 t0 + k/fps（播放时间）",
