@@ -13,6 +13,9 @@ HUD 的 b0 b1 b2 是在粗体素网格上真数的 Betti 数（连通块 / 洞 /
   python tools/four_d.py --obj tesseract --op project --frames 96 --out out.mp4   # 多胞体棱的 4D→3D→2D 透视投影
   python tools/four_d.py --obj tiger --insert 1.6 --v0 240 --v-end 18 --tau 0.3 --tilt "yw=22,xy=10" --out x.mp4 --contact x.jpg
       # 插入镜头（1280x720）：帧数 = ceil(槽长×fps)，θ 与 c 先快后缓 v(t) = v_end + (v0−v_end)e^{−t/τ}，物体 4D 倾斜，相机匀速漂移；--plan 只打印参数
+  python tools/four_d.py --obj mesh_spin --insert 3.16 --look sculpt --fov 24 --target 0,0.22,0.05 --yaw0 1.32 --yaw-rate 0.157 \
+      --key=-80,48 --red-point --cold 0.5 --v0 70 --v-end 8 --tau 1.1 --song-t0 57.94 --plot x.png ...
+      # GoldenAge 版（👤2026-10-22）：侧面特写、长焦、相机绕 target 匀速转，一盏硬主光 + 软阴影 + AO，只留一个红点；--plot 运动速度图
   python tools/four_d.py --sheet [--out x.jpg]   # 总览接触表（6 行物体 × 6 列切片 / 角度）
   python tools/four_d.py --list
 --out 以 .mp4 结尾 → 视频（1920x1080, 24 fps）；否则当目录，写 PNG 帧。
@@ -499,12 +502,20 @@ def slice_fn(obj, R, c):
 
 
 # ---------- 球追踪 ----------
-def camera(w, h, yaw=0.6, pitch=0.42, dist=5.2, fov=34.0):
-    """>v<🧊四维切片-相机-透视相机绕原点；返回每个像素的 (ro, rd)"""
-    eye = torch.tensor([dist * math.cos(pitch) * math.sin(yaw), dist * math.sin(pitch), dist * math.cos(pitch) * math.cos(yaw)], device=DEV)
-    fwd = -eye / eye.norm()
+def cam_basis(yaw=0.6, pitch=0.42, dist=5.2, target=(0.0, 0.0, 0.0)):
+    """相机在以 target 为心的球面上：eye = target + dist·(cos p sin y, sin p, cos p cos y)；返回 (eye, fwd, right, up)"""
+    tg = torch.tensor(target, dtype=torch.float32, device=DEV)
+    off = torch.tensor([math.cos(pitch) * math.sin(yaw), math.sin(pitch), math.cos(pitch) * math.cos(yaw)], device=DEV)
+    eye = tg + dist * off
+    fwd = -off
     right = torch.linalg.cross(fwd, torch.tensor([0.0, 1.0, 0.0], device=DEV)); right = right / right.norm()
     up = torch.linalg.cross(right, fwd)
+    return eye, fwd, right, up
+
+
+def camera(w, h, yaw=0.6, pitch=0.42, dist=5.2, fov=34.0, target=(0.0, 0.0, 0.0)):
+    """>v<🧊四维切片-相机-透视相机绕 target（默认原点）；返回每个像素的 (ro, rd)"""
+    eye, fwd, right, up = cam_basis(yaw, pitch, dist, target)
     ys, xs = torch.meshgrid(torch.arange(h, device=DEV), torch.arange(w, device=DEV), indexing="ij")
     s = math.tan(math.radians(fov) / 2)
     u = (xs + 0.5 - w / 2) / (h / 2) * s
@@ -558,12 +569,49 @@ def _fwidth(u, ok):
     return out.clamp(min=1e-5)
 
 
-def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55):
+def key_dir(yaw, pitch, az, el):
+    """>v<🧊四维切片-雕塑光-主光方向（指向光源，世界坐标，固定不随相机转）：在 yaw / pitch 那台相机的水平基里定，
+    az = 0 从相机这边打、+90 从画面右侧、±180 从背后；el = 仰角（度）。相机绕物体转时光不动 → 明暗交界线在形体上滑"""
+    _, fwd, right, _ = cam_basis(yaw, pitch, 1.0)
+    fh = torch.stack([fwd[0], torch.zeros_like(fwd[1]), fwd[2]]); fh = fh / fh.norm()
+    a, e = math.radians(az), math.radians(el)
+    d = math.cos(e) * (math.cos(a) * -fh + math.sin(a) * right) + math.sin(e) * torch.tensor([0.0, 1.0, 0.0], device=DEV)
+    return d / d.norm()
+
+
+def soft_shadow(g, p, L, k=14.0, iters=56, tmax=3.2):
+    """iq 式软阴影：沿光线球追踪，res = min(k·h / t)；k 大 → 影子边硬（主光是硬光）"""
+    res = torch.ones(p.shape[0], device=DEV)
+    t = torch.full_like(res, 0.012)
+    idx = torch.arange(p.shape[0], device=DEV)
+    for _ in range(iters):
+        if idx.numel() == 0:
+            break
+        hh = g(p[idx] + L[None] * t[idx, None])
+        res[idx] = torch.minimum(res[idx], (k * hh / t[idx]).clamp(min=0))
+        t[idx] += hh.clamp(0.008, 0.18)
+        idx = idx[(hh > 2e-4) & (t[idx] < tmax)]      # 撞上（hh → 0 时 res 已 ≈ 0）或走出包围球就停
+    return res.clamp(0, 1)
+
+
+def sdf_ao(g, p, n, steps=5):
+    """距离场环境光遮蔽：沿法向走 h_i，Σ (h_i − g)·衰减 → 凹处变暗（深黑里的体积感）"""
+    occ, wgt = torch.zeros(p.shape[0], device=DEV), 1.0
+    for i in range(steps):
+        hs = 0.02 + 0.07 * i
+        occ = occ + (hs - g(p + n * hs)) * wgt
+        wgt *= 0.72
+    return (1 - 2.2 * occ).clamp(0, 1)
+
+
+def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55,
+           fov=34.0, target=(0.0, 0.0, 0.0), key=None):
     dist = dist or obj.cam
-    """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）"""
+    """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）
+    | sculpt（一盏硬主光 key 斜扫 + 软阴影 + AO + 镜面高光，几乎无补光 → 深黑；平切面照样自发光）"""
     hw, hh = w * ss, h * ss
     g = slice_fn(obj, R, c)
-    eye, rd = camera(hw, hh, yaw, pitch, dist)
+    eye, rd = camera(hw, hh, yaw, pitch, dist, fov, target)
     hit, t = trace(g, eye, rd, obj.bound, obj.step)
     P = eye[None] + rd * t[:, None]
     hi = torch.nonzero(hit).squeeze(1)
@@ -597,8 +645,19 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
         for sh in (1, -1):
             n_ok, n_t = torch.roll(ok, sh, dim), torch.roll(T, sh, dim)
             edge = torch.maximum(edge, ((ok & ~n_ok) | (ok & n_ok & ((T - n_t) < -0.06 * T))).float())
-    if look == "surface":
+    if look == "sculpt":
+        Lk = key if key is not None else key_dir(yaw, pitch, -95.0, 38.0)
+        lk = (nrm @ Lk).clamp(min=0)
+        sh = soft_shadow(g, ph + nrm * 2.5e-3, Lk)
+        ao = sdf_ao(g, ph, nrm)
+        hv = Lk[None] + vdir; hv = hv / (hv.norm(dim=1, keepdim=True) + 1e-9)
+        spec = (nrm * hv).sum(1).clamp(min=0) ** 48
+        lit = sh * (1.06 * lk ** 1.15 + 0.6 * spec)
+        lam = lk * sh                                            # 切面亮度跟主光走（下面 face 用）
+        v = img(0.012 + 0.035 * ao + lit * (0.55 + 0.45 * ao) + 0.10 * rim ** 2 * ao)
+    elif look == "surface":
         v = img(0.05 + 0.62 * lam + 0.55 * rim ** 1.5)
+    if look in ("surface", "sculpt"):
         if obj.cap is not None and cut_glow > 0:
             # 平切面（|w| − h 截出来的，正对相机时 Lambert + rim 都 ≈ 0 → 一块死黑）：自发光底 + 剖面线（y 等距）+ 亮边框
             cw = img((obj.cap(q @ R) / 0.01).clamp(0, 1))
@@ -624,17 +683,17 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
             lines = (1 - dn / (fw * 0.85)).clamp(0, 1)
         shade = img(0.3 + 0.7 * lam + 0.3 * rim)
         v = lines * ok * shade * 1.05 + edge * 0.95 + img(0.035 + 0.05 * lam)
-    v = v * ok + edge * 0 if look == "surface" else v
+    v = v * ok if look in ("surface", "sculpt") else v
     red = img(((0.32 - tang) / 0.22).clamp(0, 1) ** 1.5) * red_gain * ok
     if xray and obj.facets is None:
-        red = torch.maximum(red, _xray_tangency(obj, R, c, eye, hw, hh) * 0.75 * red_gain)
+        red = torch.maximum(red, _xray_tangency(obj, R, c, cam_basis(yaw, pitch, dist, target), hw, hh, fov=fov) * 0.75 * red_gain)
     # 超采样 → 降到输出分辨率
     v = F.avg_pool2d(v[None, None], ss)[0, 0]
     red = F.avg_pool2d(red[None, None], ss)[0, 0]
     return v.clamp(0, 1), red.clamp(0, 1)
 
 
-def _xray_tangency(obj, R, c, eye, hw, hh, n=72, thr=0.32):
+def _xray_tangency(obj, R, c, basis, hw, hh, n=72, thr=0.32, fov=34.0):
     """被挡住的相切点也要看得见：在 n³ 网格上找截面表面附近 |n_xyz|/|n| < thr 的点，透视投影后泼成柔光（R 已含 R0）"""
     B = obj.vbox
     ax = torch.linspace(-B, B, n, device=DEV)
@@ -654,12 +713,10 @@ def _xray_tangency(obj, R, c, eye, hw, hh, n=72, thr=0.32):
     if not k.any():
         return out
     wgt = ((thr - r[k]) / (thr - 0.1)).clamp(0, 1) ** 1.5
-    fwd = -eye / eye.norm()
-    right = torch.linalg.cross(fwd, torch.tensor([0.0, 1.0, 0.0], device=DEV)); right = right / right.norm()
-    up = torch.linalg.cross(right, fwd)
+    eye, fwd, right, up = basis           # 和 camera() 同一台相机（target / fov 都要一致，否则红点投错位置）
     rel = pts[k, :3] - eye
     z = rel @ fwd
-    s = math.tan(math.radians(34) / 2)
+    s = math.tan(math.radians(fov) / 2)
     px = ((rel @ right) / z / s * (hh / 2) + hw / 2).long()
     py = (-(rel @ up) / z / s * (hh / 2) + hh / 2).long()
     m = (px >= 0) & (px < hw) & (py >= 0) & (py < hh)
@@ -672,9 +729,13 @@ def _xray_tangency(obj, R, c, eye, hw, hh, n=72, thr=0.32):
     return (x / (x.max() + 1e-9)).clamp(0, 1) if x.max() > 0 else x
 
 
-def compose(v, red, glow_r=5, glow_k=0.45):
-    """灰 + 红 → RGB（torch 上做辉光）"""
-    img = v[..., None] * GREY_T * (1 - red[..., None]) + torch.maximum(v, red * 0.85)[..., None] * RED_T * red[..., None]
+_COLD = torch.tensor([-0.10, -0.02, 0.08], device=DEV)
+
+
+def compose(v, red, glow_r=5, glow_k=0.45, cold=0.0):
+    """灰 + 红 → RGB（torch 上做辉光）。cold > 0：暗部 / 中间调再往冷里偏一点（亮部仍是本片的冷灰 GREY）"""
+    col = GREY_T * (1 + cold * (1 - v[..., None]) * _COLD) if cold else GREY_T
+    img = v[..., None] * col * (1 - red[..., None]) + torch.maximum(v, red * 0.85)[..., None] * RED_T * red[..., None]
     x = img.permute(2, 0, 1)[None]
     k = 2 * glow_r + 1
     bl = F.avg_pool2d(F.avg_pool2d(x, k, 1, glow_r, count_include_pad=False), k, 1, glow_r, count_include_pad=False)
@@ -882,10 +943,13 @@ def parse_tilt(spec):
 
 
 class InsertSpec:
-    """插入镜头的全部参数（角度：度，角速度：度/秒；c 速度：单位/秒；相机 yaw 速度：弧度/秒，dolly：距离比例/秒）"""
+    """插入镜头的全部参数（角度：度，角速度：度/秒；c 速度：单位/秒；相机 yaw 速度：弧度/秒，dolly：距离比例/秒）。
+    相机：绕 target 转（默认原点），视角 fov（度）。key_az / key_el：sculpt 主光（度，相对起始相机，固定在世界里）。
+    red_point：全片只留一个红点（最强的相切处，跨帧跟踪）。cold：暗部冷偏"""
     def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
                  tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
-                 red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0, cut_glow=0.55):
+                 red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0, cut_glow=0.55,
+                 fov=34.0, target=(0.0, 0.0, 0.0), key_az=-95.0, key_el=38.0, red_point=False, cold=0.0):
         self.dur, self.fps, self.size = dur, fps, size
         self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
         self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
@@ -894,6 +958,8 @@ class InsertSpec:
         self.yaw0, self.yaw_rate, self.pitch, self.dolly = yaw0, yaw_rate, pitch, dolly
         self.red_gain, self.look, self.cam_scale = red_gain, look, cam_scale
         self.cut_glow = cut_glow
+        self.fov, self.target = fov, tuple(float(x) for x in target)
+        self.key_az, self.key_el, self.red_point, self.cold = key_az, key_el, red_point, cold
         self.hud_band, self.hud_scale = hud_band, hud_scale      # hud_band > 0：物体只渲染在上面 H − band 像素里，HUD 独占底部条带（不重叠）
         if not 0 <= hud_band < size[1] // 2:
             raise ValueError("hud_band 必须在 [0, H/2)")
@@ -901,6 +967,10 @@ class InsertSpec:
             raise ValueError("先快后缓要求 v0 > v_end > 0（v_end = 0 会停住）")
         if yaw_rate == 0:
             raise ValueError("相机不能静止：yaw_rate ≠ 0")
+        if not 5.0 <= fov <= 90.0:
+            raise ValueError("fov 在 [5, 90] 度")
+        if dolly * dur >= 0.5:
+            raise ValueError("dolly × 槽长 ≥ 0.5：相机会推进物体里")
 
 
 def insert_track(obj, sp):
@@ -929,64 +999,204 @@ def insert_R(obj, sp, th_deg):
     return rot4(**ang) @ rot4(**sp.tilt_r)
 
 
-def _insert_frame(obj, name, sp, k, prev_b, tag):
-    """一帧：渲染 + Betti + HUD。hud_band > 0 时物体画在上方 (H − band) 区域，HUD 在底部条带里 → 永不重叠"""
+class RedPoint:
+    """>v<🧊四维切片-红点-全片只留一个红点：红权重图（相切处 + X 光）模糊后取峰；有上一帧位置时按距离加权（偏向原地，不乱跳），
+    位置一阶平滑，亮度 = 峰值强度的指数平滑（没有相切处就慢慢熄掉）。返回只含这一个高斯点的红图"""
+    def __init__(self, h, w, sigma=None, keep=None, on=0.03):
+        self.h, self.w = h, w
+        self.sigma = sigma or max(1.6, h / 220)
+        self.keep = keep or h / 8
+        self.on = on                      # 模糊后的峰值 ≥ on 就算「有相切处」（满亮）
+        self.pos, self.a, self.peak = None, 0.0, 0.0
+        ys, xs = torch.meshgrid(torch.arange(h, device=DEV, dtype=torch.float32), torch.arange(w, device=DEV, dtype=torch.float32), indexing="ij")
+        self.ys, self.xs = ys, xs
+
+    def __call__(self, red):
+        r = max(2, self.h // 90)
+        x = red[None, None]
+        for _ in range(2):
+            x = F.avg_pool2d(x, 2 * r + 1, 1, r, count_include_pad=False)
+        b = x[0, 0]
+        score = b
+        if self.pos is not None and self.a > 0.05:
+            d2 = (self.xs - self.pos[0]) ** 2 + (self.ys - self.pos[1]) ** 2
+            score = b * (0.3 + 0.7 * torch.exp(-d2 / (2 * self.keep ** 2)))
+        j = int(torch.argmax(score))
+        py, px = divmod(j, self.w)
+        self.peak = float(b[py, px])
+        tgt = min(1.0, self.peak / self.on)
+        if self.pos is None or self.a <= 0.05 or math.hypot(px - self.pos[0], py - self.pos[1]) > 3 * self.keep:
+            self.pos = (float(px), float(py))                 # 第一次 / 熄灭后 / 真跳走：直接落位
+        else:
+            self.pos = (self.pos[0] + 0.55 * (px - self.pos[0]), self.pos[1] + 0.55 * (py - self.pos[1]))
+        self.a = tgt if self.a == 0 else 0.65 * self.a + 0.35 * tgt
+        d2 = (self.xs - self.pos[0]) ** 2 + (self.ys - self.pos[1]) ** 2
+        return (torch.exp(-d2 / (2 * self.sigma ** 2)) * 1.4 * self.a).clamp(0, 1)
+
+
+def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
+    """一帧：渲染 + Betti + HUD。hud_band > 0 时物体画在上方 (H − band) 区域，HUD 在底部条带里 → 永不重叠。rp = RedPoint（跨帧状态）"""
     Wd, Hd = sp.size
     plane = sp.plane or obj.plane
     rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
     tilt_s = " ".join(f"{a}={math.degrees(v):+.0f}" for a, v in sp.tilt_r.items()) or "none"
     R = insert_R(obj, sp, k["th"])
+    key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el) if sp.look == "sculpt" else None
     v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"],
-                    cut_glow=sp.cut_glow)
+                    cut_glow=sp.cut_glow, fov=sp.fov, target=sp.target, key=key)
+    if sp.red_point:
+        rp = rp or RedPoint(*red.shape)
+        red = rp(red)
     b = betti(obj, R, k["c"], n=64)
-    rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45)
+    rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45, cold=sp.cold)
     if sp.hud_band:
         rgb = torch.cat([rgb, torch.zeros(sp.hud_band, Wd, 3, device=rgb.device)], 0)
     changed = prev_b is not None and b != prev_b
+    cam_s = (f"cam: orbit {math.degrees(sp.yaw_rate):+.1f} deg/s about ({sp.target[0]:+.2f},{sp.target[1]:+.2f},{sp.target[2]:+.2f})"
+             f"  yaw {math.degrees(k['yaw']):6.1f}  pitch {math.degrees(sp.pitch):+.1f}  fov {sp.fov:g}  d {k['dist']:.2f}")
+    if sp.look == "sculpt":
+        cam_s += f"   key light az {sp.key_az:+.0f} el {sp.key_el:+.0f} (fixed in world)"
     lines = [f"{name} ({obj.op}): {obj.eq}",
              f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
              f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
+             cam_s,
              _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
-             "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)"]
+             ("red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32), tracked" if sp.red_point
+              else "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)")]
     im = to_pil(rgb)
-    hud(im, lines, tag, red_line=3 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
-    return im, rgb, b
+    hud(im, lines, tag, red_line=4 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
+    return im, rgb, b, rp
 
 
-def insert(name, sp, out, tag=None, contact=None):
-    """>v<🧊四维切片-插入-渲染一条插入镜头（帧数 = ceil(槽长 × fps)），HUD 写每帧真参数；contact 给了就写接触表（全部帧 + 帧间差分）"""
+def normal_flow(a, b):
+    """图像运动速度估计（像素 / 帧）：亮度守恒 I_t + ∇I·u = 0 ⇒ |u_⊥| ≈ |I_t| / |∇I|；用 Σ|I_t| / Σ|∇I| 的比值（只在有梯度的地方算数）"""
+    It = (b - a).abs()
+    m = 0.5 * (a + b)
+    gx = (m[:, 2:] - m[:, :-2])[1:-1] * 0.5
+    gy = (m[2:] - m[:-2])[:, 1:-1] * 0.5
+    gm = torch.sqrt(gx * gx + gy * gy)
+    It = It[1:-1, 1:-1]
+    wgt = gm > 0.01
+    return float(It[wgt].sum() / (gm[wgt].sum() + 1e-9)) if wgt.any() else 0.0
+
+
+def insert(name, sp, out, tag=None, contact=None, plot=None, song_t0=None):
+    """>v<🧊四维切片-插入-渲染一条插入镜头（帧数 = ceil(槽长 × fps)），HUD 写每帧真参数；contact 给了就写接触表（全部帧 + 帧间差分）；
+    plot 给了就写运动速度图（θ 角速度、相机角速度、实测帧间差分 / 法向光流，song_t0 给了就标歌里的重拍）"""
     obj = OBJS[name]
     Wd, Hd = sp.size
     track = insert_track(obj, sp)
     tag = tag or f"4D_INSERT / {name.upper()}"
     sink = Sink(out, sp.fps, sp.size)
-    thumbs, diffs, prev_arr, prev_b = [], [], None, None
+    thumbs, diffs, flows, prev_arr, prev_b, rp = [], [], [], None, None, None
     t0 = time.time()
     for k in track:
-        im, rgb, b = _insert_frame(obj, name, sp, k, prev_b, tag)
-        arr = rgb.mean(-1)
+        im, rgb, b, rp = _insert_frame(obj, name, sp, k, prev_b, tag, rp)
+        arr = rgb[: Hd - sp.hud_band].mean(-1)             # 只量画面区（HUD 条带里的数字每帧都变，不算运动）
         diffs.append(float((arr - prev_arr).abs().mean()) if prev_arr is not None else float("nan"))
+        flows.append(normal_flow(prev_arr, arr) if prev_arr is not None else float("nan"))
         prev_arr = arr
         sink.add(im)
         prev_b = b
         if contact:
             thumbs.append(im.resize((Wd // 4, Hd // 4), Image.LANCZOS))
+        if k["i"] % 12 == 0:
+            print(f"  frame {k['i']}/{len(track)}  {time.time() - t0:.1f}s", flush=True)
     sink.close()
     print(f"{out}: {sink.i} frames = {sink.i / sp.fps:.4f} s (slot {sp.dur:g} s), {time.time() - t0:.1f}s")
     print("  frame-diff (mean |dI|):", " ".join(f"{d:.4f}" for d in diffs[1:]))
+    print("  normal flow (px/frame):", " ".join(f"{d:.2f}" for d in flows[1:]))
     if contact:
         _insert_contact(contact, thumbs, track, diffs, sp, name, tag)
+    if plot:
+        motion_plot(plot, track, diffs, flows, sp, name, tag, song_t0)
     return track, diffs
 
 
 def insert_still(name, sp, idx, out, tag=None):
-    """插入镜头里的单独一帧存成图（比较 look 用：同一参数、同一帧，只换 --look）"""
+    """插入镜头里的单独一帧存成图（比较 look 用：同一参数、同一帧，只换 --look）。红点模式下跟踪状态从这一帧开始（无历史）"""
     obj = OBJS[name]
     k = insert_track(obj, sp)[idx]
-    im, _, _ = _insert_frame(obj, name, sp, k, None, tag or f"4D_INSERT / {name.upper()}")
+    im, _, _, _ = _insert_frame(obj, name, sp, k, None, tag or f"4D_INSERT / {name.upper()}")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     im.save(out, quality=92)
     print(f"{out}: frame #{idx} (t = {k['t']:.3f} s, theta = {k['th']:+.1f}, c = {k['c']:+.3f}, look = {sp.look})")
+
+
+def song_downbeats(t0, t1):
+    """感官.json（= 播放时间）里 [t0, t1] 内的重拍 / 乐句；没有文件就空"""
+    p = MV / "感官.json"
+    if not p.exists():
+        return [], []
+    import json
+    ev = json.loads(p.read_text(encoding="utf-8")).get("events", {})
+    pick = lambda xs: [x for x in xs if t0 - 1e-6 <= x <= t1 + 1e-6]  # noqa: E731
+    return pick(ev.get("downbeats", [])), pick(ev.get("phrases", []))
+
+
+def motion_plot(path, track, diffs, flows, sp, name, tag, song_t0=None):
+    """>v<🧊四维切片-插入-运动速度图（PIL 画，不依赖 matplotlib）：上 = 理论角速度（θ 的 v(t)、相机绕转，度/秒），
+    下 = 实测（法向光流 像素/帧，帧间差分 归一化）。横轴 = 镜头内秒数（song_t0 给了同时标歌里的时间 + 重拍竖线）"""
+    PW, PH = 1600, 760
+    im = Image.new("RGB", (PW, PH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 15); fs = ImageFont.truetype(FONT, 13)
+    x0, x1 = 90, PW - 40
+    n = len(track)
+    T = (n - 1) / sp.fps
+    tx = lambda t: x0 + (x1 - x0) * t / max(T, 1e-9)  # noqa: E731
+    grey, dim, red, cam_c = (150, 160, 168), (60, 64, 68), (235, 60, 66), (200, 208, 214)
+    panels = [(60, 360), (420, 700)]
+    db, ph_ = song_downbeats(song_t0, song_t0 + T) if song_t0 is not None else ([], [])
+    for (ya, yb) in panels:
+        d.rectangle([x0, ya, x1, yb], outline=dim)
+        for tb in db:
+            xb = tx(tb - song_t0)
+            d.line([(xb, ya), (xb, yb)], fill=(90, 40, 44) if tb in ph_ else (55, 58, 62), width=2 if tb in ph_ else 1)
+    for tb in db:
+        d.text((tx(tb - song_t0) + 4, panels[1][1] + 26), f"{tb:.2f}" + (" phrase" if tb in ph_ else " downbeat"), font=fs, fill=grey)
+    # 横轴刻度
+    for j in range(int(T / 0.5) + 1):
+        t = j * 0.5
+        d.line([(tx(t), panels[1][1]), (tx(t), panels[1][1] + 6)], fill=grey)
+        d.text((tx(t) - 12, panels[1][1] + 8), f"{t:.1f}s", font=fs, fill=grey)
+    # 上：理论角速度
+    ya, yb = panels[0]
+    cam_v = abs(math.degrees(sp.yaw_rate))
+    vmax = max(max(k["v"] for k in track), cam_v) * 1.1
+    ty = lambda v: yb - (yb - ya) * v / vmax  # noqa: E731
+    for g in range(0, int(vmax) + 1, max(5, int(vmax / 6) // 5 * 5)):
+        d.line([(x0 - 6, ty(g)), (x0, ty(g))], fill=grey)
+        d.text((x0 - 50, ty(g) - 7), f"{g}", font=fs, fill=grey)
+    d.line([(tx(k["t"]), ty(k["v"])) for k in track], fill=grey, width=3)
+    d.line([(tx(0), ty(cam_v)), (tx(T), ty(cam_v))], fill=cam_c, width=1)
+    d.text((x0, ya - 44), f"{tag}   {name}   theoretical angular speed (deg/s)", font=f, fill=cam_c)
+    d.text((x0, ya - 24), f"thick grey: 4D slice rotation v(t) = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})"
+           f"   (theta {track[0]['th']:+.0f} -> {track[-1]['th']:+.0f} deg)      thin white: camera orbit {cam_v:.1f} deg/s (constant, never 0)",
+           font=fs, fill=grey)
+    # 下：实测
+    ya, yb = panels[1]
+    fl = [x for x in flows[1:]]
+    df = [x for x in diffs[1:]]
+    fmax = max(fl) * 1.1 if fl and max(fl) > 0 else 1.0
+    dmax = max(df) if df and max(df) > 0 else 1.0
+    ty = lambda v: yb - (yb - ya) * v / fmax  # noqa: E731
+    step = max(0.5, round(fmax / 5 * 2) / 2)
+    g = 0.0
+    while g <= fmax:
+        d.line([(x0 - 6, ty(g)), (x0, ty(g))], fill=grey)
+        d.text((x0 - 50, ty(g) - 7), f"{g:.1f}", font=fs, fill=grey)
+        g += step
+    d.line([(tx(k["t"]), ty(x)) for k, x in zip(track[1:], fl)], fill=red, width=3)
+    d.line([(tx(k["t"]), ty(x / dmax * max(fl))) for k, x in zip(track[1:], df)], fill=grey, width=1)
+    d.text((x0, ya - 24), f"measured: red = normal-flow speed |I_t| / |grad I| (px/frame, max {max(fl):.2f})"
+           f"   grey = mean |frame diff| (scaled, max {dmax * 1000:.1f}e-3)", font=fs, fill=grey)
+    if song_t0 is not None:
+        d.text((x0, PH - 22), f"song time: {song_t0:.2f} -> {song_t0 + n / sp.fps:.2f} s ({n} frames @ {sp.fps} fps)   vertical lines = downbeats"
+               " (senses json, playback time; dark red = phrase start)", font=fs, fill=grey)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    im.save(path)
+    print(f"  motion plot -> {path}")
 
 
 def _insert_contact(path, thumbs, track, diffs, sp, name, tag, cols=6):
@@ -1114,7 +1324,7 @@ def main():
     ap.add_argument("--op", default="slice", choices=["slice", "rotate", "project"])
     ap.add_argument("--frames", type=int, default=48)
     ap.add_argument("--out", default=None)
-    ap.add_argument("--look", default="line", choices=["line", "surface"])
+    ap.add_argument("--look", default="line", choices=["line", "surface", "sculpt"], help="sculpt = 一盏硬主光斜扫 + 软阴影 + AO，深黑（--insert 用）")
     ap.add_argument("--theta", type=float, default=180.0, help="rotate/project：转多少度")
     ap.add_argument("--c0", type=float, default=None); ap.add_argument("--c1", type=float, default=None)
     ap.add_argument("--tag", default=None)
@@ -1155,6 +1365,13 @@ def main():
     g.add_argument("--hud-scale", type=float, default=1.0, help="HUD 字号倍数")
     g.add_argument("--cut-glow", type=float, default=0.55, help="surface 模式下 |w| − h 平切面的自发光强度（extrude / twist；0 = 旧的死黑）")
     g.add_argument("--still", type=int, default=None, help="只渲染第 N 帧存成图（--out 给 .jpg/.png），比较 --look 用")
+    g.add_argument("--fov", type=float, default=34.0, help="竖直视角（度）；小 = 长焦，透视压平、更像雕塑特写")
+    g.add_argument("--target", default="0,0,0", help="相机绕转 / 对准的点 'x,y,z'（模型坐标，x = 侧向、y = 上、z = 正面）")
+    g.add_argument("--key", default="-95,38", help="sculpt 主光 'az,el'（度；负数要写成 --key=-95,38）：az 相对起始相机，0 = 从相机打，±90 = 侧光，±180 = 逆光")
+    g.add_argument("--red-point", action="store_true", help="全片只留一个红点（最强的相切处，跨帧跟踪）")
+    g.add_argument("--cold", type=float, default=0.0, help="暗部冷偏强度（0 = 关；0.5 ≈ 很淡）")
+    g.add_argument("--plot", default=None, help="运动速度图 png 路径（理论角速度 + 实测法向光流 / 帧间差分）")
+    g.add_argument("--song-t0", type=float, default=None, help="这个镜头在歌里的起点（秒，播放时间）：速度图上标重拍")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
         MESH.path, MESH.n, MESH.max_faces, MESH.lateral, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, a.sdf_faces, a.mesh_lateral, None
@@ -1186,7 +1403,8 @@ def main():
     if a.insert is not None:
         w, h = (int(x) for x in a.size.lower().split("x"))
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
-                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale, a.cut_glow)
+                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale, a.cut_glow,
+                        a.fov, tuple(float(x) for x in a.target.split(",")), *(float(x) for x in a.key.split(",")), a.red_point, a.cold)
         if a.plan:
             obj = OBJS[a.obj]
             for k in insert_track(obj, sp):
@@ -1194,12 +1412,12 @@ def main():
                       + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
             return
         out = Path(a.out or f"{a.obj}_insert.mp4")
-        if out.exists() or (a.contact and Path(a.contact).exists()):
-            sys.exit(f"已存在，不覆盖：{out} / {a.contact}（换版本号）")
+        if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):
+            sys.exit(f"已存在，不覆盖：{out} / {a.contact} / {a.plot}（换版本号）")
         if a.still is not None:
             insert_still(a.obj, sp, a.still, str(out), a.tag)
             return
-        insert(a.obj, sp, str(out), a.tag, a.contact)
+        insert(a.obj, sp, str(out), a.tag, a.contact, a.plot, a.song_t0)
         return
     animate(a.obj, a.op, a.frames, a.out or f"{a.obj}_{a.op}.mp4", a.look, a.theta, a.c0, a.c1, a.tag)
 

@@ -164,5 +164,86 @@ class TestLateralAndCut(unittest.TestCase):
         self.assertTrue(torch.equal(a, b))
 
 
+@unittest.skipUnless(HAS_TORCH, "four_d 需要 torch（.venv）")
+class TestGoldenAge(unittest.TestCase):
+    """sculpt 光 / 绕 target 的相机 / 单个红点 / 法向光流（2026-10-22 GoldenAge 版）"""
+
+    def test_target_default_matches_old_camera(self):
+        """target = 原点时与旧相机逐像素相等；平移 target = 整台相机平移（射线方向不变）"""
+        import torch
+        e0, r0 = F.camera(32, 18, 0.7, 0.3, 4.0)
+        e1, r1 = F.camera(32, 18, 0.7, 0.3, 4.0, target=(0.2, -0.1, 0.3))
+        self.assertTrue(torch.allclose(r0, r1))
+        self.assertTrue(torch.allclose(e1 - e0, torch.tensor([0.2, -0.1, 0.3], device=F.DEV), atol=1e-6))
+        self.assertAlmostEqual(float(e0.norm()), 4.0, places=5)
+
+    def test_xray_projection_uses_same_camera(self):
+        """必须相等的量：一个 3D 点用 X 光的投影公式落在哪个像素，相机那个像素的射线就要穿过它（target / fov 非默认）"""
+        import torch
+        hw, hh, fov, tg = 160, 90, 24.0, (0.1, 0.25, -0.05)
+        eye, fwd, right, up = F.cam_basis(1.4, -0.2, 4.2, tg)
+        p = torch.tensor([0.15, 0.4, 0.1], device=F.DEV)
+        rel = p - eye
+        z = rel @ fwd
+        s = math.tan(math.radians(fov) / 2)
+        px = float((rel @ right) / z / s * (hh / 2) + hw / 2)
+        py = float(-(rel @ up) / z / s * (hh / 2) + hh / 2)
+        e2, rd = F.camera(hw, hh, 1.4, -0.2, 4.2, fov, tg)
+        r = rd.reshape(hh, hw, 3)[int(py), int(px)]
+        dvec = rel / rel.norm()
+        self.assertGreater(float(r @ dvec), math.cos(math.radians(fov / hh * 1.5)))
+
+    def test_key_dir(self):
+        """az = 0 从相机那边打（与视线反向）、az = 90 从画面右侧、el = 90 正上方；单位长"""
+        import torch
+        _, fwd, right, _ = F.cam_basis(0.9, 0.0, 1.0)
+        self.assertTrue(torch.allclose(F.key_dir(0.9, 0.0, 0, 0), -fwd, atol=1e-6))
+        self.assertTrue(torch.allclose(F.key_dir(0.9, 0.0, 90, 0), right, atol=1e-6))
+        self.assertTrue(torch.allclose(F.key_dir(0.9, 0.3, 37, 90), torch.tensor([0.0, 1.0, 0.0], device=F.DEV), atol=1e-6))
+        self.assertAlmostEqual(float(F.key_dir(0.9, 0.3, -80, 48).norm()), 1.0, places=6)
+
+    def test_sculpt_shadow_darkens(self):
+        """球挡住光的那一侧地面（这里用第二个球）要比没挡的暗：soft_shadow 在被遮挡点 ≈ 0，开阔处 = 1"""
+        import torch
+        g = lambda p: torch.minimum(F.L(p[:, 0], p[:, 1] - 0.6, p[:, 2]) - 0.3, F.L(p[:, 0], p[:, 1] + 0.6, p[:, 2]) - 0.3)  # noqa: E731
+        Ld = torch.tensor([0.0, 1.0, 0.0], device=F.DEV)
+        p = torch.tensor([[0.0, -0.29, 0.0], [0.0, 0.91, 0.0]], device=F.DEV)   # 下球顶（被上球挡）/ 上球顶（开阔）
+        s = F.soft_shadow(g, p, Ld)
+        self.assertLess(float(s[0]), 0.05)
+        self.assertGreater(float(s[1]), 0.95)
+
+    def test_red_point_single_and_sticky(self):
+        """红图里两个斑：只出一个点；第二帧另一个斑略强，也不跳过去（跟踪偏向原地）；没有红 → 慢慢熄"""
+        import torch
+        H_, W_ = 90, 160
+        rp = F.RedPoint(H_, W_)
+        red = torch.zeros(H_, W_, device=F.DEV)
+        red[20:24, 30:34] = 1.0
+        red[60:64, 120:124] = 0.9
+        out = rp(red)
+        y, x = divmod(int(torch.argmax(out)), W_)
+        self.assertLess(abs(x - 31.5) + abs(y - 21.5), 3)
+        self.assertLess(float(out[60:64, 118:126].max()), 0.01)      # 只有一个点
+        red2 = red.clone(); red2[60:64, 120:124] = 1.1
+        y2, x2 = divmod(int(torch.argmax(rp(red2))), W_)
+        self.assertLess(abs(x2 - 31.5) + abs(y2 - 21.5), 3)
+        a = [float(rp(torch.zeros_like(red)).max()) for _ in range(4)]
+        self.assertTrue(all(p > q for p, q in zip(a, a[1:])))
+
+    def test_normal_flow_measures_shift(self):
+        """必须相等的量：平滑图案整体平移 1 像素，法向光流 ≈ 1 px/帧（斜向梯度 → |u_⊥| ≤ 1）"""
+        import torch
+        ys, xs = torch.meshgrid(torch.arange(120.0), torch.arange(160.0), indexing="ij")
+        f = lambda dx: 0.5 + 0.4 * torch.sin((xs - dx) / 6.0)  # noqa: E731
+        self.assertAlmostEqual(F.normal_flow(f(0), f(1)), 1.0, delta=0.08)
+        self.assertAlmostEqual(F.normal_flow(f(0), f(0)), 0.0, places=6)
+
+    def test_spec_guards(self):
+        with self.assertRaises(ValueError):
+            F.InsertSpec(1.0, fov=2.0)
+        with self.assertRaises(ValueError):
+            F.InsertSpec(3.0, dolly=0.2)
+
+
 if __name__ == "__main__":
     unittest.main()
