@@ -3,12 +3,141 @@
  "_说明": "剪辑规则的通用默认（Eidolon 上游）。只写「什么时候触发 → 做什么 → 多大」，不写怎么实现：同一个 action.type，Eidolon 离线（Python）和 VisualProcess 现场（GLSL）各实现一次。作品覆盖放 Projekt_Visual/<作品>/剪辑规则.json，只写不同的条目，按 id 合并（同 id 的字段逐个覆盖）。trigger.on = 感官.json 的事件名；section = 锚点.json 的 kind。同一帧撞上时 priority 大的赢；enabled=false 关掉。in.<section> = 在该段里覆盖的参数。",
  "_克制": "👤2026-10-19：插入太多 / 每拍 bump = 媚俗（强烈情感平铺压掉其他情感）。默认值偏克制：强度靠对比，大动作留给锚点和段落交界。",
  "rules": [
-  {"id": "cut_phrase", "priority": 90, "enabled": true, "trigger": {"on": "phrases"}, "action": {"type": "cut", "mode": "hard", "transition": {"type": "break", "frames": 2}}, "in": {"rise": {"trigger": {"on": "phrases", "offset": 0.5}}}},
-  {"id": "cutin_halfphrase", "priority": 70, "enabled": true, "trigger": {"on": "phrases", "offset": 0.5, "every": 2}, "action": {"type": "cutin", "src": "memory", "beats": 2}},
-  {"id": "blink_bar1", "priority": 80, "enabled": true, "trigger": {"on": "phrases", "offset": 0.0625, "every": 1}, "action": {"type": "blink", "frames": [1, 1], "src": "memory"}},
-  {"id": "break_onset", "priority": 60, "enabled": true, "trigger": {"on": "onsets", "min_strength_pct": 92}, "action": {"type": "break", "frames": 2, "amount": 0.6}, "in": {"rise": {"action": {"amount": 1.0}}}},
-  {"id": "bump_beat", "priority": 10, "enabled": false, "trigger": {"on": "downbeats", "section": "drop"}, "action": {"type": "bump", "amount": 0.015, "decay": 9}, "in": {"rise": {"action": {"amount": 0.03}}}, "note": "👤2026-10-19：「鼓点不要影响全局放大。This is too cheap. With no form in it.」拍点该作用在有形的东西上（某个元素、某个区块、某个结构），不是整幅画面。"},
-  {"id": "strobe_rise", "priority": 30, "enabled": true, "trigger": {"on": "beats", "section": "rise"}, "action": {"type": "strobe", "color": "accent", "amount": 0.35, "prob": {"from": 0.0, "to": 0.5}}},
-  {"id": "invade_rise", "priority": 20, "enabled": true, "trigger": {"section": "rise"}, "action": {"type": "invade", "from": "edge", "texture": "reaction_diffusion", "amount": 0.6}}
- ]
+  {
+   "id": "cut_phrase",
+   "priority": 90,
+   "enabled": true,
+   "trigger": {
+    "on": "phrases"
+   },
+   "action": {
+    "type": "cut",
+    "mode": "hard",
+    "transition": {
+     "type": "break",
+     "frames": 2
+    }
+   },
+   "in": {
+    "rise": {
+     "trigger": {
+      "on": "phrases",
+      "offset": 0.5
+     }
+    }
+   }
+  },
+  {
+   "id": "cutin_halfphrase",
+   "priority": 70,
+   "enabled": true,
+   "trigger": {
+    "on": "phrases",
+    "offset": 0.5,
+    "every": 2
+   },
+   "action": {
+    "type": "cutin",
+    "src": "memory",
+    "beats": 2
+   }
+  },
+  {
+   "id": "blink_bar1",
+   "priority": 80,
+   "enabled": true,
+   "trigger": {
+    "on": "phrases",
+    "offset": 0.0625,
+    "every": 1
+   },
+   "action": {
+    "type": "blink",
+    "frames": [
+     1,
+     1
+    ],
+    "src": "memory"
+   }
+  },
+  {
+   "id": "break_onset",
+   "priority": 60,
+   "enabled": true,
+   "trigger": {
+    "on": "onsets",
+    "min_strength_pct": 92
+   },
+   "action": {
+    "type": "break",
+    "frames": 2,
+    "amount": 0.6
+   },
+   "in": {
+    "rise": {
+     "action": {
+      "amount": 1.0
+     }
+    }
+   }
+  },
+  {
+   "id": "bump_beat",
+   "priority": 10,
+   "enabled": false,
+   "trigger": {
+    "on": "downbeats",
+    "section": "drop"
+   },
+   "action": {
+    "type": "bump",
+    "amount": 0.015,
+    "decay": 9
+   },
+   "in": {
+    "rise": {
+     "action": {
+      "amount": 0.03
+     }
+    }
+   },
+   "note": "👤2026-10-19：「鼓点不要影响全局放大。This is too cheap. With no form in it.」拍点该作用在有形的东西上（某个元素、某个区块、某个结构），不是整幅画面。"
+  },
+  {
+   "id": "strobe_rise",
+   "priority": 30,
+   "enabled": true,
+   "trigger": {
+    "on": "beats",
+    "section": "rise"
+   },
+   "action": {
+    "type": "strobe",
+    "color": "accent",
+    "amount": 0.35,
+    "prob": {
+     "from": 0.0,
+     "to": 0.5
+    }
+   }
+  },
+  {
+   "id": "invade_rise",
+   "priority": 20,
+   "enabled": true,
+   "trigger": {
+    "section": "rise"
+   },
+   "action": {
+    "type": "invade",
+    "from": "edge",
+    "texture": "reaction_diffusion",
+    "amount": 0.6
+   }
+  }
+ ],
+ "real_ratio": {
+  "default": 0.3,
+  "_说明": "全片旋钮：每段「实」（人 / 物 / 记忆实拍）占多少，0~1。作品覆盖按段写在 Projekt_Visual/<作品>/情绪大图/草案.json 的 段[].real_ratio。规则用法：cutin / blink 的 src 选 memory（实）还是 abstract（数学画面）的概率 = real_ratio。"
+ }
 }

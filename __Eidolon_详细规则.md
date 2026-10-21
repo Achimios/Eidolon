@@ -21,9 +21,16 @@
   "tension":   [...],
   "rhythm":    [...]
  },
- "events": {"onsets": [秒, ...], "beats": [秒, ...]}
+ "events": {"onsets": [秒, ...], "beats": [秒, ...], "downbeats": [秒, ...], "phrases": [秒, ...]},
+ "beat_source": "beat_this:final0",
+ "motifs": {"<名>": {"template": [t0, t1], "track": "other", "hits": [秒, ...]}}
 }
 ```
+- ⭐**2026-10-21 升级**（`tools/merge_events.py`，在 sense_song 之后跑）：
+  - `beats` 换成 beat_this 的拍（独立模型，150.00 BPM；用户的乐句格子 43 点里 39 点 ±30 ms 内对上重拍）。`bpm` 同步换成 150.0（倍拍问题解决：是 150 不是 75）。
+  - `downbeats` = 每小节第一拍。`phrases` = 锚点.json 的乐句格子（用户两个切点推出的 6.4 s = 4 小节），每格吸附到 ±40 ms 内最近的重拍（《Can't Kill Us》47 格吸上 43 格）。
+  - `motifs` = 用户耳朵指出的某个声音在全曲的每次出现（`tools/motif_find.py`，⚠️要按声音所在的分轨找：鼓每个乐句重复同一型，混进来会误报 —— 👤纠正过）。
+  - 字段只增不改名：只读 `onsets` / `beats` 的下游不用改。
 
 | 通道 | 意思 | 怎么算的 | 典型接法 |
 |---|---|---|---|
@@ -35,7 +42,7 @@
 
 - 每个通道长度 = `floor(duration × fps)`（只含完整落在音频里的帧），第 i 个值对应时刻 `i / fps` 秒；越界的帧夹到最后一个值。（2026-10-19 更正：原写 round，和代码不符，Visual 会话发现）
 - `onsets` 精度：合成点击音实测误差 ≤ 6ms（10ms 分析帧量化）。
-- ⚠️`bpm` 可能差两倍（半拍 / 倍拍）：真歌没有标准答案可对。《Can't Kill Us》算出 150.12，【没验到】真实速度是 150 还是 75。
+- `bpm`：sensorium 自己估的可能差两倍；merge_events 之后用 beat_this 的值（《Can't Kill Us》= 150.0，已和用户的乐句格子交叉验证）。
 - 生成：`python tools/sense_song.py <音频或视频> --out <作品文件夹>`，会同时出一张 `感官_条带.jpg` 给人看。
 
 ## 二、stems（`<作品>/stems/<镜头id>/`）—— 草案
@@ -59,7 +66,7 @@
 - 每条：`id`、`priority`（同帧撞上大的赢）、`enabled`、`trigger`、`action`、`in`（在某个 section 里覆盖的参数）。
 - `trigger.on` = 感官.json 的事件名（`beats` / `onsets`，以及升级后的 `downbeats` / `phrases`）；`trigger.section` / `in.<名字>` = 锚点.json 的 `kind`（如 `rise`）。
 - `action.type` 是**动作名**，不写实现：Eidolon 离线（Python）和 VisualProcess 现场（GLSL）各实现一次。现有动作：`cut` `cutin` `blink` `break` `bump` `strobe` `invade`。新增动作先在这里登记。
-- ⚠️`downbeats` / `phrases` 还没进感官.json（v2 粗剪里是从用户锚点手推的 6.4 s 格子），感官层升级后补上。
+- ✅`downbeats` / `phrases` 已进感官.json（2026-10-21，见第一节）。
 
 ## 四、锚点（`Projekt_Visual/<作品>/锚点.json`）—— 作品数据，多写入方
 - 不属于任何一个软件。写入方：用户在对话里说的（Eidolon 会话代写，`source:"chat"`）+ VisualProcess 现场 rig 里用户手动标的（`source:"vp"`）。
