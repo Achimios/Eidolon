@@ -54,8 +54,10 @@ def rot4(xw=0.0, yw=0.0, zw=0.0, xy=0.0):
 
 
 class Obj:
-    def __init__(self, name, op, eq, f, cmax, facets=None, step=0.9, verts=None, bound=2.2, cam=5.2, R0=None):
+    def __init__(self, name, op, eq, f, cmax, facets=None, step=0.9, verts=None, bound=2.2, cam=5.2, R0=None, plane="xw", c_rot=None, vbox=None):
         self.name, self.op, self.eq, self.f, self.cmax = name, op, eq, f, cmax
+        self.plane, self.c_rot = plane, c_rot
+        self.vbox = vbox or bound * 0.9       # Betti / X 光相切点 用的体素盒半边长   # rotate 用哪个平面（spin(mesh) 对 xw 不变 → zw）；rotate 时固定的 c
         self.cam, self.R0 = cam, R0   # 相机距离；R0 = 固定的基准朝向（比如让切片法向沿体对角线）
         self.facets, self.step, self.verts, self.bound = facets, step, verts, bound
 
@@ -239,6 +241,164 @@ OBJS = {o.name: o for o in [
 ]}
 
 
+# ---------- 真网格（GLB）→ 3D SDF → 4D ----------
+MESH_DEFAULT = MV / "3D" / "测试_人台.glb"
+MESH_B = 1.12        # 体素网格覆盖 [-B, B]^3；网格本身归一化进 [-1, 1]^3
+
+
+def _mesh_load(path, max_faces=40000):
+    """GLB → (V, F)：bbox 居中，侧向（T-pose 手臂）轴转到 x（glTF y 朝上），最长边缩放到 2"""
+    import trimesh
+    m = trimesh.load(str(path), force="mesh")
+    V = np.asarray(m.vertices, np.float64)
+    lo, hi = V.min(0), V.max(0)
+    V = V - (lo + hi) / 2
+    ext = hi - lo
+    if ext[2] > ext[0]:                      # 绕 y 转 −90°：(x, y, z) → (−z, y, x)，行列式 +1；Tripo 的正面（+x）转到 +z，朝向默认相机
+        V = np.stack([-V[:, 2], V[:, 1], V[:, 0]], 1)
+    V *= 2.0 / ext.max()
+    Fc = np.asarray(m.faces, np.int64)
+    if len(Fc) > max_faces:
+        V, Fc = _cluster_decimate(V, Fc, max_faces)
+    return V, Fc
+
+
+def _cluster_decimate(V, Fc, target):
+    """顶点聚类减面（不装新库）：把顶点量化到 k³ 格子里取均值，删掉退化 / 重复的三角形；k 从大往小试到面数 ≤ target。
+    暴力距离是 O(体素 × 面)，百万面的 Tripo 模型必须先减；128³ 体素下 ~1 cm 级的格子不损失可见形状"""
+    for k in (400, 320, 256, 200, 160, 128, 100, 80):
+        key = np.floor((V + 1.0001) / 2.0002 * k).astype(np.int64)
+        _, inv = np.unique(key[:, 0] * k * k + key[:, 1] * k + key[:, 2], return_inverse=True)
+        inv = inv.reshape(-1)
+        cnt = np.bincount(inv)
+        V2 = np.stack([np.bincount(inv, V[:, j]) / cnt for j in range(3)], 1)
+        F2 = inv[Fc]
+        F2 = F2[(F2[:, 0] != F2[:, 1]) & (F2[:, 1] != F2[:, 2]) & (F2[:, 2] != F2[:, 0])]
+        F2 = np.unique(F2, axis=0)
+        if len(F2) <= target:
+            print(f"  decimate {len(Fc)} -> {len(F2)} faces (vertex clustering, {k}^3 cells)", flush=True)
+            return V2, F2
+    return V2, F2
+
+
+def mesh_sdf_volume(V, Fc, n=128, B=MESH_B):
+    """>v<🧊四维切片-网格SDF-n³ 网格上的有符号距离：|d| = 暴力点–三角形距离（GPU 分块），
+    符号 = 广义缠绕数 Σ立体角/4π > 0.5（对破洞 / 非水密网格稳健）。返回 vol[iz, iy, ix]"""
+    V = torch.tensor(V, dtype=torch.float32, device=DEV)
+    Fc = torch.tensor(Fc, device=DEV)
+    A, Bv, C = V[Fc[:, 0]], V[Fc[:, 1]], V[Fc[:, 2]]
+    ba, cb, ac = Bv - A, C - Bv, A - C
+    nor = torch.linalg.cross(ba, ac)
+    sba, scb, sac = torch.linalg.cross(ba, nor), torch.linalg.cross(cb, nor), torch.linalg.cross(ac, nor)
+    d2 = lambda v: (v * v).sum(-1)  # noqa: E731
+    iba, icb, iac = [1 / d2(e).clamp(min=1e-20) for e in (ba, cb, ac)]
+    inor = 1 / d2(nor).clamp(min=1e-30)
+    ax = torch.linspace(-B, B, n, device=DEV)
+    Z, Y, X = torch.meshgrid(ax, ax, ax, indexing="ij")
+    pts = torch.stack([X, Y, Z], -1).reshape(-1, 3)
+    chunk = max(32, int(4e6 // Fc.shape[0]))
+    ud, wn = [], []
+    for blk in torch.split(pts, chunk):
+        pa, pb, pc = blk[:, None] - A[None], blk[:, None] - Bv[None], blk[:, None] - C[None]
+        s = torch.sign((sba * pa).sum(-1)) + torch.sign((scb * pb).sum(-1)) + torch.sign((sac * pc).sum(-1))
+        e1 = d2(ba * ((ba * pa).sum(-1) * iba).clamp(0, 1)[..., None] - pa)
+        e2 = d2(cb * ((cb * pb).sum(-1) * icb).clamp(0, 1)[..., None] - pb)
+        e3 = d2(ac * ((ac * pc).sum(-1) * iac).clamp(0, 1)[..., None] - pc)
+        dpl = (nor * pa).sum(-1) ** 2 * inor
+        dd = torch.where(s < 2, torch.minimum(torch.minimum(e1, e2), e3), dpl)
+        ud.append(dd.min(1).values.sqrt())
+        la, lb, lc = pa.norm(dim=-1), pb.norm(dim=-1), pc.norm(dim=-1)
+        num = -(pa * torch.linalg.cross(pb, pc)).sum(-1)            # det(A−p, B−p, C−p)
+        den = la * lb * lc + (pa * pb).sum(-1) * lc + (pb * pc).sum(-1) * la + (pc * pa).sum(-1) * lb
+        wn.append((2 * torch.atan2(num, den)).sum(1) / (4 * math.pi))
+    ud, wn = torch.cat(ud), torch.cat(wn)
+    return torch.where(wn.abs() > 0.5, -ud, ud).reshape(n, n, n).cpu().numpy()
+
+
+class MeshSDF:
+    """f3(x, y, z)：缓存的 SDF 体 + grid_sample 三线性；网格外用「到 [-1,1]³ 盒的距离」与「边界值 − 走出去的距离」取大，仍是距离下界"""
+    def __init__(self, path, n=128):
+        self.path, self.n, self.vol = Path(path), n, None
+
+    @property
+    def label(self):
+        """HUD 字体（consola）没有中文 → 中文名映射成 ASCII"""
+        st = self.path.stem
+        return st if st.isascii() else {"测试_人台": "test_mannequin", "她": "her", "躯体核心": "torso_core"}.get(st, "mesh")
+
+    def load(self):
+        cache = self.path.with_name(f"{self.path.stem}.sdf{self.n}.npy")
+        if cache.exists():
+            vol = np.load(cache)
+        else:
+            t0 = time.time()
+            V, Fc = _mesh_load(self.path)
+            vol = mesh_sdf_volume(V, Fc, self.n).astype(np.float32)
+            np.save(cache, vol)
+            print(f"  SDF {self.n}^3 of {self.path.name} ({len(Fc)} faces): {time.time() - t0:.1f}s -> {cache.name}", flush=True)
+        self.vol = torch.tensor(vol, device=DEV)[None, None]
+
+    def __call__(self, x, y, z):
+        if self.vol is None:
+            self.load()
+        q = torch.stack([x, y, z], -1).reshape(-1, 3)
+        qc = q.clamp(-MESH_B, MESH_B)
+        out = (q - qc).norm(dim=-1)
+        d = F.grid_sample(self.vol, (qc / MESH_B).reshape(1, -1, 1, 1, 3), mode="bilinear",
+                          padding_mode="border", align_corners=True).reshape(-1)
+        box = (q.abs() - 1.0).clamp(min=0).norm(dim=-1)
+        return torch.where(out > 0, torch.maximum(box, d - out), d).reshape(x.shape)
+
+
+def _ext(d, e):
+    """精确的「3D 距离 × w 区间」组合"""
+    return L(d.clamp(min=0), e.clamp(min=0)) + torch.maximum(d, e).clamp(max=0)
+
+
+def mesh_objs(msh, prefix="mesh", h=0.6, ht=1.0, k=math.pi / 2):
+    """>v<🧊四维切片-网格算子-extrude / spin / loft→sphere / loft→torus / twist（f3 = 真网格的 SDF，x = 侧向轴）"""
+    def ext(p):
+        x, y, z, w = _cols(p)
+        return _ext(msh(x, y, z), w.abs() - h)
+
+    def spin(p):
+        x, y, z, w = _cols(p)
+        return msh(L(x, w), y, z)
+
+    def loft_sphere(p, Lw=1.0):
+        x, y, z, w = _cols(p)
+        s = _smooth(-0.8 * Lw, 0.8 * Lw, w)
+        return torch.maximum(msh(x, y, z) * (1 - s) + (L(x, y, z) - 0.62) * s, w.abs() - Lw)
+
+    def loft_torus(p, Lw=1.0):
+        x, y, z, w = _cols(p)
+        s = _smooth(-0.8 * Lw, 0.8 * Lw, w)
+        return torch.maximum(msh(x, y, z) * (1 - s) + (L(L(x, y) - 0.72, z) - 0.2) * s, w.abs() - Lw)
+
+    def twist(p):
+        x, y, z, w = _cols(p)
+        a = k * w
+        ca, sa = torch.cos(a), torch.sin(a)
+        return _ext(msh(ca * x + sa * z, y, -sa * x + ca * z), w.abs() - ht)
+
+    lab = msh.label
+    return {o.name: o for o in [
+        Obj(f"{prefix}_extrude", "extrude", f"max( f3(x,y,z), |w| - {h} ),  f3 = SDF of {lab}", ext, h + 0.05, bound=1.6, cam=4.3, vbox=1.15),
+        Obj(f"{prefix}_spin", "spin(mesh)", f"f3( sqrt(x^2 + w^2), y, z )   ({lab} revolved about the yz-plane)", spin, 0.95,
+            bound=1.6, cam=4.3, vbox=1.15, plane="zw", c_rot=0.02),
+        Obj(f"{prefix}_loft_sphere", "loft", f"mix( f3, sphere(0.62), smoothstep(-0.8, 0.8, w) ),  |w| < 1", loft_sphere, 1.02,
+            step=0.6, bound=1.6, cam=4.3, vbox=1.15),
+        Obj(f"{prefix}_loft_torus", "loft", f"mix( f3, torus_xy(0.72, 0.2), smoothstep(-0.8, 0.8, w) ),  |w| < 1", loft_torus, 1.02,
+            step=0.6, bound=1.6, cam=4.3, vbox=1.15),
+        Obj(f"{prefix}_twist", "twist", f"max( f3( Rot_y(k w) [x,y,z] ), |w| - {ht} ),  k = {k:.3f} (90 deg per unit w)", twist, ht + 0.02,
+            step=0.5, bound=1.6, cam=4.3, vbox=1.15, c_rot=0.3),
+    ]}
+
+
+MESH = MeshSDF(MESH_DEFAULT)
+OBJS.update(mesh_objs(MESH))
+
+
 def slice_fn(obj, R, c):
     """3D 截面的 SDF：g(x) = f([x, c] · R)"""
     if obj.R0 is not None:
@@ -375,7 +535,7 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
 
 def _xray_tangency(obj, R, c, eye, hw, hh, n=72, thr=0.32):
     """被挡住的相切点也要看得见：在 n³ 网格上找截面表面附近 |n_xyz|/|n| < thr 的点，透视投影后泼成柔光（R 已含 R0）"""
-    B = obj.bound * 0.9
+    B = obj.vbox
     ax = torch.linspace(-B, B, n, device=DEV)
     X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
     q = torch.cat([X, torch.full_like(X[:, :1], c)], 1)
@@ -444,7 +604,7 @@ def _cc_count(mask, conn26):
 def betti(obj, R, c, n=72):
     """>v<🧊四维切片-拓扑-截面在 n³ 体素上的 (b0, b1, b2)：b0 = 26 邻接连通块，b2 = 补集（6 邻接）有界块，
     χ = V − E + F − C（闭立方体并的立方复形），b1 = b0 + b2 − χ"""
-    B = obj.bound * 0.9
+    B = obj.vbox
     ax = torch.linspace(-B, B, n, device=DEV)
     X, Y, Z = torch.meshgrid(ax, ax, ax, indexing="ij")
     occ = (slice_fn(obj, R, c)(torch.stack([X, Y, Z], -1).reshape(-1, 3)) < 0).reshape(n, n, n)
@@ -572,7 +732,7 @@ def animate(name, op, frames, out, look="line", theta_max=180.0, c0=None, c1=Non
             th = math.radians(theta_max) * e
             a, b = (c0 if c0 is not None else 0.0), (c1 if c1 is not None else 0.0)
             c = a + (b - a) * e
-        R = rot4(xw=th)
+        R = rot4(**{obj.plane: th})
         v, red = render(obj, R, c, W, H, look, yaw=yaw)
         b = betti(obj, R, c)
         if prev is not None and b != prev:
@@ -582,7 +742,7 @@ def animate(name, op, frames, out, look="line", theta_max=180.0, c0=None, c1=Non
             since += 1
         rgb = compose(v, red)
         lines = [f"{name} ({obj.op}): {obj.eq}",
-                 f"slice: w' = c,  p' = R_xw(theta) p      theta_xw = {math.degrees(th):6.1f} deg      c = {c:+.3f}",
+                 f"slice: w' = c,  p' = R_{obj.plane}(theta) p      theta_{obj.plane} = {math.degrees(th):6.1f} deg      c = {c:+.3f}",
                  _b_str(b) + (f"      <- was {was[0]} {was[1]} {was[2]}" if since < hold and events else "") + "   (voxels 72^3)",
                  "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32): only here can the slice change topology"]
         im = to_pil(rgb); hud(im, lines, tag, red_line=2 if since < hold else None); sink.add(im)
@@ -602,51 +762,69 @@ SHEET_ROWS = [
 ]
 
 
-def sheet(out, rows=None, look="line"):
+MESH_SHEET_ROWS = "extrude,spin,loft_sphere,loft_torus,twist,twist:rotate"
+
+
+_ROW_OP = {"extrude": "rotate", "spin": "rotate", "loft_sphere": "slice", "loft_torus": "slice", "twist": "slice"}
+
+
+def _row_spec(ops, prefix, label):
+    """'spin,twist:rotate' → [(prefix_spin, rotate, label/spin), ...]"""
+    out = []
+    for tok in ops.split(","):
+        name, _, op = tok.strip().partition(":")
+        out.append((f"{prefix}_{name}", op or _ROW_OP[name], f"{label} / {name}"))
+    return out
+
+
+def sheet(out, rows=None, look="line", tag="20_4D_SLICE_OVERVIEW", objs=None, foot=None):
     """>v<🧊四维切片-总览-行 = 物体，列 = 6 个切片位置 / 6 个 xw 角度；每格标 c、θ 和真数的 Betti 数，拓扑与左边一格不同 → 标签变红"""
     rows = rows or SHEET_ROWS
-    SW, SH = 2880, 1920
-    lab_w, top, bot = 330, 70, 150
+    objs = objs or OBJS
+    lab_w, top, bot = 330, 70, 150 + 26 * max(0, len(foot or []) - 3)
+    SW, SH = 2880, max(1920, top + bot + 285 * len(rows))
     tw = (SW - lab_w - 40) // 6
     th_ = (SH - top - bot) // len(rows)
     canvas = torch.zeros(SH, SW, 3, device=DEV)
     labels = []
     t0 = time.time()
     for r, (name, op, _) in enumerate(rows):
-        obj = OBJS[name]
+        obj = objs[name]
         prev = None
         for k in range(6):
             s = k / 5
             if op == "slice":
                 th, c = 0.0, -obj.cmax * 0.97 + 2 * obj.cmax * 0.97 * s
             else:
-                th, c = math.radians(90) * s, {"link": 0.05, "ditorus": 0.05}.get(name, 0.18)
+                th = math.radians(90) * s
+                c = obj.c_rot if obj.c_rot is not None else {"link": 0.05, "ditorus": 0.05}.get(name, 0.18)
             if name == "tesseract":
                 R = rot4(xw=th, yw=th * 0.8, zw=th * 0.6)
             else:
-                R = rot4(xw=th)
+                R = rot4(**{obj.plane: th})
             v, red = render(obj, R, c, tw, th_, look, yaw=0.6, ss=3, dist=obj.cam * 0.9, red_gain=1.0)
             b = betti(obj, R, c, n=64)
             canvas[top + r * th_: top + (r + 1) * th_, lab_w + k * tw: lab_w + (k + 1) * tw] = compose(v, red, 3, 0.4)
-            labels.append((r, k, f"theta={math.degrees(th):.0f}  c={c:+.2f}", f"b={b[0]}{b[1]}{b[2]}", prev is not None and b != prev))
+            bs = f"b={b[0]}{b[1]}{b[2]}" if max(b) < 10 else f"b={b[0]} {b[1]} {b[2]}"
+            labels.append((r, k, f"theta={math.degrees(th):.0f}  c={c:+.2f}", bs, prev is not None and b != prev))
             prev = b
         print(f"  row {name}: {time.time() - t0:.1f}s", flush=True)
     im = to_pil(canvas)
     d = ImageDraw.Draw(im)
     f = ImageFont.truetype(FONT, 20); fs = ImageFont.truetype(FONT, 17)
-    for r, (name, op, _) in enumerate(rows):
-        obj = OBJS[name]
+    for r, (name, op, lab) in enumerate(rows):
+        obj = objs[name]
         y = top + r * th_ + th_ // 2 - 40
-        d.text((40, y), name, font=f, fill=(200, 208, 214))
+        d.text((40, y), lab or name, font=f, fill=(200, 208, 214))
         d.text((40, y + 30), f"op: {obj.op}", font=fs, fill=(130, 138, 145))
-        d.text((40, y + 54), "sweep c along w" if op == "slice" else "rot xw, c fixed", font=fs, fill=(130, 138, 145))
+        d.text((40, y + 54), "sweep c along w" if op == "slice" else f"rot {obj.plane}, c fixed", font=fs, fill=(130, 138, 145))
     for r, k, a, b, red in labels:
         x, y = lab_w + k * tw + 14, top + (r + 1) * th_ - 30
         d.text((x, y), a, font=fs, fill=(120, 128, 134))
-        d.text((x + tw - 110, y), b, font=fs, fill=(235, 60, 66) if red else (120, 128, 134))
-    hud(im, ["g(x,y,z) = f( [x, y, z, c] R ),  R = R_xw(theta) ...   sphere-traced 3D cross-section of a 4D signed distance field",
+        d.text((x + tw - 54 - d.textlength(b, font=fs), y), b, font=fs, fill=(235, 60, 66) if red else (120, 128, 134))
+    hud(im, foot or ["g(x,y,z) = f( [x, y, z, c] R ),  R = R_xw(theta) ...   sphere-traced 3D cross-section of a 4D signed distance field",
              "lines: extra slicing planes y = k * 0.045 (polytopes: edges of the slice polyhedron)   b = Betti b0 b1 b2 on 64^3 voxels",
-             "red = hyperplane tangent to the 4D surface (where topology can change);  red label = topology differs from left"], "20_4D_SLICE_OVERVIEW")
+             "red = hyperplane tangent to the 4D surface (where topology can change);  red label = topology differs from left"], tag)
     out = Path(out); out.parent.mkdir(parents=True, exist_ok=True)
     im.save(out, quality=92)
     print(f"{out}: {time.time() - t0:.1f}s")
@@ -664,7 +842,33 @@ def main():
     ap.add_argument("--tag", default=None)
     ap.add_argument("--sheet", action="store_true")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--mesh", default=None, help="GLB 路径：mesh_* 物体用这个网格（默认 3D/测试_人台.glb）；SDF 缓存在旁边 <名>.sdf<N>.npy")
+    ap.add_argument("--sdf-res", type=int, default=128, help="网格 SDF 体素分辨率 N（N³）")
+    ap.add_argument("--extra-mesh", nargs="*", default=[], help="--mesh-sheet 时追加的行：'路径.glb=spin,twist:rotate,...'（算子名 extrude/spin/"
+                    "loft_sphere/loft_torus/twist，:rotate / :slice 覆盖默认扫法）")
+    ap.add_argument("--rows", default=None, help="--mesh-sheet 主网格的行，格式同上（默认 MESH_SHEET_ROWS）")
+    ap.add_argument("--mesh-sheet", action="store_true", help="网格算子接触表（默认写 静帧/21_四维切片_人形.jpg）")
     a = ap.parse_args()
+    if a.mesh or a.sdf_res != 128:
+        MESH.path, MESH.n, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, None
+        OBJS.update(mesh_objs(MESH))
+    if a.mesh_sheet:
+        objs = dict(OBJS)
+        rows = _row_spec(a.rows or MESH_SHEET_ROWS, "mesh", MESH.label)
+        for i, spec in enumerate(a.extra_mesh):
+            path, _, ops = spec.partition("=")
+            if not Path(path).exists():
+                print(f"  skip (missing): {path}")
+                continue
+            msh = MeshSDF(path, a.sdf_res)
+            objs.update(mesh_objs(msh, prefix=f"x{i}"))
+            rows += _row_spec(ops or "spin", f"x{i}", msh.label)
+        foot = [f"f3 = SDF of the row's GLB on {MESH.n}^3 (|d| = point-triangle distance, sign = winding number > 0.5; > 40k faces: vertex-cluster decimated)",
+                "g(x,y,z) = f( [x, y, z, c] R ),  R = R_plane(theta)    lines: extra slicing planes y = k * 0.045",
+                "b = Betti b0 b1 b2 on 64^3 voxels (mannequin limbs are separate pieces, torso_core has loose wires: those count)",
+                "red = hyperplane tangent to the 4D surface (where topology can change);  red label = topology differs from left"]
+        sheet(a.out or str(MV / "静帧" / "21_四维切片_人形.jpg"), rows, a.look, "21_4D_SLICE_MESH", objs, foot)
+        return
     if a.list:
         for o in OBJS.values():
             print(f"{o.name:20s} {o.op:14s} {o.eq}")
