@@ -135,6 +135,27 @@ class TestStages(unittest.TestCase):
         self.assertEqual(p.split_d, (6, -3, -6))
         self.assertAlmostEqual(p.smear_len, 560)
 
+    def test_micro_fringe_grey_away_from_edge(self):
+        """微彩 A：轮廓圈外（离边界 > ring）的像素没有颜色 —— 三个通道之比 = 冷灰的比例"""
+        img, m = rand_img(64, 96, 3), disk_mask()
+        out = F.palette_micro(img, m, "fringe", ring=4)
+        far = F._ring(m, 4) == 0
+        g = np.asarray(F.S.GREY, np.float32) / max(F.S.GREY)
+        ratio = out[far] / np.maximum(out[far][:, :1], 1e-6) * g[0]
+        np.testing.assert_allclose(ratio[out[far][:, 0] > 1e-3], np.broadcast_to(g, ratio[out[far][:, 0] > 1e-3].shape),
+                                   rtol=1e-4)
+
+    def test_hue_and_false_colour_anchors(self):
+        np.testing.assert_allclose(F.hue_rgb([0.0, 1 / 3, 2 / 3]), [[1, 0, 0], [0, 1, 0], [0, 0, 1]], atol=1e-6)
+        np.testing.assert_allclose(F.false_colour(np.array([0.0, 1.0])), [[0, 0, 0], [1, 1, 1]])
+
+    def test_all_palettes_shape_range(self):
+        img, m = rand_img(), disk_mask()
+        for key, (_, fn) in F.PALETTES.items():
+            out = fn(img, m, 3)
+            self.assertEqual(out.shape, img.shape, key)
+            self.assertTrue(np.all((out >= 0) & (out <= 1)), key)
+
     def test_pipeline_runs_deterministic(self):
         img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
         p = F.Params(place_dx=10, n_dust=50, grid=8)

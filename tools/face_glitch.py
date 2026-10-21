@@ -19,17 +19,23 @@
 参考图里额外看到的（已并入）：左缘一条纯红竖条（7）；三联条有竖有横（6）；颈 / 肩过曝成白（7）；
   脸内饱和拉高、色相偏（palette_orig 的 saturate）。
 
-两种配色：palette_ours（本片：冷灰白 + 只在轮廓外缘留一个红）/ palette_orig（参考图式饱和 RGB）。
+配色（PALETTES 表，视频 / 静帧共用）：ours 本片（冷灰白 + 只在轮廓外侧留一个红）/ orig 原配色（饱和 RGB）/
+  micro_fringe·micro_streaks·micro_redcyan 微彩（颜色只在轮廓圈 / 少数拖影行里）/ heavy_false·heavy_bands 重彩（接近参考图）。
+时间：感官.json 2026-10-21 起已是播放时间 → --sense-offset 默认 0（旧 感官.json 才要 0.042）。
+人读版：-给人类的解释/面部瓦解怎么做的.md
 
 感官驱动（params_from_sense，HUD / sidecar 里写同一张表）：
   threat  → 切片数 n_bands = 4 + 22·threat，最大横移 max_dx = 16 + 300·threat，横移概率 0.25 + 0.5·threat
   tension → RGB 分离 d = 2 + 16·tension（R = +d，G = −d/2，B = −d；法向模式）
   hunger  → 拖影长度 L = 40 + 520·hunger
-（其余参数固定；种子每 2 帧换一次 + 强起音处换。）
+（其余参数固定；种子每 --hold 帧（默认 4）换一次 + 强起音处换。v1 是每 2 帧 → 闪得太碎。）
 
 用法（在仓库 .venv 里）：
-  python tools/face_glitch.py sheet   # 静帧/23_面部瓦解_分解.jpg + 23b 本片配色 + 23c 原配色
-  python tools/face_glitch.py clip [--start 84.0] [--dur 2.0] [--ver v1]   # 样片/17_面部瓦解_试_<ver>.mp4（配乐）
+  python tools/face_glitch.py sheet      # 静帧/23_面部瓦解_分解 + 23b 本片 + 23c 原配色 + 23d 瀑布图行
+  python tools/face_glitch.py palettes   # 静帧/23e–23i 微彩 / 重彩 + 23j 配色对比
+  python tools/face_glitch.py clip [--src 视频] [--src-t0 0] [--dur 秒, 0 = 整段] [--start 歌里播放秒数]
+         [--palettes ours,micro_fringe,orig] [--name 输出名] [--waterfall] [--hold 4]
+         # → 样片/<name>_<配色>.mp4（配乐）+ 同名 .json（逐帧参数）+ _接触表.jpg；遮罩缓存在 cache/face_glitch/
   python tools/face_glitch.py image 图 [--mask 遮罩] [--out 路径]           # 任意图 + 遮罩（无遮罩 → 亮度阈值）
 """
 import argparse
@@ -48,7 +54,8 @@ import stills as S  # noqa: E402
 
 FONT = S.FONT
 FPS = 24
-SENSE_OFFSET = 0.042          # 感官.json 时间 + 0.042 = 播放时间（_LEARNINGS：原曲音频 pts 偏 42 ms）
+SENSE_OFFSET = 0.0            # 感官.json 时间 + 这个 = 播放时间。2026-10-21 起感官层在源头补了 0.042 s，已是播放时间 → 0；
+                              # 只有 2026-10-21 之前的旧 感官.json 才要 --sense-offset 0.042（见 _LEARNINGS）
 SRC_VIDEO = S.MV / "生成" / "视频" / "03_抬头_v3_仅首帧.mp4"
 LUMA = np.array([0.2126, 0.7152, 0.0722], np.float32)
 
@@ -382,6 +389,105 @@ def palette_ours(img, mask, ring=26, red_gain=3.0, grey=S.GREY, red=S.RED, side=
     return base * (1 - a[..., None]) + np.asarray(red, np.float32)[None, None] * a[..., None]
 
 
+def _ring(mask, width):
+    """轮廓两侧 width 像素的一圈（膨胀 − 腐蚀）"""
+    from PIL import ImageFilter
+    m8 = Image.fromarray((mask > 0.5).astype(np.uint8) * 255)
+    k = 2 * width + 1
+    return (np.asarray(m8.filter(ImageFilter.MaxFilter(k)), np.float32)
+            - np.asarray(m8.filter(ImageFilter.MinFilter(k)), np.float32)) / 255
+
+
+def row_groups_gate(H, rng, frac=0.06, group=4.0):
+    """把行按几何分布（均值 group 行）分组，每组以概率 frac 选中 → (H,) bool；外加每组一个随机色相 (H,) ∈ [0,1)"""
+    sel = np.zeros(H, bool)
+    hue = np.zeros(H, np.float32)
+    y = 0
+    while y < H:
+        h = int(rng.geometric(1.0 / max(group, 1.0)))
+        sel[y:y + h] = rng.random() < frac
+        hue[y:y + h] = rng.random()
+        y += h
+    return sel, hue
+
+
+def hue_rgb(h):
+    """色相 → 纯色（HSV 的 S = V = 1），h 可以是数组"""
+    h = np.asarray(h, np.float32)[..., None]
+    return np.clip(np.abs(((h * 6 + np.array([0, 4, 2], np.float32)) % 6) - 3) - 1, 0, 1)
+
+
+def _grey(img, grey=S.GREY):
+    g = np.clip(lum(img), 0, 1) ** 0.95
+    return g, g[..., None] * np.asarray(grey, np.float32)[None, None] / max(grey)
+
+
+def palette_micro(img, mask, mode="fringe", seed=0, k=1.5, ring=10, frac=0.10):
+    """微彩：底子是冷灰白，颜色只在局部出现、而且有来由：
+      fringe  ：只在轮廓两侧 ring 像素里保留 RGB 分离产生的色差（× k）—— 颜色 = 真实的通道错位
+      streaks ：fringe 的一半强度 + 拖影区里 frac 的行组染一个色相（颜色 × 该处亮度）—— 少数几条彩色扫描线
+      redcyan ：色差投影到 红–青 一根轴上（a = R − (G+B)/2：正 → 红，负 → 青），只在轮廓圈里 —— 两色，最克制"""
+    rng = np.random.default_rng(seed)
+    g, base = _grey(img)
+    c = img - lum(img)[..., None]
+    rg = _ring(mask, ring)[..., None]
+    if mode == "fringe":
+        return np.clip(base + c * k * rg, 0, 1)
+    if mode == "streaks":
+        H, W, _ = img.shape
+        out = base + c * (0.5 * k) * rg
+        sel, hue = row_groups_gate(H, rng, frac)
+        xr = leftmost(mask)
+        left = (np.arange(W)[None, :] < xr[:, None]) & sel[:, None]
+        tint = hue_rgb(hue)[:, None, :] * np.clip(g * 1.6, 0, 1)[..., None]
+        a = left[..., None] * 1.0
+        return np.clip(out * (1 - a) + tint * a, 0, 1)
+    if mode == "redcyan":
+        av = (img[..., 0] - 0.5 * (img[..., 1] + img[..., 2])) * (2 * k) * _ring(mask, 2 * ring)
+        red, cyan = np.asarray(S.RED, np.float32), np.array([0.35, 0.85, 0.95], np.float32)
+        ap, an = np.clip(av, 0, 1)[..., None], np.clip(-av, 0, 1)[..., None]
+        return np.clip(base * (1 - ap - an) + red * ap + cyan * an * g[..., None] ** 0.5, 0, 1)
+    raise ValueError(mode)
+
+
+FALSE_STOPS = [(0.0, (0, 0, 0)), (0.18, (0.05, 0.05, 0.6)), (0.38, (0.55, 0.05, 0.75)), (0.58, (1.0, 0.1, 0.25)),
+               (0.78, (1.0, 0.75, 0.1)), (1.0, (1, 1, 1))]
+
+
+def false_colour(v, stops=FALSE_STOPS):
+    xs = np.array([s_[0] for s_ in stops])
+    cs = np.array([s_[1] for s_ in stops], np.float32)
+    return np.stack([np.interp(v, xs, cs[:, c]) for c in range(3)], -1).astype(np.float32)
+
+
+def palette_heavy(img, mask, mode="false", seed=0, sat=2.2, frac=0.35, mix=0.6):
+    """重彩（接近参考图）：
+      false ：亮度 → 假色梯度（黑→蓝→品红→红→黄→白），和饱和 ×sat 的原色按 mix 混 —— 参考图脸上那种蓝 / 品红 / 红
+      bands ：frac 的行组（全宽，含拖影）乘一个随机纯色，再整体饱和 ×sat —— 彩色横条纹"""
+    rng = np.random.default_rng(seed)
+    if mode == "false":
+        fc = false_colour(np.clip(lum(img), 0, 1) ** 0.8)
+        return np.clip(fc * mix + saturate(img, sat) * (1 - mix), 0, 1)
+    if mode == "bands":
+        sel, hue = row_groups_gate(img.shape[0], rng, frac)
+        tint = 0.35 + 0.65 * hue_rgb(hue)                      # (H,3)，不压到全黑
+        t = np.where(sel[:, None], tint, 1.0)[:, None, :]
+        return np.clip(saturate(img * t, sat) * 1.1, 0, 1)
+    raise ValueError(mode)
+
+
+# 配色表：名字 → (中文名, 函数(img, mask, seed))；视频 / 静帧都从这里取
+PALETTES = {
+    "ours": ("本片", lambda x, m, sd: palette_ours(x, m)),
+    "orig": ("原配色", lambda x, m, sd: palette_orig(x)),
+    "micro_fringe": ("微彩A_边缘", lambda x, m, sd: palette_micro(x, m, "fringe", sd)),
+    "micro_streaks": ("微彩B_条纹", lambda x, m, sd: palette_micro(x, m, "streaks", sd)),
+    "micro_redcyan": ("微彩C_红青", lambda x, m, sd: palette_micro(x, m, "redcyan", sd)),
+    "heavy_false": ("重彩A_假色", lambda x, m, sd: palette_heavy(x, m, "false", sd)),
+    "heavy_bands": ("重彩B_条带染色", lambda x, m, sd: palette_heavy(x, m, "bands", sd)),
+}
+
+
 # ---------------------------------------------------------------- 参数 + 管线
 @dataclass
 class Params:
@@ -614,70 +720,130 @@ def cmd_sheet(a):
         print("->", o)
 
 
+def cmd_palettes(a):
+    """同一张 t=4.0 的瓦解结果（seed 7，和 23b / 23c 同一份）→ 各种配色静帧 + 一张对比表"""
+    img = video_frames(SRC_VIDEO, a.t, 1)[0]
+    mask, _ = get_mask(get_matter(), img)
+    p = Params()
+    out, m = run(img, mask, p)
+    dst = S.MV / "静帧"
+    letters = dict(micro_fringe="23e", micro_streaks="23f", micro_redcyan="23g", heavy_false="23h", heavy_bands="23i")
+    tiles = []
+    for key in ["ours", "micro_fringe", "micro_streaks", "micro_redcyan", "orig", "heavy_false", "heavy_bands"]:
+        zh, fn = PALETTES[key]
+        im = to_im(fn(out, m, p.seed))
+        tiles.append((key, im))
+        if key in letters:
+            o = outname(dst / f"{letters[key]}_面部瓦解_{zh}.jpg")
+            label(im.copy(), "", lines=p.hud() + [f"palette {key}"]).save(o, quality=94)
+            print("->", o)
+    tw, th_ = 640, 360
+    sheet = Image.new("RGB", (2 * tw, 4 * th_ + 40), (8, 8, 10))
+    for i, (name, im) in enumerate(tiles):
+        t = im.resize((tw, th_), Image.LANCZOS)
+        label(t, name, s=0.9, color=(220, 224, 228))
+        sheet.paste(t, ((i % 2) * tw, 40 + (i // 2) * th_))
+    label(sheet, "", s=1.1, color=(160, 166, 172), pos="tl",
+          lines=["23j  palettes on the same glitch (seed 7, t=4.0 s). tools/face_glitch.py palettes"])
+    o = outname(dst / "23j_面部瓦解_配色对比.jpg")
+    sheet.save(o, quality=92)
+    print("->", o)
+
+
+def contact(frames, path, cols=4):
+    tw, th_ = 480, 270
+    rows = (len(frames) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * tw, rows * th_), (8, 8, 10))
+    for i, (lab, im) in enumerate(frames):
+        t = im.resize((tw, th_), Image.LANCZOS)
+        label(t, lab, s=0.8, color=(230, 230, 230), pos="tl")
+        sheet.paste(t, ((i % cols) * tw, (i // cols) * th_))
+    sheet.save(path, quality=88)
+
+
 def cmd_clip(a):
+    import imageio_ffmpeg
+    ff = imageio_ffmpeg.get_ffmpeg_exe()
+    src = Path(a.src)
     sn = json.loads((S.MV / "感官.json").read_text("utf-8"))
     ch = sn["channels"]
-    n = int(round(a.dur * FPS))
-    frames = video_frames(SRC_VIDEO, a.src_t0, n)
+    n = int(round(a.dur * FPS)) if a.dur else 10 ** 6
+    frames = video_frames(src, a.src_t0, n)
     n = len(frames)
+    dur = n / FPS
+    tmp = Path(a.tmp)
+    tmp.mkdir(parents=True, exist_ok=True)
     # 遮罩缓存（同一段源帧只推理一次；缓存在 --tmp 里，gitignore）
-    mcache = Path(a.tmp) / f"masks_{SRC_VIDEO.stem}_{a.src_t0:.3f}_{n}.npy"
+    mcache = tmp / f"masks_{src.stem}_{a.src_t0:.3f}_{n}.npy"
     cached = np.load(mcache) if mcache.exists() else None
     matter = None if cached is not None else get_matter()
     masks = []
     on = np.array(sn["events"]["onsets"])
     th = np.array(ch["threat"])
-    tmp = Path(a.tmp); tmp.mkdir(parents=True, exist_ok=True)
-    vid_tmp = tmp / f"17_face_glitch_{a.ver}_noaudio.mp4"
-    import imageio_ffmpeg
     H, W = frames[0].shape[:2]
-    pipe = subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                             "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                             "-crf", "16", str(vid_tmp)], stdin=subprocess.PIPE)
+    pals = a.palettes.split(",")
+    name = a.name or f"17_面部瓦解_试_{a.ver}"
+    pipes, vtmp = {}, {}
+    for key in pals:
+        vtmp[key] = tmp / f"{src.stem}_{a.ver}_{key}{'_wf' if a.waterfall else ''}_noaudio.mp4"
+        pipes[key] = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                                       "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                       "-crf", "16", str(vtmp[key])], stdin=subprocess.PIPE)
     hist = BoundaryHistory()
-    side = {"source": str(SRC_VIDEO.name), "src_t0": a.src_t0, "play_start": a.start, "dur": a.dur,
-            "sense_offset": SENSE_OFFSET, "palette": a.palette, "waterfall": a.waterfall,
+    off = a.sense_offset
+    side = {"source": src.name, "src_t0": a.src_t0, "play_start": a.start, "dur": dur,
+            "sense_offset": off, "palettes": pals, "waterfall": a.waterfall, "place_dx": a.place_dx,
             "mapping": {"threat": "n_bands = 4 + 22*threat; max_dx = 16 + 300*threat; p_shift = 0.25 + 0.5*threat",
                         "tension": "split d = 2 + 16*tension (R=+d, G=-d/2, B=-d, along normal)",
                         "hunger": "smear L = 40 + 520*hunger px",
-                        "seed": "new seed every 2 frames and at onsets with threat >= p88 of the clip"},
+                        "seed": f"new seed every {a.hold} frames and at onsets with threat >= p88 of the clip"},
             "frames": []}
-    t_sense = [a.start + i / FPS - SENSE_OFFSET for i in range(n)]
+    t_sense = [a.start + i / FPS - off for i in range(n)]
+    i0, i1 = int(round(t_sense[0] * FPS)), int(round(t_sense[-1] * FPS)) + 1
     loc = on[(on >= t_sense[0]) & (on < t_sense[-1] + 1 / FPS)]
-    strong = [o for o in loc if th[int(o * FPS)] >= np.percentile(th[int(t_sense[0] * FPS):int(t_sense[-1] * FPS) + 1], 88)]
+    strong = [o for o in loc if th[int(round(o * FPS))] >= np.percentile(th[i0:i1], 88)]
     seed, t0 = 1000, time.time()
+    thumbs = {k: [] for k in pals}
+    every = max(1, n // 16)
     for i, f in enumerate(frames):
         ts = t_sense[i]
-        k = min(int(ts * FPS), len(th) - 1)
-        if i % 2 == 0 or any(abs(o - ts) < 0.5 / FPS for o in strong):
+        k = min(int(round(ts * FPS)), len(th) - 1)   # round：浮点 84 - 0.0 → 2015.9999 不能落到前一帧
+        if i % a.hold == 0 or any(abs(o - ts) < 0.5 / FPS for o in strong):
             seed += 1
-        p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k], Params(seed=seed, waterfall=a.waterfall))
+        p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k],
+                              Params(seed=seed, waterfall=a.waterfall, place_dx=a.place_dx))
         if cached is not None:
             mask, msrc = cached[i].astype(np.float32) / 255, "BiRefNet (cached)"
         else:
             mask, msrc = get_mask(matter, f)
             masks.append(mask)
         out, m = run(f, mask, p, hist=hist)
-        im = palette_ours(out, m) if a.palette == "ours" else palette_orig(out)
-        im = to_im(im)
-        label(im, "", s=0.9, lines=[f"t = {ts + SENSE_OFFSET:6.3f} s (play)   sense {ts:6.3f}   threat {p.sense['threat']:.2f}  "
-                                    f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   mask {msrc}"] + p.hud())
-        pipe.stdin.write(np.asarray(im).tobytes())
-        side["frames"].append({"i": i, "t_play": round(ts + SENSE_OFFSET, 3), **p.sense, "seed": seed,
+        for key in pals:
+            im = to_im(PALETTES[key][1](out, m, seed))
+            label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   threat {p.sense['threat']:.2f}  "
+                                        f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   "
+                                        f"mask {msrc}   palette {key}"] + p.hud())
+            pipes[key].stdin.write(np.asarray(im).tobytes())
+            if i % every == 0:
+                thumbs[key].append((f"{ts + off:.2f}s  threat {p.sense['threat']:.2f}", im))
+        side["frames"].append({"i": i, "t_play": round(ts + off, 3), **p.sense, "seed": seed,
                                "n_bands": p.n_bands, "max_dx": p.max_dx, "split_d": list(p.split_d),
                                "smear_len": round(p.smear_len, 1)})
-        if i == n // 2:
-            im.save(tmp / f"17_mid_{a.ver}.jpg", quality=90)
-    pipe.stdin.close(); pipe.wait()
+    for key in pals:
+        pipes[key].stdin.close()
+        pipes[key].wait()
     if cached is None and matter is not None:
         np.save(mcache, (np.stack(masks) * 255 + 0.5).astype(np.uint8))
-    print(f"{n} 帧 {time.time() - t0:.1f}s")
-    out = outname(S.MV / "样片" / f"17_面部瓦解_试_{a.ver}.mp4")
-    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(vid_tmp), "-ss", f"{a.start:.3f}",
-                    "-t", f"{a.dur:.3f}", "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
-                    "-b:a", "256k", "-t", f"{a.dur:.3f}", str(out)], check=True)
-    Path(str(out) + ".json").write_text(json.dumps(side, ensure_ascii=False, indent=1), "utf-8")
-    print("->", out)
+    print(f"{n} 帧 × {len(pals)} 配色  {time.time() - t0:.1f}s")
+    for key in pals:
+        suffix = f"_{PALETTES[key][0]}" if (len(pals) > 1 or a.name) else ""
+        out = outname(S.MV / "样片" / f"{name}{suffix}.mp4")
+        subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(vtmp[key]), "-ss", f"{a.start:.3f}",
+                        "-t", f"{dur:.3f}", "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
+                        "-b:a", "256k", "-t", f"{dur:.3f}", str(out)], check=True)
+        Path(str(out) + ".json").write_text(json.dumps({**side, "palette": key}, ensure_ascii=False, indent=1), "utf-8")
+        contact(thumbs[key], out.with_name(out.stem + "_接触表.jpg"))
+        print("->", out)
 
 
 def cmd_image(a):
@@ -686,7 +852,7 @@ def cmd_image(a):
             if a.mask else lum_mask(img))
     p = Params(place_dx=a.place_dx, waterfall=False)
     out, m = run(img, mask, p)
-    im = palette_ours(out, m) if a.palette == "ours" else palette_orig(out)
+    im = PALETTES[a.palette][1](out, m, p.seed)
     o = outname(a.out or Path(a.src).with_name(Path(a.src).stem + "_face_glitch.jpg"))
     to_im(im).save(o, quality=94)
     print("->", o)
@@ -696,18 +862,25 @@ def main():
     ap = argparse.ArgumentParser()
     sp = ap.add_subparsers(dest="cmd", required=True)
     s1 = sp.add_parser("sheet"); s1.add_argument("--t", type=float, default=4.0)
+    s1b = sp.add_parser("palettes")
+    s1b.add_argument("--t", type=float, default=4.0)
     s2 = sp.add_parser("clip")
-    s2.add_argument("--start", type=float, default=84.0, help="播放时间（容器时间）")
-    s2.add_argument("--dur", type=float, default=2.0)
-    s2.add_argument("--src-t0", type=float, default=2.5, help="03_抬头_v3 里从哪一秒取帧")
+    s2.add_argument("--src", default=str(SRC_VIDEO), help="源视频（她）")
+    s2.add_argument("--start", type=float, default=84.0, help="歌里的播放时间（容器时间）= 第 0 帧")
+    s2.add_argument("--dur", type=float, default=2.0, help="秒；0 = 整段源视频")
+    s2.add_argument("--src-t0", type=float, default=2.5, help="源视频里从哪一秒取帧")
+    s2.add_argument("--place-dx", type=int, default=180, help="把她往右挪多少像素（留出左边给拖影）")
+    s2.add_argument("--palettes", default="ours", help="逗号分隔：" + ",".join(PALETTES))
+    s2.add_argument("--name", default=None, help="输出名（不含配色后缀）；默认 17_面部瓦解_试_<ver>")
     s2.add_argument("--ver", default="v1")
-    s2.add_argument("--palette", default="ours", choices=["ours", "orig"])
+    s2.add_argument("--hold", type=int, default=4, help="种子保持几帧（强起音处总会换）")
+    s2.add_argument("--sense-offset", type=float, default=SENSE_OFFSET, help="感官.json 时间 + 这个 = 播放时间（当前 感官.json 已是播放时间 → 0）")
     s2.add_argument("--waterfall", action="store_true")
     s2.add_argument("--tmp", default=str(Path(__file__).resolve().parents[1] / "cache" / "face_glitch"))
     s3 = sp.add_parser("image"); s3.add_argument("src"); s3.add_argument("--mask"); s3.add_argument("--out")
-    s3.add_argument("--place-dx", type=int, default=0); s3.add_argument("--palette", default="orig", choices=["ours", "orig"])
+    s3.add_argument("--place-dx", type=int, default=0); s3.add_argument("--palette", default="orig", choices=list(PALETTES))
     a = ap.parse_args()
-    {"sheet": cmd_sheet, "clip": cmd_clip, "image": cmd_image}[a.cmd](a)
+    {"sheet": cmd_sheet, "palettes": cmd_palettes, "clip": cmd_clip, "image": cmd_image}[a.cmd](a)
 
 
 if __name__ == "__main__":
