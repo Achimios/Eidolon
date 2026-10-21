@@ -92,8 +92,12 @@ def aud(src):
 
 
 def vid(url):
-    """⚠️视频只能公网 URL / asset://，不能 base64"""
-    return {"type": "video_url", "video_url": {"url": url}, "role": "reference_video"}
+    """⚠️视频只能 https URL / asset://。2026-10-21 实测：base64、Files API 的 file-id、file:// 都被 400 拒
+    （见 _设计/接口_生成.md「本地视频当参考」）→ 本地路径在这里直接报错，别白建任务"""
+    s = str(url)
+    if not s.startswith(("http://", "https://", "asset://")):
+        raise ValueError(f"Seedance 参考视频只收 http(s) URL 或 asset://，收到 {s[:60]!r}；本地渲染要先传到能 GET 的地址（如 TOS 预签名 URL）")
+    return {"type": "video_url", "video_url": {"url": s}, "role": "reference_video"}
 
 
 def video(content, out, mdl="seedance_25", ratio="16:9", duration=5, poll=5, timeout_s=1800, generate_audio=False, **extra):
