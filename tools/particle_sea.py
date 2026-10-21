@@ -37,7 +37,7 @@
   {pal} 换成配色中文名（黑白红 / 酸绿）。每条 clip 同时出 <名>_接触表.jpg 和 <名>.json（全部参数 + 每个起音放了多少点
   + 心的到达时刻 + 逐帧 海 / 飞行 / 到达 计数）。输出不覆盖：重名就停（换 _v2 / _v3）。
   预设（PRESETS）：absorb = v1（07 吸收第一乐句）；absorb2 = v2（力更读得出）；⭐absorb3 = v3（一拍 = 海上一处拽起一束细丝，
-  更低更远的机位贴浪飞、能看到地平线，绿只留在刚到达的点上，HUD 一行在左上）；finale = 07 最后一个乐句（横移 + 升起）。
+  更低更远的机位贴浪飞、能看到地平线，绿只留在刚到达的点上，HUD 一行在左上）；⭐absorb4 = v4（束根不发亮、开头不过曝、束提前离水让最强拍当帧最高）；finale = 07 最后一个乐句（横移 + 升起）。
   --set 改任意参数（数字 / 逗号分隔的向量）。1080p 约 3.8 s/帧（CPU，numpy；不占 GPU）。
 """
 import argparse
@@ -71,7 +71,7 @@ BASE = dict(
     # 环形波（Cauchy–Poisson）
     ring_A=3.0, ring_b=6.0, ring_decay=3.0, ring_min_threat=0.08, ring_scatter=0.0, ring_kind="impulse", ring_tau=0.6,
     # v3：束（0 = v1/v2 的均匀吸）；刚到达的点褪色时间；镜头离浪的最小高度（0 = 不管）
-    plumes=0, plume_h=0.6, trail_frac=1.0, plume_dist=60.0, plume_r=3.0, plume_stagger=0.25, fresh_tau=0.15, cam_clear=0.0,
+    plumes=0, plume_h=0.6, trail_frac=1.0, plume_lead=0.0, near_fade=0.0, plume_dist=60.0, plume_r=3.0, plume_stagger=0.25, fresh_tau=0.15, cam_clear=0.0,
     # 镜头
     cam_from="-80,9,-150", cam_to="-24,2.6,-70", v_frac=0.55, tau=1.2, look="-12,16,0", look_lag=0.35, hfov=52.0,
     roll_deg=-4.0, shutter=0.5, K=6, trail_s=0.25, trail_n=10, trail_gain=0.7,
@@ -87,6 +87,13 @@ PRESETS = {
     "absorb3": dict(plumes=1, plume_dist=70.0, plume_r=3.0, plume_stagger=0.3, v_up=45.0, omega=4.0, fresh_tau=0.15,
                     w_flight=0.12, trail_s=0.8, trail_n=80, trail_gain=60.0, trail_frac=0.08, ring_A=4.0, ring_tau=1.2, ring_b=7.0,
                     cam_from="-120,7,-260", cam_to="-46,4,-118", look="-8,13,0", cam_clear=3.0, v_frac=0.75, tau=1.0,
+                    sea_xmax=1400.0, sea_zmax=1500.0, fog=650.0, N_sea=380000, hfov=50.0),
+    # v4：修 v3 自评的三处 —— 束根的亮斑（还没离水的源点几乎不画：w_src 0.03）、开头贴浪的过曝亮带（近处 25 m 渐隐 +
+    #     离浪 5 m）、最强拍要当帧成形（束提前 0.35 s 离水，起音那一刻是它最高最密）
+    "absorb4": dict(plumes=1, plume_dist=70.0, plume_r=3.0, plume_stagger=0.3, plume_lead=0.5, v_up=45.0, omega=4.0,
+                    fresh_tau=0.15, w_src=0.03, w_flight=0.12, trail_s=0.8, trail_n=80, trail_gain=60.0, trail_frac=0.08,
+                    ring_A=4.0, ring_tau=1.2, ring_b=7.0, cam_from="-120,7,-260", cam_to="-46,4,-118", look="-8,13,0",
+                    cam_clear=5.0, near_fade=60.0, v_frac=0.75, tau=1.0,
                     sea_xmax=1400.0, sea_zmax=1500.0, fog=650.0, N_sea=380000, hfov=50.0),
     "absorb2": dict(R_src=6.0, v_up=38.0, omega=5.0, trail_s=0.45, trail_n=14, trail_gain=1.0, w_flight=0.35,
                     ring_A=4.0, ring_tau=1.2, ring_b=7.0),
@@ -527,7 +534,8 @@ class Sea:
         burst = np.abs(self.rt[fin] - ev_t[k]) < 0.2
         bi = fin[burst & (fin != self.red)]
         kb = k[burst & (fin != self.red)]
-        self.rt[bi] = ev_t[kb] + p["plume_stagger"] * rng.random(len(bi)) ** 1.5
+        # plume_lead：一束提前 lead 秒开始离水，让起音那一刻正好是它最高 / 最密的时候（v4，主会话要求；心不动，仍在起音放）
+        self.rt[bi] = ev_t[kb] - p["plume_lead"] + p["plume_stagger"] * rng.random(len(bi)) ** 1.5
         self.sched["plumes"] = [dict(t=round(float(o), 3), threat=round(float(sk), 3), root=[round(float(c[0]), 1), round(float(c[1]), 1)])
                                 for (o, sk), c in zip(evs, cs)]
 
@@ -648,7 +656,9 @@ class Sea:
         fog = lambda Z: np.exp(-np.maximum(Z, 0) / p["fog"])   # noqa: E731
         # 海点可见：没被她挡、没被前面的浪挡
         vs = vis_by(zb_body, Xs, Ys, Zs, cell, 0.0) & vis_by(zb_sea, Xs, Ys, Zs, cs, 0.035)
-        w_s = p["w_sea"] * m_s * fog(Zs) * vs
+        # 镜头脚边的海点渐隐（near_fade 米内按 smoothstep）：贴浪高速飞时近处点挤成过曝亮带（v3 的问题）；= 近裁剪面的软边
+        near = smooth01(Zs / p["near_fade"]) if p["near_fade"] > 0 else 1.0
+        w_s = p["w_sea"] * m_s * fog(Zs) * vs * near
         # 她：背面剔除 + 被浪挡（水面以下）+ 自遮挡
         pos = pose_c[0]
         if len(idx):
