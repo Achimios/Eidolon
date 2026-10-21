@@ -36,7 +36,8 @@
          --out 样片/粒子海/20_粒子海_吸收_{pal}_v1.mp4 [--w 1920 --h 1080] [--preset absorb] [--set key=value ...]
   {pal} 换成配色中文名（黑白红 / 酸绿）。每条 clip 同时出 <名>_接触表.jpg 和 <名>.json（全部参数 + 每个起音放了多少点
   + 心的到达时刻 + 逐帧 海 / 飞行 / 到达 计数）。输出不覆盖：重名就停（换 _v2 / _v3）。
-  预设（PRESETS）：absorb = v1（07 吸收第一乐句）；absorb2 = v2（力更读得出）；finale = 07 最后一个乐句（横移 + 升起）。
+  预设（PRESETS）：absorb = v1（07 吸收第一乐句）；absorb2 = v2（力更读得出）；⭐absorb3 = v3（一拍 = 海上一处拽起一束细丝，
+  更低更远的机位贴浪飞、能看到地平线，绿只留在刚到达的点上，HUD 一行在左上）；finale = 07 最后一个乐句（横移 + 升起）。
   --set 改任意参数（数字 / 逗号分隔的向量）。1080p 约 3.8 s/帧（CPU，numpy；不占 GPU）。
 """
 import argparse
@@ -69,6 +70,8 @@ BASE = dict(
     R_src=4.0, w_src=0.2, w_flight=0.35, pre_absorbed=0.35, end_frac=0.92, trickle=0.10, thr_pow=3.0, omega=7.0, v_up=26.0, order_noise=0.25,
     # 环形波（Cauchy–Poisson）
     ring_A=3.0, ring_b=6.0, ring_decay=3.0, ring_min_threat=0.08, ring_scatter=0.0, ring_kind="impulse", ring_tau=0.6,
+    # v3：束（0 = v1/v2 的均匀吸）；刚到达的点褪色时间；镜头离浪的最小高度（0 = 不管）
+    plumes=0, plume_h=0.6, trail_frac=1.0, plume_dist=60.0, plume_r=3.0, plume_stagger=0.25, fresh_tau=0.15, cam_clear=0.0,
     # 镜头
     cam_from="-80,9,-150", cam_to="-24,2.6,-70", v_frac=0.55, tau=1.2, look="-12,16,0", look_lag=0.35, hfov=52.0,
     roll_deg=-4.0, shutter=0.5, K=6, trail_s=0.25, trail_n=10, trail_gain=0.7,
@@ -79,6 +82,12 @@ PRESETS = {
     "absorb": {},      # 07 吸收：低空滑向她，起音一口口把海吸进她身体
     # v2：v1 的力读不出来（飞点只是一层薄雾、环形波几乎看不见）→ 源更远、上抛更高、拖尾更长 = 一股股从海里升起的弧；
     #     起音打在水上的冲量加大（先砸出坑再散开的环更明显）
+    # v3（主会话看 v2 后的四条）：①一拍 = 海面上一个地方拽起一束（束更亮、拖尾更长更细）；②更低更远的机位，
+    #     开头贴着真实浪峰飞，远处海面伸进黑暗（海更大、更远、雾更淡）；③绿只留在刚到达的点上；④HUD 一行、清楚
+    "absorb3": dict(plumes=1, plume_dist=70.0, plume_r=3.0, plume_stagger=0.3, v_up=45.0, omega=4.0, fresh_tau=0.15,
+                    w_flight=0.12, trail_s=0.8, trail_n=80, trail_gain=60.0, trail_frac=0.08, ring_A=4.0, ring_tau=1.2, ring_b=7.0,
+                    cam_from="-120,7,-260", cam_to="-46,4,-118", look="-8,13,0", cam_clear=3.0, v_frac=0.75, tau=1.0,
+                    sea_xmax=1400.0, sea_zmax=1500.0, fog=650.0, N_sea=380000, hfov=50.0),
     "absorb2": dict(R_src=6.0, v_up=38.0, omega=5.0, trail_s=0.45, trail_n=14, trail_gain=1.0, w_flight=0.35,
                     ring_A=4.0, ring_tau=1.2, ring_b=7.0),
     # 07 吸收的最后一个乐句（147.56–153.96）：她几乎是完整的了，最后几下强拍把剩下的海吞完 → 接 08「空」。
@@ -93,10 +102,10 @@ _G = S.GREY / S.GREY.max()
 PAL_NAME = {"bwr": "黑白红", "acid": "酸绿"}
 PALETTES = {
     # ① 黑白红：全部冷灰白，只有一个红点（她的心，晚一拍到）
-    "bwr": dict(bg=(0.012, 0.012, 0.012), sea=_G, ring=_G, fly=_G, body=_G, heart=tuple(S.RED * 1.05)),
+    "bwr": dict(bg=(0.012, 0.012, 0.012), sea=_G, ring=_G, fly=_G, fresh=_G, body=_G, heart=tuple(S.RED * 1.05)),
     # ② 酸：海是很暗的冷灰；残响（被吸起来的、被拍点推起来的水）是酸绿 = 外来的东西；一到她身上就褪成白 = 被吸收了。
     #    心 = 酸黄（同一色族里最亮的那一个）。参考图本身就是灰 + 荧光绿，这里绿只给「正在发生的」。
-    "acid": dict(bg=(0.008, 0.010, 0.009), sea=(0.50, 0.56, 0.58), ring=(0.62, 1.0, 0.10), fly=(0.70, 1.0, 0.16),
+    "acid": dict(bg=(0.008, 0.010, 0.009), sea=(0.50, 0.56, 0.58), ring=(0.62, 1.0, 0.10), fly=(0.70, 1.0, 0.16), fresh=(0.70, 1.0, 0.16),
                  body=(0.96, 0.97, 0.93), heart=(1.0, 0.95, 0.12)),
 }
 
@@ -277,6 +286,8 @@ class CamPath:
 
     def pose(self, t):
         pos = self.a + (self.b - self.a) * (self.s(t) / self.dist)
+        if getattr(self, "clear_fn", None) is not None:          # 贴着浪飞：离脚下（平滑过的）水面至少 clear 米，像躲浪的无人机
+            pos = pos.copy(); pos[1] = max(pos[1], self.clear_fn(pos))
         # 看向点带一点滞后：看的是「它 lag 秒前该看的方向」与目标的混合 → 进来时视线略落后于运动
         tgt = self.look + np.array([0.0, 0.0, 0.0])
         lagpos = self.a + (self.b - self.a) * (self.s(max(t - self.lag, -self.lag)) / self.dist)
@@ -383,8 +394,10 @@ class Sea:
         self.center = np.array([cen[0], 0.0, cen[1]]); self.src_rad = float(rad * p["R_src"])
         # --- 释放日程（感官层起音）
         self.sched = self.schedule(sense, nb, rng)
+        if p["plumes"] and nb:
+            self.assign_plumes(rng)
         self.N_total = n + nb
-        self.font = ImageFont.truetype(S.FONT, max(12, int(15 * H / 1080)))
+        self.font = ImageFont.truetype(S.FONT, max(14, int(20 * H / 1080)))
         log(f"  场景：海 {n:,} 点 + 她 {nb:,} 点（线距 {self.binfo['line_spacing_m']:.2f} m）  {time.time() - t_w:.1f}s")
 
     def _dist_to_path(self, x, z):
@@ -453,9 +466,76 @@ class Sea:
         return dict(events=[(round(o, 3), round(s, 3), int(c)) for (o, s), c in zip(evs, counts)],
                     n_pre=n_pre, n_end=n_end, n_trickle=int(n_trk), red_hit=red_hit, red_arrive=red_arrive)
 
+    def assign_plumes(self, rng):
+        """v3：每个起音从海面上「一个地方」拽起一束水（不再从她脚下均匀地吸）。
+        束的根 = 绕她一圈、按黄金角错开的位置（避开镜头和她之间那一侧，束才看得见），距离 plume_dist·[0.7, 1.3]；
+        这一拍放出的点的源 = 根 + 高斯（半径随威胁变大）；细流归最近一个起音的束（束不会一下断掉）。
+        同一束里按 plume_stagger 秒依次离水 → 一根柱子升起来，而不是一下全炸开。"""
+        p = self.p
+        evs = self.events
+        if not evs:
+            self.plume_c = None
+            return
+        cam_dir = np.arctan2(self.cam.b[2] - self.center[2], self.cam.b[0] - self.center[0])
+        ga = np.pi * (3 - np.sqrt(5))
+        cs = []; th = cam_dir + np.pi / 2
+        for k, (o, sk) in enumerate(evs):
+            for _ in range(20):
+                th += ga
+                dang = np.angle(np.exp(1j * (th - cam_dir)))
+                if abs(dang) > np.deg2rad(55):                     # 不在镜头和她之间
+                    break
+            d = p["plume_dist"] * (0.7 + 0.6 * rng.random())
+            cs.append((self.center[0] + d * np.cos(th), self.center[2] + d * np.sin(th)))
+        cs = np.asarray(cs)
+        self.plume_c = cs
+        ev_t = np.array([o for o, _ in evs]); ev_s = np.array([sk for _, sk in evs])
+        # 每一拍吞的是她身上「朝着那束」的一块（不是整条横带）→ 束从一个根收到一小片身体 = 一根绳，不是一面扇
+        # 释放时刻的多重集不变（每拍放多少点不变），只是换成哪些点；仍带一点高度项（下面的先长）
+        fin0 = np.nonzero(np.isfinite(self.rt) & (np.arange(len(self.rt)) != self.red))[0]
+        times = self.rt[fin0].copy()
+        kk = np.clip(np.searchsorted(ev_t, times + 0.01, side="right") - 1, 0, len(evs) - 1)
+        isb = np.abs(times - ev_t[kk]) < 0.2
+        hgt = self.BL[:, 1]; hn = (hgt - hgt.min()) / (np.ptp(hgt) + 1e-9)
+        rel = self.BL[:, [0, 2]] - self.center[[0, 2]]
+        reln = rel / (np.linalg.norm(rel, axis=1, keepdims=True) + 1e-9)
+        pool = np.ones(len(self.rt), bool); pool[~np.isfinite(self.rt)] = False
+        if self.red >= 0:
+            pool[self.red] = False
+        new_rt = self.rt.copy()
+        for k in range(len(evs)):
+            sel_t = times[isb & (kk == k)]
+            if not len(sel_t):
+                continue
+            dirk = cs[k] - self.center[[0, 2]]; dirk /= np.linalg.norm(dirk) + 1e-9
+            cand = np.nonzero(pool)[0]
+            score = -(reln[cand] @ dirk) + p["plume_h"] * hn[cand] + 0.15 * rng.standard_normal(len(cand))
+            pick = cand[np.argpartition(score, min(len(sel_t), len(cand)) - 1)[:len(sel_t)]]
+            new_rt[pick] = np.sort(sel_t)[:len(pick)]
+            pool[pick] = False
+        rest = np.nonzero(pool)[0]                                # 细流：剩下的点按原来的（高度）顺序拿剩下的时刻
+        tr = np.sort(times[~isb])
+        rest = rest[np.argsort(hn[rest])][:len(tr)]
+        new_rt[rest] = tr[:len(rest)]
+        self.rt = new_rt
+        fin = np.nonzero(np.isfinite(self.rt))[0]
+        k = np.searchsorted(ev_t, self.rt[fin] + 0.01, side="right") - 1
+        k = np.clip(k, 0, len(evs) - 1)
+        rad = p["plume_r"] * (0.5 + ev_s[k])
+        self.ax[fin] = cs[k, 0] + rad * rng.standard_normal(len(fin))
+        self.az[fin] = cs[k, 1] + rad * rng.standard_normal(len(fin))
+        burst = np.abs(self.rt[fin] - ev_t[k]) < 0.2
+        bi = fin[burst & (fin != self.red)]
+        kb = k[burst & (fin != self.red)]
+        self.rt[bi] = ev_t[kb] + p["plume_stagger"] * rng.random(len(bi)) ** 1.5
+        self.sched["plumes"] = [dict(t=round(float(o), 3), threat=round(float(sk), 3), root=[round(float(c[0]), 1), round(float(c[1]), 1)])
+                                for (o, sk), c in zip(evs, cs)]
+
     # ---------- 水面高度 = FFT 海 + 所有已触发的环形波
     def ring_centers(self):
         """每个起音的环形波中心：默认都在她脚下；ring_scatter > 0 时散在半径内（「四周全是别的声音」：每个残响冒出来的地方）"""
+        if not hasattr(self, "_rc") and getattr(self, "plume_c", None) is not None:
+            self._rc = [tuple(c) for c in self.plume_c]          # 束的根 = 起音打在水上的地方
         if not hasattr(self, "_rc"):
             r = np.random.default_rng(5)
             sc = self.p["ring_scatter"]
@@ -543,6 +623,13 @@ class Sea:
         K = int(p["K"])
         acc = np.zeros((H, W))
         sh = p["shutter"] / FPS
+        if p["cam_clear"] > 0:
+            hF = F["h"]; Lo = self.ocean.L
+            off = np.array([[0, 0], [12, 0], [-12, 0], [0, 12], [0, -12], [8, 8], [-8, -8], [8, -8], [-8, 8]], float)
+
+            def clear_fn(pos):                                   # 镜头脚下 ±12 m 的平均水面 + 余量
+                return float(sample_periodic(hF, Lo, pos[0] + off[:, 0], pos[2] + off[:, 1]).max()) + p["cam_clear"]
+            self.cam.clear_fn = clear_fn
         pose_c = self.cam.pose(tl)
         # 深度缓冲：她（实心采样，在水面以上的部分）+ 海自己
         Xd, Yd, Zd = project(self.BD, pose_c, W, H, self.cam.hfov)
@@ -578,7 +665,7 @@ class Sea:
             shade = np.where(arrived, 0.18 + 0.72 * lam + 0.5 * rim, 1.0)
             w_b = p["w_body"] * shade * np.where(arrived, 1.0, w_fly) * fog(Zb) * vis_b
         # 分层累积（颜色 = 状态，见 PALETTES）：sea 海 / ring 被环形波推起来的那部分海 / body 已到达 / fly 飞行中 + 拖尾
-        L = {k: np.zeros((H, W)) for k in ("sea", "ring", "body", "fly")}
+        L = {k: np.zeros((H, W)) for k in ("sea", "ring", "body", "fly", "fresh")}
         # 环形波占比：这个海点此刻的高度里有多少来自起音（|η_ring| / 0.3 A），颜色就有多少「声音」
         eta_r = np.abs(self.ring_height(np.concatenate([self.sx, self.ax[src_vis]]), np.concatenate([self.sz, self.az[src_vis]]), t))
         rfrac = np.clip(eta_r / (0.3 * p["ring_A"] + 1e-9), 0, 1)
@@ -587,7 +674,11 @@ class Sea:
                 w_b = np.where(idx == self.red, 0, w_b)
             # 她身上的点被前面的浪挡住也不画（浪峰比她脚高的时候）
             w_b = w_b * vis_by(zb_sea, Xb, Yb, Zb, cs, 0.02)
-            w_arr = w_b * arrived; w_fl = w_b * ~arrived
+            # 刚到达的点还带着一点「外来」的颜色，fresh_tau 秒内褪成她的颜色（结尾不再一身绿）
+            age = np.where(np.isfinite(u_rel[idx]), u_rel[idx] - ARRIVE / self.om[idx], 1e3)
+            fresh = np.where(arrived, np.exp(-np.clip(age, 0, 60) / p["fresh_tau"]), 0.0)
+            w_arr = w_b * arrived * (1 - fresh); w_fl = w_b * ~arrived
+            w_new = w_b * arrived * fresh
         # 切向短划长度（世界 m）；拖影来自 K 个子样本的相机位姿
         for j in range(K):
             sj = (j + 0.5) / K - 0.5
@@ -598,10 +689,13 @@ class Sea:
             if len(idx):
                 X, Y, _ = project(fly_at(sj * sh), pose_j, W, H, self.cam.hfov)
                 L["body"] += splat_bilinear(X, Y, w_arr / K, W, H)[0]
+                L["fresh"] += splat_bilinear(X, Y, w_new / K, W, H)[0]
                 L["fly"] += splat_bilinear(X, Y, w_fl / K, W, H)[0]
         # 飞行中的点：拖一条「走过的路」（真实的过去位置，越早越淡）→ 吸引力的方向和弧线读得出来
         if len(idx) and p["trail_s"] > 0:
             sub = np.nonzero(w_fl > 0)[0]
+            if p["trail_frac"] < 1:                                   # 只给一部分点拖尾 → 一根根分开的细丝，而不是一面雾
+                sub = sub[(idx[sub] * 2654435761 % 1000) < p["trail_frac"] * 1000]
             if len(sub):
                 M = int(p["trail_n"])
                 for m in range(1, M + 1):
@@ -626,7 +720,7 @@ class Sea:
         pal = PALETTES[palette]
         # 亮度按 960 宽校准、与分辨率无关：像素面积 ∝ 1/W² → 密度 ×(W/960)²；1920 时点画成 3×3（参考图的短划约 2–3 px 粗）
         r = int(W >= 1440)
-        Lb = {k: box_blur(v, r) * (W / 960.0) ** 2 for k, v in L.items()}
+        Lb = {k: box_blur(v, 0 if k == "fly" else r) * (W / 960.0) ** 2 for k, v in L.items()}   # 飞行的拖尾保持 1 px 细
         tot = sum(Lb.values()) + 1e-12
         lum = 1 - np.exp(-p["gain"] * 1.6 * tot)
         col = sum(Lb[k][..., None] * np.asarray(pal[k])[None, None] for k in Lb) / tot[..., None]
@@ -648,16 +742,16 @@ class Sea:
         return sample_periodic(F["h"], self.ocean.L, x, z) + self.ring_height(x, z, t)
 
     def hud(self, im, t, info):
+        """一行，左上（上方是大片黑，字清楚）；全是真数：计数守恒、海况、镜头速度"""
         if not self.p["hud"]:
             return
         d = ImageDraw.Draw(im)
         sea, fly, body = info["counts"]
         nb = len(self.rt)
-        lines = [f"t {t:7.2f}s   JONSWAP Hs {self.ocean.Hs:.1f} m  Tp {self.ocean.Tp:.1f} s   omega = sqrt(g k)   cam {info['cam_speed']:5.1f} m/s",
-                 f"SEA {sea:,}   IN FLIGHT {fly:,}   ASSIMILATED {body:,} / {nb:,}   SUM {sea + fly + body:,}"]
-        fs = self.font.size
-        for j, line in enumerate(lines):
-            d.text((int(18 * self.W / 1920), self.H - int(14 * self.H / 1080) - (fs + 3) * (len(lines) - j)), line, font=self.font, fill=(118, 126, 132))
+        line = (f"ASSIMILATED {body:,} / {nb:,}    IN FLIGHT {fly:,}    SEA {sea:,}    "
+                f"Hs {self.ocean.Hs:.0f} m  Tp {self.ocean.Tp:.0f} s    t {t:.2f}")
+        x0, y0 = int(28 * self.W / 1920), int(26 * self.H / 1080)
+        d.text((x0, y0), line, font=self.font, fill=(168, 174, 178))
 
 
 # ---------------------------------------------------------------- 出片
@@ -679,7 +773,7 @@ def contact_sheet(thumbs, path, cols=4, tw=480):
     for i, (im, lab) in enumerate(thumbs):
         x, y = (i % cols) * tw, (i // cols) * th
         sheet.paste(im.resize((tw, th), Image.LANCZOS), (x, y))
-        d.text((x + 6, y + 4), lab, font=f, fill=(220, 220, 220))
+        d.text((x + 6, y + th - 20), lab, font=f, fill=(220, 220, 220))   # 标签放底部：顶上是 HUD
     sheet.save(path, quality=90)
 
 

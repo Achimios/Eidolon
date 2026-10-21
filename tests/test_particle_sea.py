@@ -145,6 +145,30 @@ class TestScene(unittest.TestCase):
         self.assertAlmostEqual(s.red_arrive, dbs[0], places=6)
 
 
+class TestPlumes(unittest.TestCase):
+    """v3 的束：只换「哪些点在哪一拍走」，不改每一拍走多少；质量仍守恒；同一拍的源聚在一个根上"""
+
+    def test_plumes(self):
+        p = dict(P.BASE)
+        p.update(N_sea=4000, n_surf=40000, n_depth=4000, grid=64, hud=0, K=2, plumes=1, plume_stagger=0.0)
+        a = P.Sea(dict(p, plumes=0), 128.36, 134.78, P.load_sense(), W=160, H=90, log=lambda *x: None)
+        b = P.Sea(p, 128.36, 134.78, P.load_sense(), W=160, H=90, log=lambda *x: None)
+        self.assertEqual(int(np.isfinite(a.rt).sum()), int(np.isfinite(b.rt).sum()))
+        ev_t = np.array([o for o, _ in b.events])
+        ha = np.bincount(np.searchsorted(ev_t, a.rt[np.isfinite(a.rt)] + 0.01) , minlength=len(ev_t) + 1)
+        hb = np.bincount(np.searchsorted(ev_t, b.rt[np.isfinite(b.rt)] + 0.01), minlength=len(ev_t) + 1)
+        np.testing.assert_allclose(hb, ha, atol=0.03 * ha.max())    # 每一拍放多少点基本不变（v1/v2 的批内抖动 ~30 ms 偶尔跨到下一拍）
+        self.assertEqual(len(b.ring_centers()), len(b.events))
+        for t in (129.0, 132.8, 134.7):
+            L, info = b.frame(t)
+            self.assertEqual(sum(info["counts"]), b.N_total)
+        # 同一拍放出的点的源离它的根近（束的根是一个地方）
+        k = int(np.argmax([s for _, s in b.events])); o = b.events[k][0]
+        sel = np.nonzero(np.abs(b.rt - o) < 0.05)[0]
+        d = np.hypot(b.ax[sel] - b.plume_c[k][0], b.az[sel] - b.plume_c[k][1])
+        self.assertLess(np.median(d), 4 * p["plume_r"])
+
+
 class TestRender(unittest.TestCase):
     def test_splat_conserves(self):
         r = np.random.default_rng(0)
