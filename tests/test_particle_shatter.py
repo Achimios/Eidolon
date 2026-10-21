@@ -149,6 +149,36 @@ class TestTimeline(unittest.TestCase):
         for db in (53.12, 54.72, 56.32):
             self.assertTrue(any(abs(c - db) < 1e-9 for c in cuts))
 
+    def test_src_index_real(self):
+        """v5c 原速 + 定格：第 i 帧 = 源第 i 帧，放完停在末帧（= face_glitch v4 的 live 121 + held 33）"""
+        n = 121
+        ii = [P.src_index(45.12 + i / 24, 45.12, 51.52, n, "real") for i in range(154)]
+        self.assertEqual(ii[:121], list(range(121)))
+        self.assertTrue(all(x == n - 1 for x in ii[121:]))
+        self.assertEqual(P.src_index(51.52, 45.12, 51.52, n, "real"), n - 1)
+
+    def test_shots_v5c_downbeats_no_overlap(self):
+        """v5c：首尾相接不重叠，切点 = 下拍 53.12 / 54.72 / 56.32，收在 57.94；脸只在 冲击 + 余波_4 里"""
+        sh = P.SHOTS_V5C
+        self.assertAlmostEqual(sh[0]["t0"], 51.52); self.assertAlmostEqual(sh[-1]["t1"], 57.94)
+        for a, b in zip(sh, sh[1:]):
+            self.assertAlmostEqual(a["t1"], b["t0"])
+        cuts = [s["t0"] for s in sh]
+        for db in (53.12, 54.72, 56.32):
+            self.assertTrue(any(abs(c - db) < 1e-9 for c in cuts))
+        self.assertEqual([s["name"] for s in sh if not s.get("hide_held")], ["冲击", "余波_4"])
+
+    def test_streak_echo_drags_left_and_decays(self):
+        img = np.zeros((4, 50, 3)); img[:, 40] = 1.0
+        e = P.streak_echo(img, 10, -1, np.random.default_rng(0))
+        self.assertTrue((e[:, 41:] == 0).all())                         # 不往右拖
+        self.assertTrue((e[:, 30] < e[:, 39]).all() and (e[:, 30] > 0).all())
+
+    def test_hblur_keeps_rows(self):
+        img = np.zeros((5, 30)); img[2, 15] = 1.0
+        b = P.hblur(img, 3)
+        self.assertAlmostEqual(b[2].sum(), 1.0); self.assertEqual(b[[0, 1, 3, 4]].sum(), 0)
+
     def test_no_overwrite(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x.mp4"; p.write_bytes(b"0")
