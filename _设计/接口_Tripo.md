@@ -92,3 +92,8 @@
 - `text_to_model`，用 draft 预设（H3.1、无贴图、10k 面）：**10 积分，131 秒**。产出 glb 300KB + 预览 webp + sidecar json → `Projekt_Visual/MV_Cant_Kill_Us/3D/测试_人台.glb`。建任务 → 轮询 → 下载这条主路已验证。
 - 官方 CLI `tripo-cli` 0.7.1 已全局安装（npm）。key 用环境变量 `TRIPO_API_KEY` 现读 creds 传进去，`TRIPO_REGION=ov`，`TRIPO_ANALYTICS_ENABLED=0`；`tripo doctor` 全过。CLI 适合手动试 / `--dry-run` 看计划；流水线用 `src/tripo.py`。
 - CLI 的经验：面数预算 ≤2 万的低模用 `tripo-p1`，其他默认 `tripo-v3.1`；`tripo-p2` 是预览版，四边面要 `-p quad=true`（输出 FBX）。`mesh decimate --model v3.0 --smart-uv` 可以重拓扑 + 展 UV。
+
+## 👤2026-10-21：先灰模，确认再上材质
+- 下次生成先出**灰模**（`texture=False, pbr=False`，几何精度照样拉满 `geometry_quality=detailed`），用户确认几何合格后再用 `tripo.texture(task_id, ...)` 补材质（API 有独立的贴图任务）；或者叫用户去网页端手动做。
+- 「她」模型没有彩色贴图是因为参考图本身是灰色不透明雕塑（全息体没法三维重建）；全息效果在合成里做。
+- 2026-10-21 实测：4 个 final 预设模型各 60 积分、每个 64–69 MB、约 190–200 万面（四维切片前要减面）。
