@@ -30,7 +30,7 @@
   bwr（黑白红，「此刻」整个是红）/ acid（紫黑 + 荧光酸橙）。版本号决定行为（旧版本号复现旧参数，见 build / main）。
 
 用法（Python 用 4_Eidolon/.venv）：
-  python tools/geo_symbols.py countdown --ver v7 --scale 1.5  # 憋住段 192.36–198.76 的拍数倒数（1080p 信息版；默认提前 1 拍起）
+  python tools/geo_symbols.py countdown --ver v8 --scale 1.5  # 憋住段 192.36–198.76 的拍数倒数（1080p 信息版；默认提前 1 拍起）
   python tools/geo_symbols.py matrix --ver v3                 # 吸收段 128.36–141.14 的字阵吸收
   python tools/geo_symbols.py sieve --ver v6 --scale 1.5 --palette bwr   # 独立版：筛（1080p 信息版，输出到 MotionDesign/）
   python tools/geo_symbols.py countdown --still 195.0         # 只出一帧 png（看构图）
@@ -411,10 +411,11 @@ class Countdown:
     """憋住段：从 192.36（乐句起点）到 198.76（下一乐句 = 冲顶）共 16 拍。第 i 拍出生的数字 = 离冲顶还剩几拍（16 − i），真数。"""
     name = "倒数"
 
-    def __init__(self, sn, t_release=198.76, n=16, scale=1.0, t_end=None, wt=0.62, delay=2.0, spin=45.0, guide=True, trim=True, v6=False, v7=False):
+    def __init__(self, sn, t_release=198.76, n=16, scale=1.0, t_end=None, wt=0.62, delay=2.0, spin=45.0, guide=True, trim=True, v6=False, v7=False, v8=False):
         self.wt, self.delay, self.spin, self.guide = wt, delay, spin, guide     # v1/v2：wt 1.0、delay 0、spin 90、无引导线
-        self.v6 = v6 or v7                                                  # v6：信息版面（👤「I just love graphic with info」）
-        self.v7 = v7                                                        # v7：v6 + 两位数笔画错开压到 1 帧（v6 的 16–10 前 3 帧只画了一半）
+        self.v6 = v6 or v7 or v8                                                  # v6：信息版面（👤「I just love graphic with info」）
+        self.v8 = v8
+        self.v7 = v7 or v8                                                  # v7：v6 + 两位数笔画错开压到 1 帧（v6 的 16–10 前 3 帧只画了一半）
         self.trim = trim                                                    # v5 起：外缘端点随笔宽收
         beats = np.array(sn["events"]["beats"])
         k1 = int(np.argmin(np.abs(beats - t_release)))
@@ -643,8 +644,11 @@ class Countdown:
                 cv.text(lx, ly, txt, T2, GREY if kk == 2 else MID, anchor="lm")
                 xk = C[0] - (3 - kk) * 4 * s
                 cv.line([(lx - 6 * s, ly), (xk, ly), (xk, C[1] + r)], DIM, 1.0)
-            cv.text(lx, C[1] + radii[3] + 30 * s + 4 * 17 * s + 6 * s,
-                    f"LOG SPIRAL  R {sp.R:.2f}/BEAT  PHI {np.degrees(sp.phi):.0f} DEG", T4, DIM, anchor="lm")
+            if self.v8:                                    # v8：挪到左下角（v6/v7 在这里和右栏的 SPECTRUM 标签撞字）
+                cv.text(46 * s, self.h - 40 * s, f"LOG SPIRAL  R {sp.R:.2f}/BEAT  PHI {np.degrees(sp.phi):.0f} DEG   CAM u {u:6.3f}", T4, DIM)
+            else:
+                cv.text(lx, C[1] + radii[3] + 30 * s + 4 * 17 * s + 6 * s,
+                        f"LOG SPIRAL  R {sp.R:.2f}/BEAT  PHI {np.degrees(sp.phi):.0f} DEG", T4, DIM, anchor="lm")
         else:
             cv.dot(C[0], C[1], 4.0 * s, RED)
         info.update(beat_phase=round(pb, 4), bar_phase=round(pd, 4), bar_beat=bar_beat, phrase=kp + 1,
@@ -1321,7 +1325,7 @@ def render(scene, t0, t1, out, ss=3, audio=True, tmp=None, sheet_n=24):
 def build(kind, sn, a):
     if kind == "countdown":
         old = dict(wt=1.0, delay=0.0, spin=90.0, guide=False, trim=False) if a.ver in ("v1", "v2") else dict(trim=False) if a.ver in ("v3", "v4") \
-            else {} if a.ver == "v5" else dict(v6=True) if a.ver == "v6" else dict(v7=True)
+            else {} if a.ver == "v5" else dict(v6=True) if a.ver == "v6" else dict(v7=True) if a.ver == "v7" else dict(v8=True)
         sc = Countdown(sn, t_release=a.release, scale=a.scale, **old)
         return sc
     st = {"v0": 1, "v1": 1, "v2": 2}.get(a.ver, 3)
