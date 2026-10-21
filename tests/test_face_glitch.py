@@ -219,6 +219,51 @@ class TestStages(unittest.TestCase):
             self.assertGreaterEqual(k, prev)
             prev = k
 
+    def test_wipe_even_bright_and_never_darker(self):
+        """抹除 v2：任何 u 都不压暗（逐像素 ≥ 原图）；u = 0 恒等；u = 1 每个像素 ≥ 该行最亮像素 × 0.75 × exp(−W/6000)"""
+        img = rand_img(48, 80, 14)
+        img[:, -10:] = 0                                    # 右边一条黑背景：前沿走进去也不能变黑
+        xr = F.leftmost(disk_mask(48, 80, 50, 24, 15))
+        np.testing.assert_array_equal(F.wipe_even(img, xr, 0.0), img)
+        for u in (0.3, 0.7, 1.0):
+            self.assertTrue(np.all(F.wipe_even(img, xr, u) >= img - 1e-7))
+        out = F.wipe_even(img, xr, 1.0)
+        L, L0 = F.lum(out), F.lum(img)
+        x0 = np.maximum(xr, 0)
+        rowmax = np.array([L0[y, x0[y]:].max() for y in range(48)])[:, None]   # 前沿扫过的路上最亮
+        self.assertTrue(np.all(L >= rowmax * 0.75 * np.exp(-80 / 6000) - 1e-6))
+
+    def test_soft_knee(self):
+        x = np.linspace(0, 5, 2001)
+        y = F.soft_knee(x)
+        np.testing.assert_array_equal(y[x <= 0.8], x[x <= 0.8])
+        self.assertTrue(np.all(np.diff(y) > 0))             # 单调
+        self.assertTrue(np.all(y < 1))                      # 永不到死白
+        dy = np.diff(y) / np.diff(x)
+        i = np.searchsorted(x, 0.8)
+        self.assertAlmostEqual(dy[i - 1], dy[i + 1], delta=0.05)   # 在 knee 处导数连续（=1）
+
+    def test_soft_exposure_no_hard_white_block(self):
+        """横带错位后的矩形遮罩：硬截断会出成片的 1.0；软化后没有任何像素到 1.0，且竖直方向不再有一步到位的硬边"""
+        img = np.full((100, 60, 3), 0.6, np.float32)
+        m = np.zeros((100, 60), np.float32)
+        m[80:, 10:50] = 1                                    # 底部一块矩形（横带移出来的）
+        hard = F.exposure_clip(img, m, 0.5, 3.0, 0.25, soft=0.0)
+        soft = F.exposure_clip(img, m, 0.5, 3.0, 0.25, soft=6.0)
+        self.assertTrue((hard >= 1.0).any())
+        self.assertFalse((soft >= 1.0).any())
+        step_hard = np.abs(np.diff(hard[:, 30, 0])).max()
+        step_soft = np.abs(np.diff(soft[:, 30, 0])).max()
+        self.assertLess(step_soft, 0.5 * step_hard)
+
+    def test_red_gate_zero_no_red(self):
+        """红边门控 red_k = 0 → 本片配色里没有红：每个像素三通道之比 = 冷灰"""
+        img, m = rand_img(), disk_mask()
+        img[..., 0] = np.clip(img[..., 0] + 0.5, 0, 1)      # 故意很红
+        out = F.palette_ours(img, m, red_k=0.0)
+        g = np.asarray(F.S.GREY, np.float32) / max(F.S.GREY)
+        np.testing.assert_allclose(out / g, np.repeat((out / g)[..., :1], 3, -1), atol=1e-5)
+
     def test_pipeline_runs_deterministic(self):
         img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
         p = F.Params(place_dx=10, n_dust=50, grid=8)

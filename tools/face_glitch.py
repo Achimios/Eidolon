@@ -335,13 +335,31 @@ def posterize(img, levels=6):
     return np.round(np.clip(img, 0, 1) * (levels - 1)) / (levels - 1)
 
 
-def exposure_clip(img, mask, y0=0.78, gain=3.0, add=0.25):
-    """y > y0·H 的 mask 内亮度乘 1 + gain·s(y)（s 从 0 平滑到 1），再截到 1 → 颈肩过曝成白"""
+def soft_knee(x, knee=0.8):
+    """高光软肩：x ≤ knee 不变；之上 knee + (1−knee)(1 − e^(−(x−knee)/(1−knee)))，连续可导、永远 < 1 → 不出死白平块"""
+    k = 1 - knee
+    return np.where(x <= knee, x, knee + k * (1 - np.exp(-(x - knee) / k)))
+
+
+def exposure_clip(img, mask, y0=0.78, gain=3.0, add=0.25, soft=0.0):
+    """y > y0·H 的 mask 内亮度乘 1 + gain·s(y)（s 从 0 平滑到 1），再截到 1 → 颈肩过曝成白。
+    soft > 0（v4c，👤 修硬边白块）：遮罩先高斯模糊 soft 像素（横带错开留下的水平硬边变软），再过 soft_knee 而不是硬截断"""
     H = img.shape[0]
+    if soft > 0:
+        from PIL import ImageFilter
+        mask = np.asarray(Image.fromarray((np.clip(mask, 0, 1) * 255).astype(np.uint8)).filter(
+            ImageFilter.GaussianBlur(soft)), np.float32) / 255
     s = np.clip((np.arange(H) / H - y0) / max(1e-6, 1 - y0), 0, 1)
     s = s * s * (3 - 2 * s)
     k = 1 + gain * s[:, None, None] * mask[..., None]
-    return np.clip(img * k + add * s[:, None, None] * mask[..., None], 0, 1)
+    if soft > 0:
+        # 软化版：增益减半、加亮项减半、软肩从 0.7 起 —— 过曝区留住纹理，不出平的白块（硬边多来自横带错位的内容本身，
+        # 把它压成平白才显眼）
+        k = 1 + 0.5 * gain * s[:, None, None] * mask[..., None]
+        v = img * k + 0.5 * add * s[:, None, None] * mask[..., None]
+        return np.clip(soft_knee(v, 0.7), 0, 1)
+    v = img * k + add * s[:, None, None] * mask[..., None]
+    return np.clip(v, 0, 1)
 
 
 def dust(img, mask, rng, n=900, n_scratch=6, strength=0.55):
@@ -380,7 +398,7 @@ def palette_orig(img, sat=1.7, gamma=0.9):
     return np.clip(saturate(img, sat), 0, 1) ** gamma
 
 
-def palette_ours(img, mask, ring=26, red_gain=3.0, grey=S.GREY, red=S.RED, side=0.25):
+def palette_ours(img, mask, ring=26, red_gain=3.0, grey=S.GREY, red=S.RED, side=0.25, red_k=1.0):
     """冷灰白 + 一个红：红只在轮廓外缘一圈（mask 外 ring 像素宽）、外法向 n_x > side（背对拖影的那一侧，
     参考图的红边也只在外侧）、且该处 R 明显高于 G/B（= RGB 分离的红边）"""
     g = np.clip(lum(img), 0, 1) ** 0.95
@@ -390,7 +408,7 @@ def palette_ours(img, mask, ring=26, red_gain=3.0, grey=S.GREY, red=S.RED, side=
     outer = np.asarray(m8.filter(ImageFilter.MaxFilter(2 * ring + 1)), np.float32) / 255
     nx, _, _ = mask_normal(mask, blur=15)
     band = outer * (1 - (mask > 0.5)) * (nx > side)
-    a = np.clip((img[..., 0] - np.maximum(img[..., 1], img[..., 2])) * red_gain, 0, 1) * band
+    a = np.clip((img[..., 0] - np.maximum(img[..., 1], img[..., 2])) * red_gain, 0, 1) * band * red_k
     return base * (1 - a[..., None]) + np.asarray(red, np.float32)[None, None] * a[..., None]
 
 
@@ -550,6 +568,7 @@ class Params:
     n_dust: int = 900
     n_scratch: int = 6
     clip_add: float = 0.25
+    clip_soft: float = 0.0           # > 0：过曝用模糊遮罩 + 软肩（v4c 去硬边白块）
     sort_inset: int = 12
     bar_w: int = 10
     waterfall: bool = False          # True → 2' 代替 2
@@ -628,7 +647,7 @@ def run(img, mask, p: Params, hist: BoundaryHistory = None, stages=False):
     st.append((f"6  macroblocks  grid {p.grid}  BGR bars {p.n_triplets}+{p.n_dashes}  DC blocks {p.n_blocks}", x))
     x, ops = channel_ops(x, m, bands, rng, p.p_swap, p.p_invert)
     x = posterize(x, p.levels)
-    x = exposure_clip(x, m, p.clip_y0, p.clip_gain, p.clip_add)
+    x = exposure_clip(x, m, p.clip_y0, p.clip_gain, p.clip_add, p.clip_soft)
     x = dust(x, m, rng, p.n_dust, p.n_scratch)
     if p.bar_w > 0:
         x = edge_bar(x, p.bar_w)
@@ -710,6 +729,44 @@ def wipe(img, xr, u, seed=0, L=260.0, group=3.0, max_delay=0.45, dim=0.85):
         left = xs < c
         out[y, left] = lead[None, :] * np.exp(-(c - xs[left]) / L)[:, None]
     return out * (1 - dim * u * u)
+
+
+def wipe_even(img, xr, u, seed=0, max_delay=0.12, group=3.0, L0=200.0, L1=6000.0, win=24, tex=0.25):
+    """全面抹除 v2（👤：不是变黑，是效果开到最大、把整张画面更均匀地扫成一片亮的横向拖痕；不压暗、前沿不出画）。
+    每行前沿 c_y 从 x0 = max(x_r, 0) 扫到 W − 1（停在画面最右列，不出画）；行组延迟只有 U(0, max_delay) → 比 v1 齐。
+    lead_y(c) = 前沿扫过的路上（x0 … c）最亮的那个像素（亮度累计最大值，「锁存」）→ 前沿走到背景里也不会变黑。
+    前沿左边：max(原图, lead·profile)，profile = exp(−(c − x)/L(u))·(1 − tex·n(x))，L(u) 从 L0 长到 L1（u → 1 时几乎不衰减），
+    n = 每行一条粗粒度噪声（win 像素一格）给拖痕一点纹理。前沿右边不动。不做全局压暗。
+    u = 0 → 恒等；u = 1 → 每行 ≥ 该行最亮像素 × (1 − tex)（整张是亮拖痕，脸不在了）"""
+    H, W, _ = img.shape
+    rng = np.random.default_rng(seed)
+    delay = np.zeros(H)
+    noise = np.zeros((H, W), np.float32)
+    nseg = W // win + 2
+    y = 0
+    while y < H:
+        h = int(rng.geometric(1.0 / max(group, 1.0)))
+        delay[y:y + h] = rng.uniform(0, max_delay)
+        noise[y:y + h] = rng.random(nseg).astype(np.float32)[np.arange(W) // win]
+        y += h
+    out = img.copy()
+    Lum = lum(img)
+    xs = np.arange(W)
+    Lu = L0 * (L1 / L0) ** u
+    for y in range(H):
+        v = np.clip((u - delay[y]) / max(1e-9, 1 - delay[y]), 0, 1)
+        if v <= 0:
+            continue
+        v = v * v * (3 - 2 * v)
+        x0 = min(max(int(xr[y]), 0), W - 1)
+        c = int(round(x0 + (W - 1 - x0) * v))
+        seg = Lum[y, x0:c + 1]
+        best = x0 + int(np.argmax(seg))                    # 路上最亮（锁存）
+        lead = img[y, best]
+        left = xs <= c
+        prof = np.exp(-(c - xs[left]) / Lu) * (1 - tex * noise[y, left])
+        out[y, left] = np.maximum(out[y, left], lead[None, :] * prof[:, None])
+    return out
 
 
 def scale_params(p: Params, g):
@@ -1095,7 +1152,7 @@ def cmd_clip(a):
     hist = BoundaryHistory()
     off = a.sense_offset
     side = {"source": src.name, "src_t0": a.src_t0, "fit": a.fit, "extend_to": a.extend_to, "live_frames": n_live, "held_frames": n - n_live, "retime": a.retime if a.fit else None, "play_start": a.start, "dur": dur,
-            "sense_offset": off, "palettes": pals, "waterfall": a.waterfall, "place_dx": a.place_dx,
+            "sense_offset": off, "palettes": pals, "red_gate": a.red_gate, "soft_clip": a.soft_clip, "waterfall": a.waterfall, "place_dx": a.place_dx,
             "mapping": {"threat": "n_bands = 4 + 22*threat; max_dx = 16 + 300*threat; p_shift = 0.25 + 0.5*threat",
                         "tension": "split d = 2 + 16*tension (R=+d, G=-d/2, B=-d, along normal)",
                         "hunger": "smear L = 40 + 520*hunger px",
@@ -1114,6 +1171,8 @@ def cmd_clip(a):
     else:
         gate = np.ones(n)
     seed, t0 = 1000, time.time()
+    outdir = Path(a.outdir) if a.outdir else S.MV / "样片"
+    outdir.mkdir(parents=True, exist_ok=True)
     n_wipe = int(round(a.wipe * FPS)) if a.wipe else 0
     n_tail = int(round(a.tail_contact * FPS)) if a.tail_contact else 0
     tail = []
@@ -1124,9 +1183,12 @@ def cmd_clip(a):
         assert len(reuse) >= n - n_wipe, (len(reuse), n)
         side["reused_from"] = Path(a.reuse).name
     if n_wipe:
-        side["wipe"] = {"frames": n_wipe, "from_t": round(a.start + (n - n_wipe) / FPS, 3), "to_t": round(a.start + dur, 3),
-                        "law": "per-row sweep front x_r -> W+L (L=260), row-group delay U(0,0.45), smoothstep; "
-                               "left of front = lead pixel * exp(-(c-x)/L); brightness *(1-0.85u^2)"}
+        side["wipe"] = {"mode": a.wipe_mode, "frames": n_wipe, "from_t": round(a.start + (n - n_wipe) / FPS, 3), "to_t": round(a.start + dur, 3),
+                        "law": ("even: per-row front x_r -> W-1 (stays in frame), row-group delay U(0,0.12), smoothstep; "
+                                "lead = brightest pixel passed (latched); left of front = max(img, lead*exp(-(c-x)/L(u))*(1-0.25 noise)), "
+                                "L(u) = 200*(30)^u; no global dim") if a.wipe_mode == "even" else
+                               ("dark: per-row sweep front x_r -> W+L (L=260), row-group delay U(0,0.45), smoothstep; "
+                                "left of front = lead pixel * exp(-(c-x)/L); brightness *(1-0.85u^2)")}
     thumbs = {k: [] for k in pals}
     every = max(1, n // 16)
     for i, f in enumerate(frames):
@@ -1136,7 +1198,7 @@ def cmd_clip(a):
         if i % hold == 0 or any(abs(o - ts) < 0.5 / FPS for o in strong):
             seed += 1
         p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k],
-                              Params(seed=seed, waterfall=a.waterfall, place_dx=a.place_dx))
+                              Params(seed=seed, waterfall=a.waterfall, place_dx=a.place_dx, clip_soft=a.soft_clip))
         if cached is not None:
             mask, msrc = cached[i].astype(np.float32) / 255, "BiRefNet (cached)"
         elif i > 0 and f is frames[i - 1]:
@@ -1151,14 +1213,19 @@ def cmd_clip(a):
         out, m = run(f, mask, p, hist=hist)        # 门关着也跑（瀑布图历史要连续）；g 只缩强度，不和干净帧混
         uw = (i - (n - n_wipe) + 1) / n_wipe if (n_wipe and i >= n - n_wipe) else 0.0
         if uw > 0:
-            out = wipe(out, leftmost(m), uw, seed=a.wipe_seed)
+            out = (wipe_even if a.wipe_mode == "even" else wipe)(out, leftmost(m), uw, seed=a.wipe_seed)
         if reuse is not None and i < n - n_wipe - 1:      # 复用已有成片的这一帧（逐帧解码），只为了历史连续才跑管线
             pipes[pals[0]].stdin.write((reuse[i] * 255 + 0.5).astype(np.uint8).tobytes())
             tail.append((f"{ts + off:.2f}s  reused", to_im(reuse[i]))) if i >= n - n_tail else None
             side["frames"].append({"i": i, "t_play": round(ts + off, 3), "gate": round(gi, 3), "reused": True})
             continue
         for key in pals:
-            im = to_im(PALETTES[key][1](out, m, seed))
+            if key == "ours" and a.red_gate is not None:   # 👤 v4c：红边只在门控高时出现
+                rk = float(np.clip((gi - a.red_gate) / max(1e-6, 1 - a.red_gate), 0, 1))
+                rk = rk * rk * (3 - 2 * rk)
+                im = to_im(palette_ours(out, m, red_k=rk))
+            else:
+                im = to_im(PALETTES[key][1](out, m, seed))
             label(im, "", s=0.9, lines=[f"t = {ts + off:6.3f} s (play)   gate {gi:.2f}   threat {p.sense['threat']:.2f}  "
                                         f"tension {p.sense['tension']:.2f}  hunger {p.sense['hunger']:.2f}   "
                                         f"mask {msrc}   palette {key}"] + p.hud())
@@ -1182,15 +1249,15 @@ def cmd_clip(a):
         np.save(mcache, (np.stack(masks) * 255 + 0.5).astype(np.uint8))
     print(f"{n} 帧 × {len(pals)} 配色  {time.time() - t0:.1f}s")
     if a.envelope:
-        gp = outname(S.MV / "样片" / (name.replace("{pal}", "").replace("__", "_") + "_门控.png"))
+        gp = outname(outdir / (name.replace("{pal}", "").replace("__", "_") + "_门控.png"))
         gate_plot(gp, t_play, gate, th, np.array(on) + off, ginfo, np.array(sn["events"]["downbeats"]) + off)
         print("->", gp, ginfo["bursts"], ginfo["ramp_start"], ginfo["full_from"])
     for key in pals:
         if "{pal}" in name:                       # 名字里留了配色位置：…_{pal}_45.12-51.52
-            out = outname(S.MV / "样片" / (name.replace("{pal}", PALETTES[key][0]) + ".mp4"))
+            out = outname(outdir / (name.replace("{pal}", PALETTES[key][0]) + ".mp4"))
         else:
             suffix = f"_{PALETTES[key][0]}" if (len(pals) > 1 or a.name) else ""
-            out = outname(S.MV / "样片" / f"{name}{suffix}.mp4")
+            out = outname(outdir / f"{name}{suffix}.mp4")
         subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(vtmp[key]), "-ss", f"{a.start:.3f}",
                         "-t", f"{dur:.3f}", "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac",
                         "-b:a", "256k", "-t", f"{dur:.3f}", str(out)], check=True)
@@ -1239,6 +1306,12 @@ def main():
     s2.add_argument("--fit", type=float, default=None, help="把整段源视频变速到这么多秒（配合 --retime）")
     s2.add_argument("--wipe", type=float, default=0.0, help="最后几秒做全面抹除（在镜头里面，不加长）")
     s2.add_argument("--wipe-seed", type=int, default=0)
+    s2.add_argument("--red-gate", type=float, default=None,
+                    help="本片配色的红边强度 = smoothstep((g − 这个)/(1 − 这个))：只在门控高 / 收尾全开时有红（v4c 用 0.6）")
+    s2.add_argument("--soft-clip", type=float, default=0.0, help="过曝软化：遮罩模糊像素 + 软肩（v4c 用 12）")
+    s2.add_argument("--wipe-mode", default="even", choices=["even", "dark"],
+                    help="even = 👤 定义的全面抹除（满强度、均匀、亮拖痕，不压暗）；dark = 第一版（扫出画 + 压暗到黑）")
+    s2.add_argument("--outdir", default=None, help="样片输出目录（默认 作品/样片）")
     s2.add_argument("--reuse", default=None, help="已有成片：抹除之前的帧直接用它（逐帧解码），只重算抹除帧")
     s2.add_argument("--tail-contact", type=float, default=0.0, help="另出一张最后这么多秒的逐帧接触表")
     s2.add_argument("--extend-to", type=float, default=None,
