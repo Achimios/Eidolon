@@ -248,15 +248,17 @@ MESH_DEFAULT = MV / "3D" / "测试_人台.glb"
 MESH_B = 1.12        # 体素网格覆盖 [-B, B]^3；网格本身归一化进 [-1, 1]^3
 
 
-def _mesh_load(path, max_faces=40000):
-    """GLB → (V, F)：bbox 居中，侧向（T-pose 手臂）轴转到 x（glTF y 朝上），最长边缩放到 2"""
+def _mesh_load(path, max_faces=40000, lateral="auto"):
+    """GLB → (V, F)：bbox 居中，侧向（T-pose 手臂）轴转到 x（glTF y 朝上），最长边缩放到 2。
+    lateral：glTF 里哪根轴是侧向。auto = x、z 里更宽的那根（站立人形对；蜷缩姿势前后比左右厚，会猜错 →
+    spin 的 sqrt(x² + w²) 只用到前半身再镜像。blender_pose 导出的网格侧向恒为 z：传 "z"）"""
     import trimesh
     m = trimesh.load(str(path), force="mesh")
     V = np.asarray(m.vertices, np.float64)
     lo, hi = V.min(0), V.max(0)
     V = V - (lo + hi) / 2
     ext = hi - lo
-    if ext[2] > ext[0]:                      # 绕 y 转 −90°：(x, y, z) → (−z, y, x)，行列式 +1；Tripo 的正面（+x）转到 +z，朝向默认相机
+    if lateral == "z" or (lateral == "auto" and ext[2] > ext[0]):   # 绕 y 转 −90°：(x, y, z) → (−z, y, x)，行列式 +1；Tripo 的正面（+x）转到 +z，朝向默认相机
         V = np.stack([-V[:, 2], V[:, 1], V[:, 0]], 1)
     V *= 2.0 / ext.max()
     Fc = np.asarray(m.faces, np.int64)
@@ -283,22 +285,11 @@ def _cluster_decimate(V, Fc, target):
     return V2, F2
 
 
-def mesh_sdf_volume(V, Fc, n=128, B=MESH_B):
-    """>v<🧊四维切片-网格SDF-n³ 网格上的有符号距离：|d| = 暴力点–三角形距离（GPU 分块），
-    符号 = 广义缠绕数 Σ立体角/4π > 0.5（对破洞 / 非水密网格稳健）。返回 vol[iz, iy, ix]"""
-    V = torch.tensor(V, dtype=torch.float32, device=DEV)
-    Fc = torch.tensor(Fc, device=DEV)
-    A, Bv, C = V[Fc[:, 0]], V[Fc[:, 1]], V[Fc[:, 2]]
-    ba, cb, ac = Bv - A, C - Bv, A - C
-    nor = torch.linalg.cross(ba, ac)
-    sba, scb, sac = torch.linalg.cross(ba, nor), torch.linalg.cross(cb, nor), torch.linalg.cross(ac, nor)
+def _sdf_points(pts, T):
+    """点集的有符号距离：|d| = 暴力点–三角形距离（GPU 分块），符号 = 广义缠绕数 Σ立体角/4π > 0.5"""
+    A, Bv, C, ba, cb, ac, nor, sba, scb, sac, iba, icb, iac, inor = T
     d2 = lambda v: (v * v).sum(-1)  # noqa: E731
-    iba, icb, iac = [1 / d2(e).clamp(min=1e-20) for e in (ba, cb, ac)]
-    inor = 1 / d2(nor).clamp(min=1e-30)
-    ax = torch.linspace(-B, B, n, device=DEV)
-    Z, Y, X = torch.meshgrid(ax, ax, ax, indexing="ij")
-    pts = torch.stack([X, Y, Z], -1).reshape(-1, 3)
-    chunk = max(32, int(4e6 // Fc.shape[0]))
+    chunk = max(32, int(4e6 // A.shape[0]))
     ud, wn = [], []
     for blk in torch.split(pts, chunk):
         pa, pb, pc = blk[:, None] - A[None], blk[:, None] - Bv[None], blk[:, None] - C[None]
@@ -314,30 +305,66 @@ def mesh_sdf_volume(V, Fc, n=128, B=MESH_B):
         den = la * lb * lc + (pa * pb).sum(-1) * lc + (pb * pc).sum(-1) * la + (pc * pa).sum(-1) * lb
         wn.append((2 * torch.atan2(num, den)).sum(1) / (4 * math.pi))
     ud, wn = torch.cat(ud), torch.cat(wn)
-    return torch.where(wn.abs() > 0.5, -ud, ud).reshape(n, n, n).cpu().numpy()
+    return torch.where(wn.abs() > 0.5, -ud, ud)
+
+
+SDF_COARSE = 64      # n > 128 时走窄带：先算 64³ 全格，只在表面附近（|d| < 2.5 粗格）算精确值
+
+
+def mesh_sdf_volume(V, Fc, n=128, B=MESH_B, coarse=SDF_COARSE, narrow=None):
+    """>v<🧊四维切片-网格SDF-n³ 网格上的有符号距离（返回 vol[iz, iy, ix]）。
+    n ≤ 128：全格暴力。n > 128：窄带 —— 粗格 SDF 三线性上采样，|d| < 2.5 粗格边长的体素重算精确值
+    （人体表面带只占体积的几个百分点；远处的值只用来让球追踪跨大步，三线性的误差 ≪ 一个粗格）"""
+    V = torch.tensor(V, dtype=torch.float32, device=DEV)
+    Fc = torch.tensor(Fc, device=DEV)
+    A, Bv, C = V[Fc[:, 0]], V[Fc[:, 1]], V[Fc[:, 2]]
+    ba, cb, ac = Bv - A, C - Bv, A - C
+    nor = torch.linalg.cross(ba, ac)
+    d2 = lambda v: (v * v).sum(-1)  # noqa: E731
+    T = (A, Bv, C, ba, cb, ac, nor, torch.linalg.cross(ba, nor), torch.linalg.cross(cb, nor), torch.linalg.cross(ac, nor),
+         *[1 / d2(e).clamp(min=1e-20) for e in (ba, cb, ac)], 1 / d2(nor).clamp(min=1e-30))
+    ax = torch.linspace(-B, B, n, device=DEV)
+    Z, Y, X = torch.meshgrid(ax, ax, ax, indexing="ij")
+    pts = torch.stack([X, Y, Z], -1).reshape(-1, 3)
+    if not (n > 128 if narrow is None else narrow):
+        return _sdf_points(pts, T).reshape(n, n, n).cpu().numpy()
+    vc = torch.tensor(mesh_sdf_volume(V.cpu().numpy(), Fc.cpu().numpy(), coarse, B), device=DEV)[None, None]
+    up = F.grid_sample(vc, (pts / B).reshape(1, -1, 1, 1, 3), mode="bilinear", align_corners=True).reshape(-1)
+    h = 2 * B / (coarse - 1)
+    band = up.abs() < 2.5 * h
+    up = torch.where(band, up, torch.sign(up) * (up.abs() - 0.5 * h))     # 带外保守：|d| 少报半个粗格 → 球追踪不会越过表面
+    up[band] = _sdf_points(pts[band], T)
+    print(f"  narrow band: {int(band.sum())} / {band.numel()} voxels exact ({band.float().mean().item() * 100:.1f}%)", flush=True)
+    return up.reshape(n, n, n).cpu().numpy()
 
 
 class MeshSDF:
     """f3(x, y, z)：缓存的 SDF 体 + grid_sample 三线性；网格外用「到 [-1,1]³ 盒的距离」与「边界值 − 走出去的距离」取大，仍是距离下界"""
-    def __init__(self, path, n=128):
-        self.path, self.n, self.vol = Path(path), n, None
+    def __init__(self, path, n=128, max_faces=40000, lateral="auto"):
+        self.path, self.n, self.max_faces, self.lateral, self.vol = Path(path), n, max_faces, lateral, None
 
     @property
     def label(self):
         """HUD 字体（consola）没有中文 → 中文名映射成 ASCII"""
         st = self.path.stem
-        return st if st.isascii() else {"测试_人台": "test_mannequin", "她": "her", "躯体核心": "torso_core"}.get(st, "mesh")
+        tr = {"测试": "test", "人台": "mannequin", "她": "her", "躯体核心": "torso_core", "蜷缩": "curled"}
+        s = "_".join(tr.get(p, p) for p in st.split("_"))
+        return s if s.isascii() else "mesh"
 
     def load(self):
-        cache = self.path.with_name(f"{self.path.stem}.sdf{self.n}.npy")
+        suf = ("" if self.max_faces == 40000 else f"_f{self.max_faces // 1000}k") + ("" if self.lateral == "auto" else f"_lat{self.lateral}")
+        cache = self.path.with_name(f"{self.path.stem}.sdf{self.n}{suf}.npy")
         if cache.exists():
             vol = np.load(cache)
         else:
             t0 = time.time()
-            V, Fc = _mesh_load(self.path)
+            if DEV == "cuda":
+                torch.cuda.reset_peak_memory_stats()
+            V, Fc = _mesh_load(self.path, self.max_faces, self.lateral)
             vol = mesh_sdf_volume(V, Fc, self.n).astype(np.float32)
             np.save(cache, vol)
-            print(f"  SDF {self.n}^3 of {self.path.name} ({len(Fc)} faces): {time.time() - t0:.1f}s -> {cache.name}", flush=True)
+            vram = f", peak VRAM {torch.cuda.max_memory_allocated() / 2**30:.2f} GB" if DEV == "cuda" else ""
+            print(f"  SDF {self.n}^3 of {self.path.name} ({len(Fc)} faces): {time.time() - t0:.1f}s{vram} -> {cache.name}", flush=True)
         self.vol = torch.tensor(vol, device=DEV)[None, None]
 
     def __call__(self, x, y, z):
@@ -786,7 +813,7 @@ class InsertSpec:
     """插入镜头的全部参数（角度：度，角速度：度/秒；c 速度：单位/秒；相机 yaw 速度：弧度/秒，dolly：距离比例/秒）"""
     def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
                  tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
-                 red_gain=1.0, look="line", cam_scale=1.0):
+                 red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0):
         self.dur, self.fps, self.size = dur, fps, size
         self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
         self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
@@ -794,6 +821,9 @@ class InsertSpec:
         self.tilt, self.tilt_r = tilt, parse_tilt(tilt)
         self.yaw0, self.yaw_rate, self.pitch, self.dolly = yaw0, yaw_rate, pitch, dolly
         self.red_gain, self.look, self.cam_scale = red_gain, look, cam_scale
+        self.hud_band, self.hud_scale = hud_band, hud_scale      # hud_band > 0：物体只渲染在上面 H − band 像素里，HUD 独占底部条带（不重叠）
+        if not 0 <= hud_band < size[1] // 2:
+            raise ValueError("hud_band 必须在 [0, H/2)")
         if v_end <= 0 or v0 <= v_end:
             raise ValueError("先快后缓要求 v0 > v_end > 0（v_end = 0 会停住）")
         if yaw_rate == 0:
@@ -826,34 +856,43 @@ def insert_R(obj, sp, th_deg):
     return rot4(**ang) @ rot4(**sp.tilt_r)
 
 
+def _insert_frame(obj, name, sp, k, prev_b, tag):
+    """一帧：渲染 + Betti + HUD。hud_band > 0 时物体画在上方 (H − band) 区域，HUD 在底部条带里 → 永不重叠"""
+    Wd, Hd = sp.size
+    plane = sp.plane or obj.plane
+    rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
+    tilt_s = " ".join(f"{a}={math.degrees(v):+.0f}" for a, v in sp.tilt_r.items()) or "none"
+    R = insert_R(obj, sp, k["th"])
+    v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"])
+    b = betti(obj, R, k["c"], n=64)
+    rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45)
+    if sp.hud_band:
+        rgb = torch.cat([rgb, torch.zeros(sp.hud_band, Wd, 3, device=rgb.device)], 0)
+    changed = prev_b is not None and b != prev_b
+    lines = [f"{name} ({obj.op}): {obj.eq}",
+             f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
+             f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
+             _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
+             "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)"]
+    im = to_pil(rgb)
+    hud(im, lines, tag, red_line=3 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
+    return im, rgb, b
+
+
 def insert(name, sp, out, tag=None, contact=None):
     """>v<🧊四维切片-插入-渲染一条插入镜头（帧数 = ceil(槽长 × fps)），HUD 写每帧真参数；contact 给了就写接触表（全部帧 + 帧间差分）"""
     obj = OBJS[name]
     Wd, Hd = sp.size
     track = insert_track(obj, sp)
-    plane = sp.plane or obj.plane
-    rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
-    tilt_s = " ".join(f"{k}={math.degrees(v):+.0f}" for k, v in sp.tilt_r.items()) or "none"
     tag = tag or f"4D_INSERT / {name.upper()}"
     sink = Sink(out, sp.fps, sp.size)
-    scale = Hd / 1080 * 1.15
     thumbs, diffs, prev_arr, prev_b = [], [], None, None
     t0 = time.time()
     for k in track:
-        R = insert_R(obj, sp, k["th"])
-        v, red = render(obj, R, k["c"], Wd, Hd, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"])
-        b = betti(obj, R, k["c"], n=64)
-        rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45)
+        im, rgb, b = _insert_frame(obj, name, sp, k, prev_b, tag)
         arr = rgb.mean(-1)
         diffs.append(float((arr - prev_arr).abs().mean()) if prev_arr is not None else float("nan"))
         prev_arr = arr
-        lines = [f"{name} ({obj.op}): {obj.eq}",
-                 f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
-                 f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
-                 _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if prev_b is not None and b != prev_b else ""),
-                 "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)"]
-        im = to_pil(rgb)
-        hud(im, lines, tag, red_line=3 if prev_b is not None and b != prev_b else None, scale=scale)
         sink.add(im)
         prev_b = b
         if contact:
@@ -864,6 +903,16 @@ def insert(name, sp, out, tag=None, contact=None):
     if contact:
         _insert_contact(contact, thumbs, track, diffs, sp, name, tag)
     return track, diffs
+
+
+def insert_still(name, sp, idx, out, tag=None):
+    """插入镜头里的单独一帧存成图（比较 look 用：同一参数、同一帧，只换 --look）"""
+    obj = OBJS[name]
+    k = insert_track(obj, sp)[idx]
+    im, _, _ = _insert_frame(obj, name, sp, k, None, tag or f"4D_INSERT / {name.upper()}")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    im.save(out, quality=92)
+    print(f"{out}: frame #{idx} (t = {k['t']:.3f} s, theta = {k['th']:+.1f}, c = {k['c']:+.3f}, look = {sp.look})")
 
 
 def _insert_contact(path, thumbs, track, diffs, sp, name, tag, cols=6):
@@ -990,6 +1039,8 @@ def main():
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--mesh", default=None, help="GLB 路径：mesh_* 物体用这个网格（默认 3D/测试_人台.glb）；SDF 缓存在旁边 <名>.sdf<N>.npy")
     ap.add_argument("--sdf-res", type=int, default=128, help="网格 SDF 体素分辨率 N（N³）")
+    ap.add_argument("--mesh-lateral", default="auto", choices=["auto", "x", "z"], help="glTF 里的侧向轴（蜷缩等非站姿必须给 z；非 auto 时缓存名带 _lat<轴>）")
+    ap.add_argument("--sdf-faces", type=int, default=40000, help="建 SDF 前减面到 ≤ 这么多面（顶点聚类）；非默认值时缓存名带 _f<k>k")
     ap.add_argument("--extra-mesh", nargs="*", default=[], help="--mesh-sheet 时追加的行：'路径.glb=spin,twist:rotate,...'（算子名 extrude/spin/"
                     "loft_sphere/loft_torus/twist，:rotate / :slice 覆盖默认扫法）")
     ap.add_argument("--rows", default=None, help="--mesh-sheet 主网格的行，格式同上（默认 MESH_SHEET_ROWS）")
@@ -1015,9 +1066,12 @@ def main():
     g.add_argument("--cam-scale", type=float, default=1.0, help="相机距离 = 物体默认距离 × 这个数（> 1 拉远，碎块不出画、不压 HUD）")
     g.add_argument("--contact", default=None, help="接触表 jpg 路径（全部帧 + 速度曲线 vs 实测帧间差分）")
     g.add_argument("--plan", action="store_true", help="只打印每帧 θ / v / c，不渲染")
+    g.add_argument("--hud-band", type=int, default=0, help="底部 HUD 条带高度（像素）：物体只画在上面，HUD 不压物体（0 = 旧行为：HUD 叠在画面上）")
+    g.add_argument("--hud-scale", type=float, default=1.0, help="HUD 字号倍数")
+    g.add_argument("--still", type=int, default=None, help="只渲染第 N 帧存成图（--out 给 .jpg/.png），比较 --look 用")
     a = ap.parse_args()
-    if a.mesh or a.sdf_res != 128:
-        MESH.path, MESH.n, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, None
+    if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
+        MESH.path, MESH.n, MESH.max_faces, MESH.lateral, MESH.vol = Path(a.mesh or MESH.path), a.sdf_res, a.sdf_faces, a.mesh_lateral, None
         OBJS.update(mesh_objs(MESH))
     if a.mesh_sheet:
         objs = dict(OBJS)
@@ -1046,7 +1100,7 @@ def main():
     if a.insert is not None:
         w, h = (int(x) for x in a.size.lower().split("x"))
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
-                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale)
+                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale)
         if a.plan:
             obj = OBJS[a.obj]
             for k in insert_track(obj, sp):
@@ -1054,8 +1108,11 @@ def main():
                       + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
             return
         out = Path(a.out or f"{a.obj}_insert.mp4")
-        if out.exists():
-            sys.exit(f"已存在，不覆盖：{out}（换版本号）")
+        if out.exists() or (a.contact and Path(a.contact).exists()):
+            sys.exit(f"已存在，不覆盖：{out} / {a.contact}（换版本号）")
+        if a.still is not None:
+            insert_still(a.obj, sp, a.still, str(out), a.tag)
+            return
         insert(a.obj, sp, str(out), a.tag, a.contact)
         return
     animate(a.obj, a.op, a.frames, a.out or f"{a.obj}_{a.op}.mp4", a.look, a.theta, a.c0, a.c1, a.tag)

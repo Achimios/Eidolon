@@ -72,5 +72,32 @@ class TestFastSlow(unittest.TestCase):
         self.assertTrue(all(b != a for a, b in zip(yaws, yaws[1:])))             # 相机始终在动
 
 
+@unittest.skipUnless(HAS_TORCH, "four_d 需要 torch（.venv）")
+class TestNarrowBandSDF(unittest.TestCase):
+    def test_band_equals_full_and_never_overestimates(self):
+        """必须相等的量：表面带内 = 全格暴力；带外 |d| 只能少报（球追踪才不会越过表面）"""
+        import numpy as np
+        V = np.array([[0.6, 0, 0], [-0.6, 0, 0], [0, 0.7, 0], [0, -0.7, 0], [0, 0, 0.5], [0, 0, -0.5]], float)
+        Fc = np.array([[0, 2, 4], [2, 1, 4], [1, 3, 4], [3, 0, 4], [2, 0, 5], [1, 2, 5], [3, 1, 5], [0, 3, 5]])
+        full = F.mesh_sdf_volume(V, Fc, 40, narrow=False)
+        nb = F.mesh_sdf_volume(V, Fc, 40, coarse=16, narrow=True)
+        h = 2 * F.MESH_B / 15
+        band = np.abs(nb) < 2.5 * h - 0.5 * h
+        self.assertLess(np.abs(nb - full)[np.abs(full) < 1.5 * h].max(), 1e-5)
+        self.assertLessEqual((np.abs(nb) - np.abs(full)).max(), 1e-5)
+        self.assertTrue((np.sign(nb) == np.sign(full)).all())
+        self.assertGreater(band.sum(), 0)
+
+    def test_hud_band_spec(self):
+        F.InsertSpec(1.0, size=(640, 360), hud_band=100)
+        with self.assertRaises(ValueError):
+            F.InsertSpec(1.0, size=(640, 360), hud_band=200)
+
+    def test_mesh_label_ascii(self):
+        self.assertEqual(F.MeshSDF("她_蜷缩_v1.glb").label, "her_curled_v1")
+        self.assertEqual(F.MeshSDF("她.glb").label, "her")
+        self.assertEqual(F.MeshSDF("测试_人台.glb").label, "test_mannequin")
+
+
 if __name__ == "__main__":
     unittest.main()

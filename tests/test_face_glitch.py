@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""面部瓦解（tools/face_glitch.py）每一级的数值自检：找「必须相等」的量。"""
+import sys
+import unittest
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+import face_glitch as F  # noqa: E402
+
+
+def rand_img(H=64, W=96, seed=0):
+    return np.random.default_rng(seed).random((H, W, 3)).astype(np.float32)
+
+
+def disk_mask(H=64, W=96, cx=60, cy=32, r=20):
+    yy, xx = np.mgrid[0:H, 0:W]
+    return ((xx - cx) ** 2 + (yy - cy) ** 2 <= r * r).astype(np.float32)
+
+
+class TestStages(unittest.TestCase):
+    def test_band_displace_rows_are_rolls(self):
+        """每一行 = 原行循环平移 dx（同一切片 dx 相同），mask 跟着同样平移"""
+        img, m = rand_img(), disk_mask()
+        out, om, bands = F.band_displace(img, m, np.random.default_rng(3), n_bands=8, max_dx=40, p_shift=1.0)
+        self.assertEqual(sum(y1 - y0 for y0, y1, _ in bands), img.shape[0])
+        self.assertTrue(any(dx for *_, dx in bands))
+        for y0, y1, dx in bands:
+            np.testing.assert_array_equal(out[y0:y1], np.roll(img[y0:y1], dx, axis=1))
+            np.testing.assert_array_equal(om[y0:y1], np.roll(m[y0:y1], dx, axis=1))
+
+    def test_row_smear_identity_limit(self):
+        """L = ∞、不断点、增益 1、win = 1 → 边界左边每个像素 = 边界内侧 inset 处的像素"""
+        img = np.zeros((40, 80, 3), np.float32)
+        m = disk_mask(40, 80, 55, 20, 12)
+        img[m > 0] = np.random.default_rng(1).random(((m > 0).sum(), 3))
+        xr = F.leftmost(m)
+        out = F.row_smear(img, xr, xr, np.random.default_rng(0), length=np.inf, inset=2, dropout=0,
+                          row_gain=(1.0, 1.0), win=1)
+        for y in np.flatnonzero(xr > 0):
+            np.testing.assert_allclose(out[y, :xr[y]], np.broadcast_to(img[y, xr[y] + 2], (xr[y], 3)))
+
+    def test_row_smear_decay(self):
+        """x_b 左边 d 像素处强度 = exp(-d/L)·c（单行、L 的 lognormal 抽到 0 时）：检查单调衰减 + 台阶内满强度"""
+        img = np.zeros((1, 100, 3), np.float32); img[0, 60:] = 1.0
+        xr = np.array([60]); xb = np.array([50])
+        out = F.row_smear(img, xr, xb, np.random.default_rng(0), length=20, inset=0, dropout=0, row_gain=(1, 1), win=1)
+        np.testing.assert_allclose(out[0, 50:60], 1.0)
+        v = out[0, :50, 0]
+        self.assertTrue(np.all(np.diff(v) > 0))
+        # 相邻像素之比恒为 exp(1/L') —— 指数
+        r = v[1:] / v[:-1]
+        self.assertLess(np.ptp(r), 1e-5)
+
+    def test_waterfall_rows_time_to_x(self):
+        """离边界 d 像素 = 第 d // px 帧之前的边界色"""
+        H, W, T, px = 4, 50, 5, 3
+        img = np.zeros((H, W, 3), np.float32)
+        xr = np.array([40, 30, -1, 20])
+        hist = np.zeros((T, H, 3), np.float32)
+        for k in range(T):
+            hist[k] = 0.1 * (k + 1)
+        out = F.waterfall_rows(img, xr, hist, px_per_frame=px)
+        for y in (0, 1, 3):
+            for d in range(xr[y]):
+                k = d // px
+                want = 0.1 * (k + 1) if k < T else 0.0
+                self.assertAlmostEqual(float(out[y, xr[y] - 1 - d, 0]), want, places=6)
+        np.testing.assert_array_equal(out[2], 0)
+
+    def test_pixel_sort_preserves_rows_and_sorts_runs(self):
+        img = rand_img(16, 64, 2)
+        region = np.ones((16, 64), bool)
+        out = F.pixel_sort_rows(img, region, lo=0.2, hi=0.8)
+        for y in range(16):
+            a = np.sort(img[y].view([("r", "f4"), ("g", "f4"), ("b", "f4")]).ravel(), order=["r", "g", "b"])
+            b = np.sort(out[y].view([("r", "f4"), ("g", "f4"), ("b", "f4")]).ravel(), order=["r", "g", "b"])
+            np.testing.assert_array_equal(a, b)
+        L, L0 = F.lum(out), F.lum(img)
+        sel = (L0 >= 0.2) & (L0 <= 0.8)
+        for y in range(16):
+            d = np.diff(np.concatenate([[0], sel[y].astype(np.int8), [0]]))
+            for s, e in zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)):
+                self.assertTrue(np.all(np.diff(L[y, s:e]) >= -1e-7))
+            np.testing.assert_array_equal(out[y][~sel[y]], img[y][~sel[y]])
+
+    def test_channel_split_global_exact(self):
+        img = rand_img()
+        out = F.channel_split(img, None, d=(5, 0, -3), mode="global")
+        np.testing.assert_array_equal(out[:, 5:, 0], img[:, :-5, 0])
+        np.testing.assert_array_equal(out[:, :5, 0], 0)
+        np.testing.assert_array_equal(out[..., 1], img[..., 1])
+        np.testing.assert_array_equal(out[:, :-3, 2], img[:, 3:, 2])
+
+    def test_channel_split_normal_zero_is_identity(self):
+        img, m = rand_img(), disk_mask()
+        np.testing.assert_array_equal(F.channel_split(img, m, d=(0, 0, 0), mode="normal"), img)
+
+    def test_column_jitter_columns_are_rolls(self):
+        img = rand_img(32, 40, 4)
+        for pc in (False, True):
+            out = F.column_jitter(img, np.ones((32, 40), np.float32), np.random.default_rng(5), amp=4, gain=0.0,
+                                  per_channel=pc)
+            for x in range(40):
+                for c in range(3):
+                    col, o = img[:, x, c], out[:, x, c]
+                    self.assertTrue(any(np.array_equal(np.roll(col, s), o) for s in range(-4, 5)))
+
+    def test_column_jitter_outside_mask_untouched(self):
+        img, m = rand_img(), disk_mask()
+        out = F.column_jitter(img, m, np.random.default_rng(1), amp=5, gain=0.5)
+        np.testing.assert_array_equal(out[m == 0], img[m == 0])
+
+    def test_macroblocks_dc(self):
+        img = rand_img(64, 96, 6)
+        region = np.ones((64, 96), bool)
+        out, blocks = F.macroblocks(img, region, np.random.default_rng(2), grid=16, n_triplets=0, n_dashes=0, n_blocks=5)
+        self.assertEqual(len(blocks), 5)
+        for y, x in blocks:
+            blk = out[y:y + 16, x:x + 16]
+            np.testing.assert_allclose(blk, np.broadcast_to(img[y:y + 16, x:x + 16].reshape(-1, 3).mean(0), blk.shape),
+                                       atol=1e-6)
+
+    def test_posterize_levels(self):
+        out = F.posterize(rand_img(), levels=5)
+        self.assertTrue(np.all(np.isin(np.round(out * 4, 6), np.arange(5))))
+
+    def test_sense_mapping(self):
+        p = F.params_from_sense(0.5, 0.25, 1.0)
+        self.assertEqual(p.n_bands, 15)
+        self.assertEqual(p.max_dx, 166)
+        self.assertAlmostEqual(p.p_shift, 0.5)
+        self.assertEqual(p.split_d, (6, -3, -6))
+        self.assertAlmostEqual(p.smear_len, 560)
+
+    def test_pipeline_runs_deterministic(self):
+        img, m = rand_img(72, 128, 9), disk_mask(72, 128, 80, 36, 25)
+        p = F.Params(place_dx=10, n_dust=50, grid=8)
+        a, _ = F.run(img, m, p)
+        b, _ = F.run(img, m, p)
+        np.testing.assert_array_equal(a, b)
+        self.assertEqual(a.shape, img.shape)
+
+
+if __name__ == "__main__":
+    unittest.main()
