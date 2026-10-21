@@ -56,7 +56,8 @@ def rot4(xw=0.0, yw=0.0, zw=0.0, xy=0.0):
 
 
 class Obj:
-    def __init__(self, name, op, eq, f, cmax, facets=None, step=0.9, verts=None, bound=2.2, cam=5.2, R0=None, plane="xw", c_rot=None, vbox=None):
+    def __init__(self, name, op, eq, f, cmax, facets=None, step=0.9, verts=None, bound=2.2, cam=5.2, R0=None, plane="xw", c_rot=None, vbox=None, cap=None):
+        self.cap = cap      # cap(p) > 0：表面点落在 |w| − h 截出的平切面上（surface 模式自发光）
         self.name, self.op, self.eq, self.f, self.cmax = name, op, eq, f, cmax
         self.plane, self.c_rot = plane, c_rot
         self.vbox = vbox or bound * 0.9       # Betti / X 光相切点 用的体素盒半边长   # rotate 用哪个平面（spin(mesh) 对 xw 不变 → zw）；rotate 时固定的 c
@@ -260,11 +261,58 @@ def _mesh_load(path, max_faces=40000, lateral="auto"):
     ext = hi - lo
     if lateral == "z" or (lateral == "auto" and ext[2] > ext[0]):   # 绕 y 转 −90°：(x, y, z) → (−z, y, x)，行列式 +1；Tripo 的正面（+x）转到 +z，朝向默认相机
         V = np.stack([-V[:, 2], V[:, 1], V[:, 0]], 1)
+    elif lateral not in ("auto", "x"):
+        # 侧向斜着摆的模型（👤Tripo 蜷缩：侧向在 xz 平面 60°，x / z 都不对）：sym = 镜面对称面搜索；数字 = 侧向角 φ（度）
+        off = 0.0
+        if lateral == "sym":
+            phi, off, err, err_x, err_z = mesh_symmetry_plane(m, V)
+            print(f"  symmetry plane: lateral phi = {phi:.1f} deg, offset {off:+.4f}  (mean mirror error {err:.4f};"
+                  f" x: {err_x:.4f}, z: {err_z:.4f}; units = model)", flush=True)
+        else:
+            phi = float(lateral)
+        V = lateral_rotate(V, phi, off)
+        lo, hi = V.min(0), V.max(0)
+        ctr = (lo + hi) / 2
+        ctr[0] = 0.0                     # x' = 0 必须留在对称面上（spin 绕它转）；其余两轴重新居中
+        V = V - ctr
+        ext = np.maximum(hi - lo, 2 * np.abs(V).max(0))
     V *= 2.0 / ext.max()
     Fc = np.asarray(m.faces, np.int64)
     if len(Fc) > max_faces:
         V, Fc = _cluster_decimate(V, Fc, max_faces)
     return V, Fc
+
+
+def lateral_rotate(V, phi_deg, off=0.0):
+    """绕 y 把 xz 平面里方向 l = (cos φ, 0, sin φ) 转到 +x：x' = V·l − off，z' = V·(−sin φ, 0, cos φ)，y' = y。
+    行列式 +1（x' × y' = z'）；z' = l × ŷ = 正面方向（φ = −90 ≡ 旧的 "z" 选项）"""
+    a = math.radians(phi_deg)
+    c, s = math.cos(a), math.sin(a)
+    return np.stack([V[:, 0] * c + V[:, 2] * s - off, V[:, 1], -V[:, 0] * s + V[:, 2] * c], 1)
+
+
+def mesh_symmetry_plane(m, V, n=12000, seed=1):
+    """>v<🧊四维切片-网格-找左右镜面：面积均匀采 n 点，扫竖直镜面（xz 里的法向角 φ ∈ [0, 180)、偏移），
+    分数 = 镜像点到原点集的平均最近距离（越小越对称）。粗扫 3° → 细扫 0.5°。返回 (φ, 偏移, 误差, φ=0 误差, φ=90 误差)"""
+    import trimesh
+    P, _ = trimesh.sample.sample_surface(m, n, seed=seed)
+    ctr = (np.asarray(m.vertices).min(0) + np.asarray(m.vertices).max(0)) / 2
+    P = torch.tensor(P - ctr, dtype=torch.float32, device=DEV)
+    span = float((P.max(0).values - P.min(0).values).max())
+
+    def score(phi, off):
+        nv = torch.tensor([math.cos(math.radians(phi)), 0.0, math.sin(math.radians(phi))], device=DEV)
+        Q = P - 2 * (P @ nv - off)[:, None] * nv
+        return float(torch.cat([torch.cdist(b, P).min(1).values for b in torch.split(Q, 3000)]).mean())
+
+    def best(phis, offs):
+        return min((score(p, o), p, o) for p in phis for o in offs)
+
+    e0, p0, o0 = best(np.arange(0, 180, 3.0), np.linspace(-0.08, 0.08, 9) * span)
+    e1, p1, o1 = best(np.arange(p0 - 3, p0 + 3.01, 0.5), o0 + np.linspace(-0.02, 0.02, 9) * span)
+    ex = min(score(0.0, o) for o in np.linspace(-0.08, 0.08, 17) * span)
+    ez = min(score(90.0, o) for o in np.linspace(-0.08, 0.08, 17) * span)
+    return p1 % 180.0, o1, e1, ex, ez
 
 
 def _cluster_decimate(V, Fc, target):
@@ -347,7 +395,8 @@ class MeshSDF:
     def label(self):
         """HUD 字体（consola）没有中文 → 中文名映射成 ASCII"""
         st = self.path.stem
-        tr = {"测试": "test", "人台": "mannequin", "她": "her", "躯体核心": "torso_core", "蜷缩": "curled"}
+        tr = {"测试": "test", "人台": "mannequin", "她": "her", "躯体核心": "torso_core", "蜷缩": "curled",
+              "无材质": "untextured", "有材质": "textured", "低模": "lowpoly", "高模": "highpoly", "有Normal": "normalmap"}
         s = "_".join(tr.get(p, p) for p in st.split("_"))
         return s if s.isascii() else "mesh"
 
@@ -410,9 +459,20 @@ def mesh_objs(msh, prefix="mesh", h=0.6, ht=1.0, k=math.pi / 2):
         ca, sa = torch.cos(a), torch.sin(a)
         return _ext(msh(ca * x + sa * z, y, -sa * x + ca * z), w.abs() - ht)
 
+    def ext_cap(p):                   # 平切面 = |w| − h 那一项占上风（_ext 的 max 里它更大）
+        x, y, z, w = _cols(p)
+        return (w.abs() - h) - msh(x, y, z)
+
+    def twist_cap(p):
+        x, y, z, w = _cols(p)
+        a = k * w
+        ca, sa = torch.cos(a), torch.sin(a)
+        return (w.abs() - ht) - msh(ca * x + sa * z, y, -sa * x + ca * z)
+
     lab = msh.label
     return {o.name: o for o in [
-        Obj(f"{prefix}_extrude", "extrude", f"max( f3(x,y,z), |w| - {h} ),  f3 = SDF of {lab}", ext, h + 0.05, bound=1.6, cam=4.3, vbox=1.15),
+        Obj(f"{prefix}_extrude", "extrude", f"max( f3(x,y,z), |w| - {h} ),  f3 = SDF of {lab}", ext, h + 0.05, bound=1.6, cam=4.3, vbox=1.15,
+            cap=ext_cap),
         Obj(f"{prefix}_spin", "spin(mesh)", f"f3( sqrt(x^2 + w^2), y, z )   ({lab} revolved about the yz-plane)", spin, 0.95,
             bound=1.6, cam=4.3, vbox=1.15, plane="zw", c_rot=0.02),
         Obj(f"{prefix}_loft_sphere", "loft", f"mix( f3, sphere(0.62), smoothstep(-0.8, 0.8, w) ),  |w| < 1", loft_sphere, 1.02,
@@ -420,7 +480,7 @@ def mesh_objs(msh, prefix="mesh", h=0.6, ht=1.0, k=math.pi / 2):
         Obj(f"{prefix}_loft_torus", "loft", f"mix( f3, torus_xy(0.72, 0.2), smoothstep(-0.8, 0.8, w) ),  |w| < 1", loft_torus, 1.02,
             step=0.6, bound=1.6, cam=4.3, vbox=1.15),
         Obj(f"{prefix}_twist", "twist", f"max( f3( Rot_y(k w) [x,y,z] ), |w| - {ht} ),  k = {k:.3f} (90 deg per unit w)", twist, ht + 0.02,
-            step=0.5, bound=1.6, cam=4.3, vbox=1.15, c_rot=0.3),
+            step=0.5, bound=1.6, cam=4.3, vbox=1.15, c_rot=0.3, cap=twist_cap),
     ]}
 
 
@@ -498,7 +558,7 @@ def _fwidth(u, ok):
     return out.clamp(min=1e-5)
 
 
-def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True):
+def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55):
     dist = dist or obj.cam
     """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）"""
     hw, hh = w * ss, h * ss
@@ -539,6 +599,18 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
             edge = torch.maximum(edge, ((ok & ~n_ok) | (ok & n_ok & ((T - n_t) < -0.06 * T))).float())
     if look == "surface":
         v = img(0.05 + 0.62 * lam + 0.55 * rim ** 1.5)
+        if obj.cap is not None and cut_glow > 0:
+            # 平切面（|w| − h 截出来的，正对相机时 Lambert + rim 都 ≈ 0 → 一块死黑）：自发光底 + 剖面线（y 等距）+ 亮边框
+            cw = img((obj.cap(q @ R) / 0.01).clamp(0, 1))
+            u = img(ph[:, 1] / spacing)
+            dn = (u - torch.round(u)).abs()
+            hatch = (1 - dn / (_fwidth(u, ok) * 0.85)).clamp(0, 1)
+            face = cut_glow * (0.62 + 0.25 * img(lam)) + 0.3 * hatch
+            border = torch.zeros_like(cw)
+            for dim in (0, 1):
+                for sh in (1, -1):
+                    border = torch.maximum(border, (cw - torch.roll(cw, sh, dim)).abs() * (ok & torch.roll(ok, sh, dim)).float())
+            v = torch.maximum(v * (1 - cw) + face * cw, border.clamp(0, 1) * 0.9)
     else:
         if obj.facets is not None:     # 多胞体：截面多面体的棱 = 两个最大面值相等
             top = torch.topk(obj.facets(q @ R), 2, dim=1).values
@@ -813,7 +885,7 @@ class InsertSpec:
     """插入镜头的全部参数（角度：度，角速度：度/秒；c 速度：单位/秒；相机 yaw 速度：弧度/秒，dolly：距离比例/秒）"""
     def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
                  tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
-                 red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0):
+                 red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0, cut_glow=0.55):
         self.dur, self.fps, self.size = dur, fps, size
         self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
         self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
@@ -821,6 +893,7 @@ class InsertSpec:
         self.tilt, self.tilt_r = tilt, parse_tilt(tilt)
         self.yaw0, self.yaw_rate, self.pitch, self.dolly = yaw0, yaw_rate, pitch, dolly
         self.red_gain, self.look, self.cam_scale = red_gain, look, cam_scale
+        self.cut_glow = cut_glow
         self.hud_band, self.hud_scale = hud_band, hud_scale      # hud_band > 0：物体只渲染在上面 H − band 像素里，HUD 独占底部条带（不重叠）
         if not 0 <= hud_band < size[1] // 2:
             raise ValueError("hud_band 必须在 [0, H/2)")
@@ -863,7 +936,8 @@ def _insert_frame(obj, name, sp, k, prev_b, tag):
     rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
     tilt_s = " ".join(f"{a}={math.degrees(v):+.0f}" for a, v in sp.tilt_r.items()) or "none"
     R = insert_R(obj, sp, k["th"])
-    v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"])
+    v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"],
+                    cut_glow=sp.cut_glow)
     b = betti(obj, R, k["c"], n=64)
     rgb = compose(v, red, max(2, round(5 * Hd / 1080)), 0.45)
     if sp.hud_band:
@@ -1025,6 +1099,15 @@ def sheet(out, rows=None, look="line", tag="20_4D_SLICE_OVERVIEW", objs=None, fo
     print(f"{out}: {time.time() - t0:.1f}s")
 
 
+def _lateral_arg(s):
+    if s in ("auto", "x", "z", "sym"):
+        return s
+    try:
+        return f"{float(s):g}"
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"--mesh-lateral 只能是 auto / x / z / sym / 角度数字：{s}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="4D 物体 → 3D 截面")
     ap.add_argument("--obj", default="tiger", choices=list(OBJS))
@@ -1039,7 +1122,9 @@ def main():
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--mesh", default=None, help="GLB 路径：mesh_* 物体用这个网格（默认 3D/测试_人台.glb）；SDF 缓存在旁边 <名>.sdf<N>.npy")
     ap.add_argument("--sdf-res", type=int, default=128, help="网格 SDF 体素分辨率 N（N³）")
-    ap.add_argument("--mesh-lateral", default="auto", choices=["auto", "x", "z"], help="glTF 里的侧向轴（蜷缩等非站姿必须给 z；非 auto 时缓存名带 _lat<轴>）")
+    ap.add_argument("--mesh-lateral", default="auto", type=_lateral_arg,
+                    help="glTF 里的侧向轴：auto / x / z（blender_pose 的输出给 z）/ sym（镜面对称搜索，斜摆的 Tripo 蜷缩用这个）/ 数字 = xz 里的侧向角 φ 度"
+                         "（φ 与 φ+180 都是同一镜面，差在正面朝 ±z）；非 auto 时缓存名带 _lat<值>")
     ap.add_argument("--sdf-faces", type=int, default=40000, help="建 SDF 前减面到 ≤ 这么多面（顶点聚类）；非默认值时缓存名带 _f<k>k")
     ap.add_argument("--extra-mesh", nargs="*", default=[], help="--mesh-sheet 时追加的行：'路径.glb=spin,twist:rotate,...'（算子名 extrude/spin/"
                     "loft_sphere/loft_torus/twist，:rotate / :slice 覆盖默认扫法）")
@@ -1068,6 +1153,7 @@ def main():
     g.add_argument("--plan", action="store_true", help="只打印每帧 θ / v / c，不渲染")
     g.add_argument("--hud-band", type=int, default=0, help="底部 HUD 条带高度（像素）：物体只画在上面，HUD 不压物体（0 = 旧行为：HUD 叠在画面上）")
     g.add_argument("--hud-scale", type=float, default=1.0, help="HUD 字号倍数")
+    g.add_argument("--cut-glow", type=float, default=0.55, help="surface 模式下 |w| − h 平切面的自发光强度（extrude / twist；0 = 旧的死黑）")
     g.add_argument("--still", type=int, default=None, help="只渲染第 N 帧存成图（--out 给 .jpg/.png），比较 --look 用")
     a = ap.parse_args()
     if a.mesh or a.sdf_res != 128 or a.sdf_faces != 40000 or a.mesh_lateral != "auto":
@@ -1100,7 +1186,7 @@ def main():
     if a.insert is not None:
         w, h = (int(x) for x in a.size.lower().split("x"))
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
-                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale)
+                        a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale, a.cut_glow)
         if a.plan:
             obj = OBJS[a.obj]
             for k in insert_track(obj, sp):

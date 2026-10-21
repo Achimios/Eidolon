@@ -97,6 +97,71 @@ class TestNarrowBandSDF(unittest.TestCase):
         self.assertEqual(F.MeshSDF("她_蜷缩_v1.glb").label, "her_curled_v1")
         self.assertEqual(F.MeshSDF("她.glb").label, "her")
         self.assertEqual(F.MeshSDF("测试_人台.glb").label, "test_mannequin")
+        self.assertEqual(F.MeshSDF("蜷缩_无材质_低模.glb").label, "curled_untextured_lowpoly")
+
+
+class _Sphere:
+    label = "sphere"
+
+    def __call__(self, x, y, z):
+        return F.L(x, y, z) - 0.5
+
+
+@unittest.skipUnless(HAS_TORCH, "four_d 需要 torch（.venv）")
+class TestLateralAndCut(unittest.TestCase):
+    def test_lateral_rotate(self):
+        """φ 方向转到 +x、行列式 +1；φ = −90 ≡ 旧的 "z" 选项 (x, y, z) → (−z, y, x)"""
+        import numpy as np
+        rng = np.random.default_rng(0)
+        V = rng.normal(size=(50, 3))
+        for phi in (0.0, 37.0, 60.0, 151.0):
+            l = np.array([math.cos(math.radians(phi)), 0, math.sin(math.radians(phi))])
+            self.assertTrue(np.allclose(F.lateral_rotate(l[None], phi), [[1, 0, 0]], atol=1e-12))
+            A = F.lateral_rotate(np.eye(3), phi)          # 线性映射的矩阵（行 = 基向量的像）
+            self.assertAlmostEqual(np.linalg.det(A), 1.0, places=12)
+        self.assertTrue(np.allclose(F.lateral_rotate(V, -90.0), np.stack([-V[:, 2], V[:, 1], V[:, 0]], 1)))
+
+    def test_symmetry_plane_recovers_known_yaw(self):
+        """左右对称、前后不对称的形体斜摆 φ = 35°（侧向）后，镜面搜索要找回 35°（mod 180）；x / z 两个旧选项的误差都更大"""
+        import numpy as np
+        import trimesh
+        parts = [trimesh.creation.box((0.3, 0.8, 0.3)).apply_translation(t) for t in ([0.35, 0, 0], [-0.35, 0, 0])]
+        parts.append(trimesh.creation.box((0.4, 0.3, 0.6)).apply_translation([0, 0.3, 0.35]))   # 只在前面（+z）→ 前后不对称
+        m = trimesh.util.concatenate(parts)
+        a = math.radians(35.0)
+        Rm = np.array([[math.cos(a), 0, -math.sin(a)], [0, 1, 0], [math.sin(a), 0, math.cos(a)]])   # x 轴 → (cos35, 0, sin35)
+        m.vertices = m.vertices @ Rm.T
+        phi, off, err, ex, ez = F.mesh_symmetry_plane(m, np.asarray(m.vertices), n=4000)
+        d = (phi - 35.0 + 90) % 180 - 90
+        self.assertLess(abs(d), 1.01)
+        self.assertLess(err, 0.5 * min(ex, ez))
+
+    def test_cut_face_marker(self):
+        """extrude 的 cap(p)：|w| = h 的平切面上 > 0，3D 曲面上 < 0"""
+        import torch
+        o = F.mesh_objs(_Sphere(), prefix="t")
+        ext, tw = o["t_extrude"], o["t_twist"]
+        p = torch.tensor([[0.0, 0.0, 0.0, 0.6], [0.5, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.5, 0.0, 0.3]], device=F.DEV)
+        self.assertTrue((ext.f(p[:2]).abs() < 1e-5).all())          # 两点都在表面上（L 带 1e-12 → 1e-6 级偏差）
+        self.assertGreater(float(ext.cap(p[:1])), 0)
+        self.assertLess(float(ext.cap(p[1:2])), 0)
+        self.assertGreater(float(tw.cap(p[2:3])), 0)
+        self.assertLess(float(tw.cap(p[3:4])), 0)
+
+    def test_cut_glow_lights_only_cut_faces(self):
+        """surface：平切面从死黑变亮；cut_glow = 0 时与旧行为一致（像素逐一相等），只有平切面附近的像素会变"""
+        import torch
+        o = F.mesh_objs(_Sphere(), prefix="t")["t_extrude"]
+        R = F.rot4(xw=math.pi / 2)
+        v0, _ = F.render(o, R, 0.1, 96, 64, "surface", yaw=1.4, pitch=0.2, dist=3.0, xray=False, cut_glow=0.0)
+        v1, _ = F.render(o, R, 0.1, 96, 64, "surface", yaw=1.4, pitch=0.2, dist=3.0, xray=False, cut_glow=0.55)
+        changed = (v1 - v0).abs() > 1e-4
+        self.assertGreater(int(changed.sum()), 50)
+        self.assertGreater(float(v1[changed].mean()), float(v0[changed].mean()) + 0.2)
+        no_cap = F.mesh_objs(_Sphere(), prefix="u")["u_spin"]          # spin 没有平切面：开不开都一样
+        a, _ = F.render(no_cap, F.rot4(), 0.0, 64, 48, "surface", xray=False, cut_glow=0.0)
+        b, _ = F.render(no_cap, F.rot4(), 0.0, 64, 48, "surface", xray=False, cut_glow=0.55)
+        self.assertTrue(torch.equal(a, b))
 
 
 if __name__ == "__main__":
