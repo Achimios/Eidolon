@@ -148,6 +148,16 @@ class TestLayerGhost(unittest.TestCase):
             self.assertAlmostEqual(float(o[y0, x0 + 8 * k + 2 * k, 2]), 1 / 3, places=6)
         self.assertEqual([a for a, _ in G.split_schedule([(1, 1)] * 4, "alt")], ["y", "x", "y", "x"])
 
+    def test_full_style_equals_still(self):
+        """全强度：g = 1 → 参数和静帧（BEST on cold）一模一样，与威胁 / 张力 / 饥饿无关；g 只缩放层距 / 色散 / 散射 / bloom"""
+        base = G.Params(**{**G.PRESETS["cold"], **G.BEST, "style": "full"})
+        q = G.params_from_sense(0.1, 0.9, 0.3, 1.0, base)
+        for f in ("spacing", "chan_sep", "scatter_r", "bloom", "n_layers", "n_vis", "grain", "scatter", "tex_scale"):
+            self.assertEqual(getattr(q, f), getattr(base, f), f)
+        r = G.params_from_sense(0.1, 0.9, 0.3, 1.15, base)
+        self.assertAlmostEqual(r.spacing, base.spacing * 1.15)
+        self.assertEqual(r.n_vis, base.n_vis)
+
     def test_tone_curve(self):
         x = np.linspace(0, 1, 11)
         np.testing.assert_array_equal(G.tone_curve(x, 0.0), x)

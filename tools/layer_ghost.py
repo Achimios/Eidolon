@@ -44,6 +44,7 @@
     A 回忆：clip --best --fps-hold 10 --name 21_多层重影_A回忆_v1        （源 10 fps 阶梯停帧，层 / 纹理每帧仍在动）
             clip --best --fps-hold 10 --glitch --name 21_多层重影_A回忆_瓦解_v1   （强起音叠 face_glitch：瀑布图行 + 本片，门控 = 效果强度）
     B 清晰：clip --best --style split --name 21_多层重影_B清晰分裂_v1     （平时干净；强起音层沿 y / x 轮流分裂 4 帧后弹回）
+    全强度：clip --best --style full --subdir 多层重影 --name 21_多层重影_全息女性_v3_全强度   （= 静帧 25b_v3 的参数常开，±15 % 随心跳呼吸，强起音 +25 %）
   任意 Params 字段：clip --set "sep_mul=2,chan_g=0.5,tex_scale=0.5,hl_smooth=0.6,spacing_mul=0.8,n_layers=7"
   倍率旋钮（感官映射之后再乘）：spacing_mul、sep_mul、chan_g（G 错位 = chan_g × R/B 错位）、tex_scale（纹粒尺寸）、grain_mul、hl_smooth（白处纹粒减弱）
 """
@@ -255,7 +256,9 @@ class Params:
     axis: str = "y"                 # y = 竖向错开（默认）| x = 横向错开（通道分离也沿 x）
     direction: int = 1              # +1 向下 / 向右；−1 向上 / 向左
     # ---- 两个版本（👤 2026-10-22「重影现在的效果很好」→ A 回忆 / B 清晰分裂），clip 用
-    style: str = "memory"           # memory = A 回忆（常开底强度 + 脉冲）| split = B 清晰（平时干净，强起音才分裂）
+    style: str = "memory"           # memory = A 回忆（常开底强度 + 脉冲）| split = B 清晰（平时干净，强起音才分裂）| full = 全强度（静帧参数常开，只 ±breath 呼吸）
+    breath: float = 0.15            # full：随心跳（EMA τ 4 帧）呼吸的幅度 ±breath
+    push: float = 0.25              # full：强起音脉冲再加多少（× 层距 / 色散 / 散射 / bloom）
     fps_hold: float = 0.0           # > 0 → 源画面按这个帧率阶梯停帧（如 10 fps），层 / 纹理 / 门控仍每帧在动（「低帧率的回忆」）
     split_axis: str = "alt"         # B：每次分裂的方向 y | x | alt（y、x 轮流）| random
     split_frames: int = 4           # B：分裂满幅保持几帧
@@ -287,6 +290,11 @@ PRESETS = {
 def params_from_sense(threat, tension, hunger, g=1.0, base=None, **kw):
     """感官 + 门控 g → 参数（映射表见模块 docstring）"""
     p = Params(**{**(asdict(base) if base else {}), **kw})
+    if p.style == "full":           # 全强度（= 静帧 25b_v3 的参数）：g 是缩放系数 ≈ 0.85–1.15 呼吸，脉冲再往上推；层数 / 纹理不变
+        p.spacing, p.chan_sep, p.scatter_r, p.bloom = p.spacing * g, p.chan_sep * g, p.scatter_r * g, p.bloom * g
+        p.sense = {"threat": round(float(threat), 3), "tension": round(float(tension), 3),
+                   "hunger": round(float(hunger), 3), "gate": round(float(g), 3)}
+        return p
     if p.style == "split":          # B 清晰：g = 0 → 只剩第 0 层、无纹理 / 散射 / bloom = 干净的画面；分裂时一起出来
         p.spacing = p.split_px * (0.6 + 0.8 * threat)
         p.n_vis = 1 + (p.n_layers - 1) * g
@@ -668,7 +676,16 @@ def cmd_clip(a):
         if v_ is not None:
             extra[k_] = v_
     base = Params(**{"palette": a.palette, "unit": a.unit, **extra})
-    if base.style == "split":       # B：平时 0（干净），强起音满幅 split_frames 帧后快速弹回
+    if base.style == "full":        # 全强度：g = 1 + breath·(2·hb − 1) + push·脉冲；hb = 心跳 EMA（τ 4 帧）
+        pl, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=0.0)
+        hb = np.asarray(ch["heartbeat"], np.float64)
+        ks = np.minimum(np.round(t_play * FPS).astype(int), len(hb) - 1)
+        e, hbs = float(hb[ks[0]]), []
+        for k_ in ks:
+            e += (hb[k_] - e) / 4.0
+            hbs.append(e)
+        g = 1 + base.breath * (2 * np.asarray(hbs) - 1) + base.push * pl
+    elif base.style == "split":       # B：平时 0（干净），强起音满幅 split_frames 帧后快速弹回
         g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=0.0, hold=base.split_frames, tau=base.split_tau)
     else:
         g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=a.base)
@@ -684,7 +701,11 @@ def cmd_clip(a):
     pipe = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
                              "-r", str(FPS), "-i", "-", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16", str(vtmp)],
                             stdin=subprocess.PIPE)
-    if base.style == "split":
+    if base.style == "full":
+        mapping = {"all": "still parameters (25b_v3: BEST on cold preset) at full strength every frame; layers / texture / grain fixed",
+                   "scale": f"g = 1 + {base.breath}*(2*heartbeat_ema - 1) + {base.push}*pulse; spacing, chan_sep, scatter_r, bloom x g",
+                   "pulse": f"onsets with threat peak >= {a.thr} and gap >= {a.min_gap}s; full 2 f then exp tau 3 f"}
+    elif base.style == "split":
         mapping = {"threat": f"split spacing = {base.split_px}*(0.6+0.8*threat) ref-px; n_vis = 1+(N-1)g",
                    "tension": "chan_sep = (0.3+2.5*tension)*g",
                    "hunger": "scatter sigma = 10+50*hunger ref-px; s = 0.5g; grain 0.6g; bloom 0.4g (g = 0 -> clean)",
@@ -746,7 +767,9 @@ def cmd_clip(a):
     pipe.stdin.close()
     pipe.wait()
     print(f"{n} 帧  {time.time() - t0:.1f}s  脉冲 {fired}" + (f"  瓦解 {fired_fg}" if base.glitch else ""))
-    out = outname(S.MV / "样片" / f"{a.name}.mp4")
+    odir = S.MV / "样片" / a.subdir if a.subdir else S.MV / "样片"
+    odir.mkdir(parents=True, exist_ok=True)
+    out = outname(odir / f"{a.name}.mp4")
     subprocess.run([ff, "-y", "-loglevel", "error", "-i", str(vtmp), "-ss", f"{a.start:.3f}", "-t", f"{dur:.3f}",
                     "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
                     "-t", f"{dur:.3f}", str(out)], check=True)
@@ -783,7 +806,8 @@ def main():
     s2.add_argument("--hold", type=int, default=4, help="纹理 / 种子保持几帧")
     s2.add_argument("--hud", action=argparse.BooleanOptionalAction, default=True)
     s2.add_argument("--best", action="store_true", help="用扫参挑出的组合 BEST（25b_v3 那组）")
-    s2.add_argument("--style", default=None, choices=["memory", "split"], help="memory = A 回忆（默认）| split = B 清晰分裂")
+    s2.add_argument("--style", default=None, choices=["memory", "split", "full"], help="memory = A 回忆（默认）| split = B 清晰分裂 | full = 全强度（静帧参数常开）")
+    s2.add_argument("--subdir", default="", help="输出到 样片/<subdir>/（如 多层重影）")
     s2.add_argument("--fps-hold", type=float, default=None, help="源画面阶梯停帧的帧率（如 10）；层 / 纹理仍每帧在动")
     s2.add_argument("--split-axis", default=None, choices=["y", "x", "alt", "random"], help="B：分裂方向")
     s2.add_argument("--split-frames", type=int, default=None, help="B：分裂满幅保持几帧")
