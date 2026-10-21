@@ -61,7 +61,7 @@ def main():
     vb = rng.lognormal(np.log(5200), 0.55, nb)                      # 条块要横穿画面（The Crew 的条块飞满全宽）                      # 每条带一个水平速度（向右）
     vx_i = np.where(is_slab, vb[band], rng.lognormal(np.log(1500), 0.7, a.N)) * hitw
     vy_i = np.where(is_slab, rng.normal(0, 12, nb)[band], rng.normal(0, 160, a.N)) * hitw
-    gone = hitw > 0.25
+    gone = hitw > 0.08 + 0.5 * rng.random(a.N) ** 2                # 抖动阈值：脸的边缘也碎成颗粒，不是一块光滑的椭圆（👤：「为啥留一个边缘清晰的脸」）
 
     sense = json.loads((S.MV / "感官.json").read_text("utf-8"))
     pre = [t for t in sense["events"]["onsets"] if a.hit - 1.6 < t < a.hit - 0.15]
