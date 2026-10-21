@@ -3,7 +3,8 @@
 """最优传输 3D 多层（tools/ot_layers3d.py）自检：找「必须相等」的量。小规模、CPU 即可。
 1. ⭐层 t 上的 W2：最优配对下 μ_t 到 ν 的精确 W2（重新解匈牙利）== (1-t)·W2_0；熵映射同样成立（单调 ⇒ 最优）。
 2. 抖动沿 OT 方向、裁在 [0,1]：抖动后的点仍在各自的 OT 线段上。
-3. 相机：速度（平移 + 视线转向）处处 > 0、快进慢出（单调减速）、无滚转（相机 x 轴永远水平）、基正交。
+3. 相机（每个预设）：速度（平移 + 视线转向）处处 > 0、快进慢出、无滚转、基正交；ref 预设转角 < 12° 且永远在正面。
+6. 视频：热启动切片逐帧连续且贴近每帧目标；切片 W2 自洽；层的时间回声下标裁剪正确。
 4. 投影：注视点投到画面正中；身后的点给 NaN。
 5. 可插拔源 / 目标：.npy 点集原样读入（数量不等时重采样）；默认 still09 与静帧 09 逐位相同。
 """
@@ -56,28 +57,41 @@ class TestLayerW2(unittest.TestCase):
 
 
 class TestCamera(unittest.TestCase):
-    def setUp(self):
-        self.u = np.linspace(0, 1, 20001)
-        C, Lk = zip(*[L3.camera(v) for v in self.u])
-        self.C, self.L = np.array(C), np.array(Lk)
+    def path(self, preset):
+        u = np.linspace(0, 1, 20001)
+        C, Lk = zip(*[L3.camera(v, preset) for v in u])
+        return u, np.array(C), np.array(Lk)
 
     def test_speed_never_zero_and_decelerates(self):
-        v = np.linalg.norm(np.gradient(self.C, self.u, axis=0), axis=1)
-        self.assertGreater(v.min(), 0.5, "相机平移速度不能为 0")
-        f = self.L - self.C; f /= np.linalg.norm(f, axis=1, keepdims=True)
-        w = np.linalg.norm(np.gradient(f, self.u, axis=0), axis=1)
-        self.assertGreater(w.min(), 0.0, "视线转向速度不能为 0")
-        g = np.gradient(L3.ease(self.u), self.u)
-        self.assertGreater(g.min(), 0.15)
-        self.assertTrue(np.all(np.diff(g) <= 1e-9), "缓动速度必须单调减（快进慢出）")
-        self.assertGreater(v[0], 3 * v[-1], "入画要明显快于出画")
+        for preset in L3.CAMS:
+            u, C, Lk = self.path(preset)
+            v = np.linalg.norm(np.gradient(C, u, axis=0), axis=1)
+            self.assertGreater(v.min(), 0.05, f"{preset}: 相机平移速度不能为 0")
+            f = Lk - C; f /= np.linalg.norm(f, axis=1, keepdims=True)
+            w = np.linalg.norm(np.gradient(f, u, axis=0), axis=1)
+            self.assertGreater(w.min(), 0.0, f"{preset}: 视线转向速度不能为 0")
+            g = np.gradient(L3.ease(u, L3.CAMS[preset]["a"]), u)
+            self.assertGreater(g.min(), 0.15)
+            self.assertTrue(np.all(np.diff(g) <= 1e-9), "缓动速度必须单调减（快进慢出）")
+            self.assertGreater(v[0], 3 * v[-1], "入画要明显快于出画")
+
+    def test_ref_is_gentle_and_never_sees_back(self):
+        """ref 机位：视线总转角小（< 12°），相机永远在层的正面（z < 最前层 0）⇒ 不会看到镜像的背面"""
+        u, C, Lk = self.path("ref")
+        f = Lk - C; f /= np.linalg.norm(f, axis=1, keepdims=True)
+        ang = np.degrees(np.arccos(np.clip(f @ f[0], -1, 1))).max()
+        self.assertLess(ang, 12.0)
+        self.assertTrue(np.all(C[:, 2] < -1.0))
+        self.assertTrue(np.all(f[:, 2] > 0.5))
 
     def test_no_roll_orthonormal(self):
-        for i in range(0, len(self.u), 997):
-            R = L3.basis(self.C[i], self.L[i])
-            np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-12)
-            self.assertAlmostEqual(R[0, 1], 0.0, places=12)   # 相机 x 轴无 y 分量 = 地平线水平
-            self.assertGreater(R[1, 1], 0.0)                   # 相机 y 朝下（不倒置）
+        for preset in L3.CAMS:
+            u, C, Lk = self.path(preset)
+            for i in range(0, len(u), 997):
+                R = L3.basis(C[i], Lk[i])
+                np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-12)
+                self.assertAlmostEqual(R[0, 1], 0.0, places=12)   # 相机 x 轴无 y 分量 = 地平线水平
+                self.assertGreater(R[1, 1], 0.0)                   # 相机 y 朝下（不倒置）
 
     def test_projection_center_and_behind(self):
         C, Lk = L3.camera(0.4)
@@ -85,6 +99,36 @@ class TestCamera(unittest.TestCase):
         self.assertAlmostEqual(x[0], L3.W / 2, places=9)
         self.assertAlmostEqual(y[0], L3.H / 2, places=9)
         self.assertTrue(np.isnan(x[1]) and z[1] < 0)
+
+
+class TestVideo(unittest.TestCase):
+    def frames(self, F=6):
+        yy, xx = np.mgrid[0:60, 0:80] / 60.0
+        return np.stack([np.exp(-((xx - 0.6 - 0.03 * f) ** 2 + (yy - 0.5) ** 2) / 0.02) for f in range(F)])
+
+    def test_warm_start_tracks_and_converges(self):
+        fr = self.frames()
+        src, _ = L3.load_measure("disc", 3000, np.random.default_rng(0))
+        X, resid, uv2w = L3.video_maps(src, fr, 3000, 0.0, iters0=60, iters=20)
+        self.assertEqual(X.shape, (len(fr), 3000, 2))
+        self.assertLess(max(resid), 0.05, "每帧终点分布要贴近该帧目标")
+        step = np.linalg.norm(np.diff(X, axis=0), axis=2).mean(1)
+        self.assertLess(step.max(), 0.2, "热启动：粒子逐帧连续，不乱跳")
+        # 目标在动 ⇒ 质心跟着右移（每帧 0.03·宽 → 世界单位）
+        cx = X[:, :, 0].mean(1)
+        self.assertTrue(np.all(np.diff(cx) > 0))
+
+    def test_sliced_w2_zero_on_same_set(self):
+        A = np.random.default_rng(1).normal(size=(500, 2))
+        self.assertAlmostEqual(L3.sliced_w2(A, A[::-1].copy()), 0.0, places=12)
+        self.assertAlmostEqual(L3.sliced_w2(A, A + [0.3, 0.0]), 0.3 * np.sqrt(np.mean(np.cos(
+            np.random.default_rng(0).uniform(0, np.pi, 32)) ** 2)), places=9)
+
+    def test_lag_index(self):
+        self.assertEqual(L3.lag_index(50, 8, 9, 2, 121), 50)
+        self.assertEqual(L3.lag_index(50, 0, 9, 2, 121), 34)
+        self.assertEqual(L3.lag_index(3, 0, 9, 2, 121), 0)
+        self.assertEqual(L3.lag_index(500, 8, 9, 2, 121), 120)
 
 
 class TestMeasures(unittest.TestCase):
