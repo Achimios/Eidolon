@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """>v<🖼概念静帧2-入口-《Can't Kill Us》第二批概念静帧 11–18（接 stills.py 的 01–10，同一套视觉语法）。
 每张都是真算出来的：Chladni 沙粒、Rosensweig 磁流体尖刺、MEMS 梳齿谐振器一阶模态、本曲频谱瀑布、Kuramoto 瀑布、
-介电击穿 DBM、扫描线撕裂（本曲波形写进她的每一行）、被 threat 通道扰动的分岔图。
+介电击穿 DBM、扫描线撕裂（本曲波形写进她的每一行）、被 threat 通道扰动的分岔图；
+19 = 11 维超立方体 Petrie 投影上随本曲频带颤抖的卡拉比–丘残留意识。
 风格：黑底、冷灰、只给一个有含义的红；左下 HUD = 真参数（符号说真话）；右上标签。
 用法：python tools/stills_more.py [--only 11,14] [--out 目录] [--no-sheet]   默认输出到 Projekt_Visual/MV_Cant_Kill_Us/静帧/
 """
@@ -544,9 +545,143 @@ def s_bifurcation_tremble(eps=0.035):
                                  "trunk dx*/dr = 1/r^2 barely moves; branches tremble   r_inf = 3.5699 (red)"]
 
 
+# ---------- 19 十一维里的卡拉比–丘 ----------
+def _line_dens(P, wts, ss=2, k=1.4):
+    """折线 → 抗锯齿密度图（ss 倍超采样、双线性泼溅，再 ss×ss 盒式下采样）。
+    P: (L, M, 2) 像素坐标的 L 条折线；wts: (L,) 每条的亮度。单位长度的亮度恒定，与采样密度无关"""
+    a = P[:, :-1].reshape(-1, 2) * ss; b = P[:, 1:].reshape(-1, 2) * ss
+    w = np.repeat(wts, P.shape[1] - 1)
+    n = np.maximum(2, np.ceil(np.hypot(*(b - a).T) * k)).astype(int)
+    seg = np.repeat(np.arange(len(a)), n)
+    t = (np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n) + 0.5) / np.repeat(n, n)
+    q = a[seg] + (b[seg] - a[seg]) * t[:, None]
+    ww = w[seg] * np.repeat(np.hypot(*(b - a).T) / n, n)
+    Wd, Hd = W * ss, H * ss
+    x0 = np.floor(q[:, 0]).astype(int); y0 = np.floor(q[:, 1]).astype(int); fx = q[:, 0] - x0; fy = q[:, 1] - y0
+    d = np.zeros(Wd * Hd)
+    for dx, dy, f in ((0, 0, (1 - fx) * (1 - fy)), (1, 0, fx * (1 - fy)), (0, 1, (1 - fx) * fy), (1, 1, fx * fy)):
+        xx, yy = x0 + dx, y0 + dy
+        ok = (xx >= 0) & (xx < Wd) & (yy >= 0) & (yy < Hd)
+        d += np.bincount(yy[ok] * Wd + xx[ok], weights=(ww * f)[ok], minlength=Wd * Hd)
+    return d.reshape(H, ss, W, ss).mean((1, 3)) * ss
+
+
+def _cy_quintic(n=5, m=10, s=18, ext=1.0):
+    """Hanson 式卡拉比–丘五次截面：z1^n + z2^n = 1 ⊂ C²，z = a + ib，a ∈ [0, π/2]，b ∈ [−ext, ext]，
+    z1 = e^{2πi k1/n} cos(z)^{2/n}，z2 = e^{2πi k2/n} sin(z)^{2/n}，25 片 (k1, k2)。
+    返回 (re1, re2, im1, im2)：每个 (n²·2m, s) —— 每片 m 条等 a 线 + m 条等 b 线，每条 s 个采样。投影角 alpha 留给调用方"""
+    A, B = np.linspace(0, np.pi / 2, m), np.linspace(-ext, ext, m)
+    u = np.linspace(0, 1, s)
+    za = (A[:, None] + 1j * (-ext + 2 * ext * u)[None, :])            # 等 a 线
+    zb = ((np.pi / 2 * u)[None, :] + 1j * B[:, None])                   # 等 b 线
+    Z = np.concatenate([za, zb])
+    c1, c2 = np.cos(Z) ** (2 / n), np.sin(Z) ** (2 / n)
+    out = []
+    for k1 in range(n):
+        for k2 in range(n):
+            out.append((np.exp(2j * np.pi * k1 / n) * c1, np.exp(2j * np.pi * k2 / n) * c2))
+    z1 = np.concatenate([o[0] for o in out]); z2 = np.concatenate([o[1] for o in out])
+    return z1, z2
+
+
+def s_calabi_yau_11d(dim=11, n=5, t_lo=80.0, t_hi=84.0, t_near=82.0, f_lo=40.0, f_hi=8000.0, expo=5, seed=19,
+                     rings=((0.30, 2, 16.0), (0.58, 2, 18.0), (0.80, 1, 19.0), (1.0, 1, 25.0))):
+    """>v<🖼概念静帧2-卡拉比丘11维-她掉进 11 维：空间 = 11 维超立方体 {±½}^11 的 Petrie 正交投影（e_k = (cos πk/11, sin πk/11)），
+    2048 顶点 11264 条棱，极细；残留意识 = 挂在若干顶点轨道上的小卡拉比–丘五次截面（M 理论 11 = 4 + 1 + 6，弦的振动模式决定它是什么）。
+    每个 CY 分到本曲 82 s 附近的一个对数频带，颤抖幅度 = 该频带此刻的电平相对 80–84 s 中位数的抬升；颤抖画成多重曝光（在 (Im z1, Im z2) 平面里转 δα + 平移）。
+    她 = 正中一个亮点。红 = 最内层轨道里此刻最响的那一个：离她最近、正在同化她的那个"""
+    rng = np.random.default_rng(seed)
+    # --- 11-cube Petrie 投影 ---
+    V = (((np.arange(2 ** dim)[:, None] >> np.arange(dim)) & 1) - 0.5)
+    th = np.pi * np.arange(dim) / dim
+    E = np.stack([np.cos(th), np.sin(th)], 1)
+    P = V @ E
+    lo = ((np.arange(2 ** dim)[:, None] >> np.arange(dim)) & 1) == 0
+    ia, kb = np.nonzero(lo)
+    ib = ia + (1 << kb)
+    n_edges = len(ia)
+    Rmax = np.hypot(*P.T).max()
+    sc = 400 / Rmax
+    cx, cy = W / 2 + 130, H / 2 - 20                              # 右移一点，给左下 HUD 让位
+    XY = np.stack([cx + P[:, 0] * sc, cy - P[:, 1] * sc], 1)
+    n_dist = len(np.unique(np.round(P, 9), axis=0))
+    seg = np.stack([XY[ia], XY[ib]], 1)
+    lat = _line_dens(seg, np.ones(n_edges))
+    # --- 顶点轨道（绕中心转 π/11 的对称群，22 个一组）---
+    r = np.hypot(*P.T); rk = np.round(r, 6)
+    radii = np.unique(rk)
+    orbit_r = np.array([q for q in radii if (rk == q).sum() == 2 * dim])   # 恰好一条 C22 轨道（不和别的轨道同半径）
+    sites, ring, size = [], [], []
+    for j, (fr, step, sz) in enumerate(rings):
+        q = orbit_r[np.argmin(np.abs(orbit_r - fr * Rmax))]
+        idx = np.nonzero(rk == q)[0]
+        idx = idx[np.argsort(np.arctan2(P[idx, 1], P[idx, 0]))][::step]
+        sites += idx.tolist(); ring += [j] * len(idx); size += [sz] * len(idx)
+    sites = np.array(sites); ring = np.array(ring); size = np.array(size); N = len(sites)
+    # --- 本曲频带电平：N 个对数频带，内层 = 低频 ---
+    sr, nfft, hop = 22050, 8192, 256
+    x, _ = S.audio(sr=sr, start=t_lo, dur=t_hi - t_lo)
+    win = np.hanning(nfft)
+    nfr = 1 + (len(x) - nfft) // hop
+    pw = np.abs(np.fft.rfft(np.stack([x[i * hop:i * hop + nfft] * win for i in range(nfr)]), axis=1)) ** 2
+    tf = t_lo + (np.arange(nfr) * hop + nfft / 2) / sr
+    fq = np.fft.rfftfreq(nfft, 1 / sr)
+    edges = np.geomspace(f_lo, f_hi, N + 1)
+    fine = np.geomspace(f_lo, f_hi, N * 24)
+    Pf = np.stack([np.interp(fine, fq, p) * fine for p in pw])           # ×f：在 log f 上积分
+    L = 10 * np.log10(Pf.reshape(nfr, N, 24).sum(2) + 1e-12)              # (帧, 频带) dB
+    near = np.abs(tf - t_near) < 0.35
+    flux = np.r_[0, np.clip(np.diff(L, axis=0), 0, None).sum(1)]
+    fi = np.nonzero(near)[0][np.argmax(flux[near])]                        # 82 s 附近最强的起音帧
+    t_at = tf[fi]
+    rise = L[fi] - np.median(L, 0)
+    amp = np.clip(0.5 + rise / 12.0, 0, 1)
+    # --- 卡拉比–丘 ---
+    z1, z2 = _cy_quintic(n=n, m=5, s=16)
+    ext = max(np.abs(z1.real).max(), np.abs(z2.real).max())
+    inner = np.nonzero(ring == 0)[0]
+    red_i = inner[np.argmax(amp[inner])]
+    gl, gw, rl, rw = [], [], [], []
+    for i in range(N):
+        Q, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        ph = rng.uniform(0, 2 * np.pi, (expo, 3))
+        for e in range(expo):
+            a_e = amp[i] * (0 if e == 0 else 1)
+            al = np.pi / 4 + a_e * 0.55 * np.sin(ph[e, 0])
+            p3 = np.stack([z1.real, z2.real, np.cos(al) * z1.imag + np.sin(al) * z2.imag], -1) / ext
+            p3 = p3 @ Q.T
+            off = a_e * size[i] * 0.55 * np.array([np.cos(ph[e, 1]), np.sin(ph[e, 1])])
+            px = XY[sites[i], 0] + off[0] + p3[..., 0] * size[i]
+            py = XY[sites[i], 1] + off[1] + p3[..., 1] * size[i]
+            depth = 0.25 + 0.75 * np.clip(p3[..., 2].mean(-1) * 0.6 + 0.5, 0, 1)   # 近亮远暗，读出立体
+            wt = depth * (0.8 if e == 0 else 0.25 + 0.3 * amp[i])
+            (rl if i == red_i else gl).append(np.stack([px, py], -1)); (rw if i == red_i else gw).append(wt)
+    cyg = _line_dens(np.concatenate(gl), np.concatenate(gw))
+    cyr = _line_dens(np.concatenate(rl), np.concatenate(rw))
+    # --- 合成 ---
+    lv = np.clip(lat / (1.6 * S.blur(S.blur(lat, 10), 10) + 0.25), 0, 1) ** 1.3 * 0.55   # 局部对比度归一：中心重叠上千条棱也还是细线，不糊成灰雾
+    cv = 1 - np.exp(-cyg * 0.20)                                  # 线稿很密：指数饱和，网格内部还看得见
+    rv = 1 - np.exp(-cyr * 0.22)
+    yy, xx = np.mgrid[0:H, 0:W]
+    dc = np.hypot(xx - cx, yy - cy)
+    her = np.exp(-(dc / 2.2) ** 2) + 0.25 * np.exp(-(dc / 9) ** 2)
+    hole = np.clip(np.exp(-(dc / 46) ** 2) * 0.85, 0, 1)          # 她周围压暗一点，亮点才读得出
+    g = np.clip(lv * (1 - hole) + cv + her, 0, 1)
+    img = S.colorize(g) * (1 - rv[..., None]) + rv[..., None] * S.RED
+    img = S.glow(np.clip(img, 0, 1), 3, 0.45)
+    lo_b, hi_b = edges[red_i], edges[red_i + 1]
+    return img, [
+        f"11-cube {{-1/2, 1/2}}^11: {2**dim} vertices, {n_edges} edges ({n_dist} distinct points)",
+        f"Petrie projection e_k = (cos pi k/11, sin pi k/11), symmetry C22",
+        f"Calabi-Yau quintic slice z1^5 + z2^5 = 1 in C^2, (k1,k2) in Z5 x Z5 = 25 patches",
+        f"remnants N = {N} on {len(rings)} vertex orbits, one log band each {f_lo:.0f} Hz - {f_hi/1000:.0f} kHz (inner = low)",
+        f"tremble: da, dx ~ a_i = 0.5 + (L_i(t) - median L_i) / 12 dB   Can't Kill Us @ {t_at:.2f} s",
+        f"red = most agitated inner remnant ({lo_b:.0f}-{hi_b:.0f} Hz, a = {amp[red_i]:.2f})   centre = her"]
+
+
 STILLS = {"11_chladni": s_chladni, "12_ferrofluid": s_ferrofluid, "13_mems": s_mems, "14_waterfall": s_waterfall,
           "15_kuramoto_waterfall": s_kuramoto_waterfall, "16_lichtenberg": s_lichtenberg, "17_scan_tear": s_scan_tear,
-          "18_bifurcation_tremble": s_bifurcation_tremble}
+          "18_bifurcation_tremble": s_bifurcation_tremble, "19_calabi_yau_11d": s_calabi_yau_11d}
 
 
 def contact_sheet(out, names, tw=640, th=360, pad=16, lab=30):
