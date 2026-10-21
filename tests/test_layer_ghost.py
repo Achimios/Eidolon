@@ -104,6 +104,29 @@ class TestLayerGhost(unittest.TestCase):
                                   **{**BARE, "scatter": 0.6, "scatter_r": 6.0, "aniso": 0.3}))
         self.assertAlmostEqual(float(out.sum()), float(img.sum()), delta=1e-3 * float(img.sum()))
 
+    def test_knobs(self):
+        """倍率旋钮：sep_mul / chan_g 的通道位移逐像素精确；spacing_mul 乘层距；hl_smooth 平图均值仍 = 1；tex_scale < 1 纹粒更细"""
+        H, W, y0, x0 = 120, 40, 10, 20
+        img = np.zeros((H, W, 3), np.float32)
+        img[y0, x0] = 1.0
+        p = G.Params(n_layers=3, n_vis=3, spacing=10.0, growth=1.0, falloff=1.0, edge="zero",
+                     **{**BARE, "chan_sep": 2.0, "sep_mul": 1.5, "chan_g": 0.5, "spacing_mul": 1.2})
+        out = G.run(img, p)
+        for k in range(3):
+            dy, s = int(round(12 * k)), 3.0 * k
+            self.assertAlmostEqual(float(out[y0 + dy - int(round(s)), x0, 0]), 1 / 3, places=6)
+            self.assertAlmostEqual(float(out[y0 + dy + int(round(0.5 * s)), x0, 1]), 1 / 3, places=6)
+            self.assertAlmostEqual(float(out[y0 + dy + int(round(s)), x0, 2]), 1 / 3, places=6)
+        bank = G.TextureBank()
+        flat = np.full((180, 320, 3), 0.1, np.float32)
+        o = G.run(flat, G.Params(n_layers=3, n_vis=3, **{**BARE, "grain": 0.6, "hl_smooth": 0.8, "tex_scale": 0.7}), bank)
+        self.assertLess(abs(float(o.mean()) / 0.1 - 1), 0.01)
+        def corr1(scale):
+            z = G.frame_texture(bank, 256, 256, scale, np.random.default_rng(2))
+            return float((z[:, 1:] * z[:, :-1]).mean())
+        self.assertLess(corr1(0.5), corr1(1.0))                    # 相邻像素更不像 = 纹粒更细
+        self.assertEqual(G.parse_set("sep_mul=2,n_layers=7"), {"sep_mul": 2.0, "n_layers": 7})
+
     def test_tone_curve(self):
         x = np.linspace(0, 1, 11)
         np.testing.assert_array_equal(G.tone_curve(x, 0.0), x)

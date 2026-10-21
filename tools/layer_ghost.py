@@ -38,6 +38,10 @@
 用法（仓库 .venv）：
   python tools/layer_ghost.py sheet [--t 4.0]      # 静帧/25 分解表 + 25b 冷 + 25c 参考色 + 25d 放大对比
   python tools/layer_ghost.py clip [--palette cold] # 样片/21_多层重影_全息女性_v1.mp4（整段裁肩 v2 → 45.12 s 起，配乐）+ .json + 接触表
+  python tools/layer_ghost.py sweep                  # 静帧/25e 2×3 扫参（每格 1:1 裁切 + 参数）+ 25b_v3（BEST 组合）
+  python tools/layer_ghost.py clip --best --name 21_多层重影_全息女性_v2   # 👤「更多色散、更细腻」的组合
+  任意 Params 字段：clip --set "sep_mul=2,chan_g=0.5,tex_scale=0.5,hl_smooth=0.6,spacing_mul=0.8,n_layers=7"
+  倍率旋钮（感官映射之后再乘）：spacing_mul、sep_mul、chan_g（G 错位 = chan_g × R/B 错位）、tex_scale（纹粒尺寸）、grain_mul、hl_smooth（白处纹粒减弱）
 """
 import argparse
 import json
@@ -195,7 +199,7 @@ def frame_texture(bank, H, W, unit, rng):
         z = z[:H, :W]
     else:
         t = torch.from_numpy(z)[None, None]
-        t = Fn.interpolate(t, scale_factor=unit, mode="bilinear", align_corners=False)
+        t = Fn.interpolate(t, scale_factor=unit, mode="bilinear", align_corners=False, antialias=unit < 1)
         z = t[0, 0, :H, :W].numpy()
     return (z - z.mean()) / (z.std() + 1e-6)
 
@@ -236,6 +240,13 @@ class Params:
     black: float = 0.03             # 色调曲线前的黑位：x → max(x − black, 0)/(1 − black)
     unit: float = 1.0               # 像素单位 u（输出像素 / 参考像素）；0 → 画宽 / 736。默认 1：裁肩 v2 里头宽 ≈ 500 px ≈ 参考图头宽 470 px
     edge: str = "replicate"         # 层平移越界怎么补：replicate（默认）| zero
+    # ---- 倍率旋钮（感官映射之后再乘，CLI --set 可改；👤 2026-10-22「更多色散、更细腻」的扫参就是调这些）
+    spacing_mul: float = 1.0        # 层距 ×
+    sep_mul: float = 1.0            # 通道分离 ×
+    chan_g: float = 0.0             # G 通道错位 = chan_g × R/B 的错位量（≠ 0 → 三色彩边：R −s，G +chan_g·s，B +s）
+    tex_scale: float = 1.0          # 纹粒尺寸 ×（< 1 更细）
+    grain_mul: float = 1.0          # 纹粒强度 ×
+    hl_smooth: float = 0.0          # 高光处纹粒减弱：T → 1 + (T − 1)(1 − hl_smooth·L²)，L = 该层源亮度（白处更平，像参考图）
     seed: int = 7
     sense: dict = field(default_factory=dict)
 
@@ -245,7 +256,9 @@ class Params:
                 f"falloff {self.falloff}  chan_sep {self.chan_sep:.2f}·u/layer  palette {self.palette}  u={u:.2f}px",
                 f"texture: ref high-pass  grain {self.grain:.2f}  gamma {self.gamma}  rgb±{self.tex_rgb}px   "
                 f"scatter s {self.scatter:.2f}  σy {self.scatter_r:.0f}·u  σx/σy {self.aniso}   "
-                f"bloom {self.bloom:.2f} thr {self.bloom_thr}   tone k {self.tone}   seed {self.seed}"]
+                f"bloom {self.bloom:.2f} thr {self.bloom_thr}   tone k {self.tone}   seed {self.seed}",
+                f"knobs: spacing x{self.spacing_mul}  sep x{self.sep_mul}  chan_g {self.chan_g}  tex_scale {self.tex_scale}  "
+                f"grain x{self.grain_mul}  hl_smooth {self.hl_smooth}"]
 
 
 # 静帧预设：冷（本片，👤 最喜欢的 17 瀑布图行·本片那种冷灰白、少色）/ 参考色（层距大、层色饱和 → 错开处出彩）
@@ -274,10 +287,10 @@ def layer_offsets(p: Params, unit):
     """[(dy_k, dx_k, (sep_R, sep_G, sep_B))]：整数像素"""
     out = []
     for k in range(p.n_layers):
-        dy = int(round(unit * p.spacing * (k ** p.growth))) if k else 0
+        dy = int(round(unit * p.spacing * p.spacing_mul * (k ** p.growth))) if k else 0
         dx = int(round(p.slant * dy))
-        s = unit * p.chan_sep * k
-        out.append((dy, dx, (int(round(-s)), 0, int(round(s)))))
+        s = unit * p.chan_sep * p.sep_mul * k
+        out.append((dy, dx, (int(round(-s)), int(round(p.chan_g * s)), int(round(s)))))
     return out
 
 
@@ -322,7 +335,9 @@ def run(img, p: Params, bank=None, stages=False):
     offs = layer_offsets(p, u)
     w = layer_weights(p)
     tint = layer_tints(p, w)
-    use_tex = p.grain > 0
+    use_tex = p.grain * p.grain_mul > 0
+    gr = p.grain * p.grain_mul
+    lsrc = np.clip(lum(src), 0, 1) if p.hl_smooth > 0 else None
     if use_tex and bank is None:
         bank = TextureBank()
     blurred = gblur(src, u * p.scatter_r, u * p.scatter_r * p.aniso) if p.scatter > 0 else None
@@ -339,12 +354,15 @@ def run(img, p: Params, bank=None, stages=False):
             T = None
         elif p.tex_mode == "carry":    # 一张纹理贴在源上，跟着每一层一起平移
             if T_show is None:
-                T0 = texture_mask(frame_texture(bank, H, W, u, rng), p.grain, p.gamma)
+                T0 = texture_mask(frame_texture(bank, H, W, u * p.tex_scale, rng), gr, p.gamma)
             T = np.roll(T0, (dy, dx), axis=(0, 1))     # 循环平移：纹理统计不变，画边不会复制出竖条
         else:                          # screen：每层自己一张（随机块 / 偏移），固定在画面上
-            T = texture_mask(frame_texture(bank, H, W, u, rng), p.grain, p.gamma)
+            T = texture_mask(frame_texture(bank, H, W, u * p.tex_scale, rng), gr, p.gamma)
         if T_show is None and T is not None:
             T_show = T
+        if T is not None and lsrc is not None:     # 高光处纹粒减弱（(T − 1) 乘一个只随亮度变的因子 → 平图上均值仍 = 1）
+            Lk = shift(lsrc, dy, dx, p.edge)
+            T = 1 + (T - 1) * (1 - p.hl_smooth * Lk * Lk)
         for c in range(3):
             a = w[k] * tint[k, c]
             lay = a * shift(src[..., c], dy + sep[c], dx, p.edge)
@@ -457,6 +475,61 @@ def zoom(im, box, k=3):
     return im.crop(box).resize(((box[2] - box[0]) * k, (box[3] - box[1]) * k), Image.NEAREST)
 
 
+def parse_set(text):
+    """--set "sep_mul=1.5,chan_g=0.5,n_layers=7" → dict（按 Params 字段的类型转换）"""
+    if not text:
+        return {}
+    types = {k: type(v) for k, v in asdict(Params()).items()}
+    out = {}
+    for kv in text.split(","):
+        k, v = kv.split("=")
+        k = k.strip()
+        if k not in types:
+            raise SystemExit(f"--set：没有参数 {k}；可用：{', '.join(types)}")
+        out[k] = types[k](v) if types[k] is not bool else v.lower() in ("1", "true", "yes")
+    return out
+
+
+# 👤 2026-10-22「更多色散、更细腻」的 2×3 扫参（cold 预设之上的改动）
+SWEEP = [
+    ("A  baseline (25b_v2)", {}),
+    ("B  sep x1.5 + G 0.5 (3-colour fringe)", dict(sep_mul=1.5, chan_g=0.5)),
+    ("C  sep x2 + G 0.5", dict(sep_mul=2.0, chan_g=0.5)),
+    ("D  grain x0.7 size, hl_smooth 0.6, grain x0.85", dict(tex_scale=0.7, hl_smooth=0.6, grain_mul=0.85)),
+    ("E  grain x0.5 size, hl_smooth 0.6, grain x0.85", dict(tex_scale=0.5, hl_smooth=0.6, grain_mul=0.85)),
+    ("F  spacing 7 px, 7 layers, falloff 0.75", dict(spacing=7.0, n_layers=7, n_vis=7.0, falloff=0.75)),
+]
+# 扫参里挑出来的组合（→ 25b_v3 + 样片 21_v2）
+BEST = dict(sep_mul=2.0, chan_g=0.5, tex_scale=0.7, hl_smooth=0.6, grain_mul=0.85,
+            spacing=7.0, n_layers=7, n_vis=7.0, falloff=0.75)
+
+
+def cmd_sweep(a):
+    """2×3 扫参：每格 = 同一帧的 1:1 原像素裁切（640×720，看得见纹粒），格内写参数；再出最佳组合的整帧"""
+    img = video_frames(Path(a.src), a.t, 1)[0]
+    bank = TextureBank()
+    x0 = a.crop_x
+    cw, ch_ = 640, 720
+    sheet = Image.new("RGB", (3 * cw, 2 * ch_ + 70), (8, 8, 10))
+    for i, (name, kw) in enumerate(SWEEP):
+        p = Params(**{**PRESETS["cold"], **kw}, seed=a.seed, unit=a.unit)
+        im = to_im(run(img, p, bank)).crop((x0, 0, x0 + cw, ch_))
+        ImageDraw.Draw(im).rectangle((0, 0, cw, 30), fill=(0, 0, 0))
+        label(im, [name], s=1.0, color=(235, 235, 235), pos="tl")
+        label(im, [", ".join(f"{k}={v}" for k, v in kw.items()) or "cold preset"], s=0.8, color=(170, 176, 182))
+        sheet.paste(im, ((i % 3) * cw, 70 + (i // 3) * ch_))
+    label(sheet, [f"25e  layer ghost parameter sweep, cold preset + changes, frame t={a.t}s, 1:1 crop x={x0}..{x0 + cw}",
+                  "knobs: sep_mul (R up / B down x), chan_g (G offset, fraction of R/B), tex_scale (grain size x), "
+                  "grain_mul, hl_smooth (less grain in whites), spacing / n_layers / falloff"], s=1.0, color=(170, 176, 182), pos="tl")
+    dst = S.MV / "静帧"
+    o1 = outname(dst / "25e_多层重影_参数扫_v1.jpg"); sheet.save(o1, quality=93)
+    pb = Params(**{**PRESETS["cold"], **BEST}, seed=a.seed, unit=a.unit)
+    o2 = outname(dst / "25b_多层重影_冷_v3.jpg")
+    label(to_im(run(img, pb, bank)), pb.hud(img.shape[1]), s=0.9, color=(150, 156, 162)).save(o2, quality=94)
+    for o in (o1, o2):
+        print("->", o)
+
+
 def cmd_sheet(a):
     img = video_frames(Path(a.src), a.t, 1)[0]
     bank = TextureBank()
@@ -533,6 +606,7 @@ def cmd_clip(a):
     on = np.asarray(sn["events"]["onsets"])
     g, fired = pulses(t_play, on, th, thr=a.thr, min_gap=a.min_gap, base=a.base)
     bank = TextureBank()
+    extra = {**(BEST if a.best else {}), **parse_set(a.set)}
     CACHE.mkdir(parents=True, exist_ok=True)
     vtmp = CACHE / f"{a.name}_noaudio.mp4"
     pipe = subprocess.Popen([ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}",
@@ -547,7 +621,7 @@ def cmd_clip(a):
                         "gate": f"g = max({a.base}, pulse); pulse on onsets with threat peak >= {a.thr} and >= {a.min_gap}s after the last fired; "
                                 f"full 2 f then exp tau 3 f",
                         "seed": f"new texture/seed every {a.hold} frames and at fired pulses"},
-            "fired": fired, "frames": []}
+            "knobs": extra, "fired": fired, "frames": []}
     seed, t0 = 100, time.time()
     fired_t = [o for o, _ in fired]
     thumbs, every = [], max(1, n // 16)
@@ -557,7 +631,7 @@ def cmd_clip(a):
         if i % a.hold == 0 or any(abs(o - tp) < 0.5 / FPS for o in fired_t):
             seed += 1
         p = params_from_sense(ch["threat"][k], ch["tension"][k], ch["hunger"][k], float(g[i]),
-                              Params(palette=a.palette, seed=seed, unit=a.unit))
+                              Params(**{"palette": a.palette, "unit": a.unit, **extra, "seed": seed}))
         out = run(f, p, bank)
         im = to_im(out)
         if a.hud:
@@ -590,6 +664,12 @@ def main():
     s1.add_argument("--seed", type=int, default=7)
     s1.add_argument("--unit", type=float, default=1.0, help="像素单位（输出 px / 参考 px）；0 = 画宽 / 736")
     s1.add_argument("--boxes", type=json.loads, default=None, help='放大框 JSON：[[x0,y0,x1,y1],...]（200×200）')
+    s3 = sp.add_parser("sweep")
+    s3.add_argument("--src", default=str(SRC_VIDEO))
+    s3.add_argument("--t", type=float, default=4.0)
+    s3.add_argument("--seed", type=int, default=7)
+    s3.add_argument("--unit", type=float, default=1.0)
+    s3.add_argument("--crop-x", type=int, default=520, help="每格 1:1 裁切的左边 x")
     s2 = sp.add_parser("clip")
     s2.add_argument("--src", default=str(SRC_VIDEO))
     s2.add_argument("--start", type=float, default=45.12, help="第 0 帧 = 歌里的播放秒数")
@@ -601,8 +681,10 @@ def main():
     s2.add_argument("--base", type=float, default=0.25, help="脉冲之间的底强度")
     s2.add_argument("--hold", type=int, default=4, help="纹理 / 种子保持几帧")
     s2.add_argument("--hud", action=argparse.BooleanOptionalAction, default=True)
+    s2.add_argument("--best", action="store_true", help="用扫参挑出的组合 BEST（25b_v3 那组）")
+    s2.add_argument("--set", default="", help='覆盖任意 Params 字段，如 "sep_mul=2,chan_g=0.5,tex_scale=0.5,n_layers=7"（在 --best 之上）')
     a = ap.parse_args()
-    {"sheet": cmd_sheet, "clip": cmd_clip}[a.cmd](a)
+    {"sheet": cmd_sheet, "clip": cmd_clip, "sweep": cmd_sweep}[a.cmd](a)
 
 
 if __name__ == "__main__":
