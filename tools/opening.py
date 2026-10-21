@@ -58,7 +58,7 @@ def load_audio(dur=40.0, sr=SR):
     """样本 i ↔ 播放时间 i/sr（走 sensorium.decode：原曲音频晚 0.042 s 开始，从 0 解码要补零）"""
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
     import sensorium
-    return sensorium.decode(S.MUSIC, 0.0, dur, sr)
+    return sensorium.load_audio(S.MUSIC, 0.0, dur, sr)                 # float64，满幅 = 1（decode 是 int16）
 
 
 def sense():
@@ -135,6 +135,7 @@ class String:
         self.taper = smooth(1 - np.abs(self.pos), 0, 0.07)                                      # 两端固定、吸收
         self.red = np.abs(self.pos - self.p0) < 0.03
         self.acc = np.zeros((H, W)); self.accr = np.zeros((H, W))
+        self.g = 1.0                                                     # 折叠后的显示增益（弱信号时最多 ×2.5，HUD 写出来）
         an = strong_onsets(sn, 0, PH0)
         self.yaw = Cam(lambda t: 0.015 + 0.11 * smooth(t, 5, 11), an, 0.10, 0.6)
         self.Lh, self.G = 0.40 * W, 0.42 * H
@@ -162,11 +163,15 @@ class String:
             ts = t + j * shutter / sub
             s = ts - np.abs(self.pos - self.p0) / c                         # 推迟时间：弦 = 延迟线
             xs0, xs1, xs2 = self.xs(s), self.xs(s - self.tau), self.xs(s - 2 * self.tau)
+            if j == 0:                                                   # 吸气前低音变弱 → 团缩成点；显示增益托一下，不让它消失
+                r = np.sqrt((xs0 ** 2).mean()) + 1e-6
+                self.g += (np.clip(0.45 / r, 1.0, 2.5) - self.g) * 0.25
+            Gf = self.G * (1 + (self.g - 1) * u)
             loss = np.exp(-np.abs(self.pos - self.p0) / lam)               # 有损弦：离驱动点越远越小
             tap = (1 - u) * self.taper * loss + u
-            X = (1 - u) * self.pos * self.Lh + u * self.G * xs1
-            Y = -((1 - u) * amp * xs0 * tap + u * self.G * xs0)
-            Z = u * self.G * xs2
+            X = (1 - u) * self.pos * self.Lh + u * Gf * xs1
+            Y = -((1 - u) * amp * xs0 * tap + u * Gf * xs0)
+            Z = u * Gf * xs2
             yaw = yaw0 + j * self.yaw.speed(t) * shutter / sub
             pitch = 0.16 + 0.14 * np.sin(0.23 * ts + 0.4)
             px, py, k = project(X, Y, Z, yaw, pitch, 2200 - 22 * ts, 2200)
@@ -184,7 +189,7 @@ class String:
         im = Image.fromarray(to_u8(img))
         return hud(im, [f"x(t) = Can't Kill Us   t = {t:6.2f} s   bass < 120 Hz, AGC 2 s",
                         f"string: driven at 0.46 L   c = {c:6.2f} L/s   holds {hold * 1000:5.0f} ms   loss length {lam:4.2f} L   ends absorb",
-                        f"fold u = {u:.2f}   (x(s), x(s-tau), x(s-2tau))   tau = {self.tau * 1000:.1f} ms (1st ACF zero)   dim = {1 + 2 * u:.2f}"],
+                        f"fold u = {u:.2f}   (x(s), x(s-tau), x(s-2tau))   tau = {self.tau * 1000:.1f} ms (1st ACF zero)   dim = {1 + 2 * u:.2f}   display gain x{1 + (self.g - 1) * u:.2f}"],
                    "00  SIGNAL")
 
 
@@ -216,9 +221,14 @@ def reassigned_power(x, sr, centers, n=4096, df=0.5, fmax=3000.0, chunk=96):
 # ---------------------------------------------------------------- 瀑布图渲染（通用：歌 / 振子）
 DB_LO, DB_HI = -80.0, -14.0
 KURA_FULL = 300.0
-TAU_EFF = 1.0                           # 有效频率的平均时间（s）
+TAU_EFF = 0.5                           # 有效频率的平均时间（s）
 CMAP_GREY = [(0.0, (0, 0, 0)), (0.3, (0.035, 0.04, 0.045)), (0.6, (0.30, 0.33, 0.35)), (0.85, (0.72, 0.76, 0.79)), (1.0, (0.97, 0.98, 1.0))]
+CMAP_MICRO = [(0.0, (0, 0, 0)), (0.3, (0.035, 0.04, 0.045)), (0.6, (0.30, 0.33, 0.35)), (0.8, (0.50, 0.69, 0.75)),
+              (0.92, (0.86, 0.86, 0.72)), (1.0, (1.0, 0.95, 0.82))]   # 局部微彩：只有最强的载波带一点冷青→暖白，饱和度低
+MARK = {"grey": (200, 206, 210), "micro": (170, 214, 220), "sdr": (200, 206, 210)}
+PALETTE = {"name": "grey", "stops": CMAP_GREY}
 CMAP_SDR = [(0.0, (0, 0, 0.01)), (0.3, (0.02, 0.05, 0.20)), (0.55, (0.05, 0.30, 0.42)), (0.8, (0.72, 0.68, 0.38)), (1.0, (1.0, 0.97, 0.90))]
+PALETTES = {"grey": CMAP_GREY, "micro": CMAP_MICRO, "sdr": CMAP_SDR}
 
 
 def cmap(v, stops):
@@ -253,6 +263,7 @@ class Waterfall:
         y0 = m + int(26 * s); y1 = y0 + int(0.54 * h)
         sy0 = y1 + int(32 * s); sy1 = sy0 + int(0.17 * h)
         ncol, nrow = x1 - x0, y1 - y0
+        self.geom = (x0, x1, y0, y1, lo, hi)
         blk = rows[-nrow:]
         col = self.bin_cols(blk, lo, hi, ncol)[::-1]                       # 最新在上
         v = self.level(col)
@@ -273,7 +284,7 @@ class Waterfall:
         pk = self.level(np.convolve(self.bin_cols(self.peak[None], lo, hi, ncol)[0], box, "same"))
         im = Image.fromarray(to_u8(img))
         # 抗锯齿：2× 画线再缩
-        ss = 2
+        ss = 2 if s < 2 else 1
         lay = Image.new("L", (w * ss, h * ss), 0); dl = ImageDraw.Draw(lay)
         ty = lambda q: (sy1 - q * (sy1 - sy0)) * ss  # noqa: E731
         pts = [((x0 + i) * ss, ty(q)) for i, q in enumerate(tr)]
@@ -333,7 +344,7 @@ class Waterfall:
                 break
         for i in pick:
             fv = fpx[i]; isred = red_f is not None and abs(fv - red_f) < (hi - lo) / ncol * 4
-            colr = (255, 41, 51) if isred else (200, 206, 210)
+            colr = (255, 41, 51) if isred else MARK[PALETTE["name"]]
             yy = max(sy1 - tr[i] * (sy1 - sy0), sy0 + 24 * s)
             d.polygon([(x0 + i, yy - 4 * s), (x0 + i - 4 * s, yy - 11 * s), (x0 + i + 4 * s, yy - 11 * s)], fill=colr)
             d.text((x0 + i + 6 * s, yy - 22 * s), fmt.format(fv) if self.kind != "song" else f"{fv:.1f}", font=fs, fill=colr)
@@ -370,8 +381,12 @@ class SongWF:
         u = (t - a) / (b - a)
         return 700 - 100 * u, 1400 - 250 * u
 
-    def frame(self, t, w=W, h=H, stops=CMAP_GREY, s=1.0, title="01  RECALL / SPECTRUM"):
+    def frame(self, t, w=W, h=H, stops=None, s=1.0, title="01  RECALL / SPECTRUM", cam=None):
         r = int(round(t * ROWS_PER_S))
+        rf = float(self.track[min(r, self.r_end - 1)])
+        if cam is not None:
+            return cam.shoot(t, rf, lambda ww, hh, ss: self.frame(t, ww, hh, stops, ss, title, None), " Hz", "{:.1f}")
+        stops = stops or PALETTE["stops"]
         c, sp = SongWF.view(t)
         lo, hi = c - sp / 2, c + sp / 2
         rf = float(self.track[min(r, self.r_end - 1)])
@@ -380,10 +395,15 @@ class SongWF:
                                     f"hop {1000 / ROWS_PER_S:.1f} ms"], tick=50.0)
         cur = self.P[r - 3:r + 1].mean(0)
         i = int(rf / self.df)
-        pdb = 10 * np.log10(cur[max(0, i - 6):i + 7].sum() + 1e-14)
-        return hud(im, [f"t = {t:6.2f} s   center {c:6.1f} Hz   span {sp:6.1f} Hz   {(hi - lo) / ((w - 2 * int(28 * s) - int(46 * s))):.2f} Hz/px",
+        pdb = max(10 * np.log10(cur[max(0, i - 6):i + 7].sum() + 1e-14), -99.9)   # 低音音符间隙 → 本帧此处无能量
+        self.hud_lines = None
+        lines = [f"t = {t:6.2f} s   center {c:6.1f} Hz   span {sp:6.1f} Hz   {(hi - lo) / ((w - 2 * int(28 * s) - int(46 * s))):.2f} Hz/px",
                         f"tracked carrier (red) {rf:6.1f} Hz   {pdb:6.1f} dBFS   (max 1-s mean power, 30-1500 Hz)",
-                        "rows = 10.4 ms, newest on top   trace = this frame   dots = peak hold"], title, s)
+                 "rows = 10.4 ms, newest on top   trace = this frame   dots = peak hold"]
+        if getattr(self, "_nohud", False):
+            self.hud_lines, self.hud_title = lines, title
+            return im
+        return hud(im, lines, title, s)
 
 
 # ---------------------------------------------------------------- 01 Kuramoto 四视角
@@ -443,14 +463,14 @@ class Kuramoto:
         return [f"t = {t:6.2f} s   N = {self.N}   K = {self.K:.2f}  (+0.035 per beat, K_c = 1)",
                 f"R = {self.R:.3f}   locked = {self.lock.mean() * 100:4.1f} %   lock edge |w| = K*R = {self.K * self.R:.2f}"]
 
-    def _dots(self, X, Y, Z, yaw, pitch, dist, wt, red, acc, accr, decay):
+    def _dots(self, X, Y, Z, yaw, pitch, dist, wt, red, acc, accr, decay, kv=1.6):
         px, py, k = project(X, Y, Z, yaw, pitch, dist, 1500)
         d = np.zeros((H, W)); dr = np.zeros((H, W))
         for ox, oy, a in ((0, 0, 1.0), (1, 0, .5), (-1, 0, .5), (0, 1, .5), (0, -1, .5)):
             d += splat_aa(px + ox * k, py + oy * k, W, H, wt * k * a)
             dr += splat_aa(px[red] + ox * k[red], py[red] + oy * k[red], W, H, (wt * k * a)[red])
         acc *= decay; acc += d; accr *= decay; accr += dr
-        v = 1 - np.exp(-acc / 1.6); vr = 1 - np.exp(-accr / 1.2)
+        v = 1 - np.exp(-acc / kv); vr = 1 - np.exp(-accr / 1.2)
         img = v[..., None] * S.GREY * (1 - vr[..., None]) + vr[..., None] * S.RED
         return S.glow(np.clip(img, 0, 1), 3, 0.6)
 
@@ -461,7 +481,7 @@ class Kuramoto:
         X, Z = r * np.cos(self.alpha), r * np.sin(self.alpha)
         Y = -40 * np.cos(self.th)
         img = self._dots(X, Y, Z, self.ys, 0.80 + 0.07 * np.sin(0.17 * t), 1700 - 6 * (t - PH0),
-                         0.35 + 1.8 * b, self.edge, self.acc_s, self.accr_s, 0.55)
+                         0.7 + 3.0 * b, self.edge, self.acc_s, self.accr_s, 0.62, 1.0)
         im = Image.fromarray(to_u8(img))
         return hud(im, self.stats(t) + ["disc: radius = rank |w_i|, golden angle;  brightness & height = cos(theta_i);  red = lock edge"],
                    "01  RECALL / FIREFLIES")
@@ -477,20 +497,123 @@ class Kuramoto:
         return hud(im, self.stats(t) + ["ring: angle = theta_i, radius = 270 + 62 w_i;  trails 0.8/frame;  red = lock edge"],
                    "01  RECALL / PHASE RING")
 
+    def macro(self, t):
+        """animatic_v2 的 macro 视角原样搬来（👤2026-10-21：13d 的 26–32 s「绝佳的运动」）：
+        环 r = 150 + 32·w_i，画面中心 = 环上 ψ 方向 r = 160 的点，固定 3× —— 镜头跟着同步团走；晃来自威胁踢相位"""
+        r = 150 + 32 * self.w
+        x, y = W / 2 + r * np.cos(self.th), H / 2 + r * np.sin(self.th)
+        cx, cy = W / 2 + 160 * np.cos(self.psi), H / 2 + 160 * np.sin(self.psi)
+        mx, my = (x - cx) * 3 + W / 2, (y - cy) * 3 + H / 2
+        d = splat_aa(mx, my, W, H); dr = splat_aa(mx[self.lock], my[self.lock], W, H)
+        base = S.colorize(np.clip(S.blur(d, 2) * 6, 0, 1) ** 0.5)
+        red = np.clip(S.blur(dr, 2) * 6, 0, 1) * self.R
+        img = S.glow(np.clip(base * (1 - red[..., None]) + red[..., None] * S.RED, 0, 1), 3, 0.5)
+        im = Image.fromarray(to_u8(img))
+        return hud(im, self.stats(t) + [f"macro: camera = ring point at psi = {np.degrees(self.psi):6.1f} deg, r = 160, zoom 3x (animatic_v2 law);  red = locked x R"],
+                   "01  RECALL / MACRO")
+
     @staticmethod
     def view(t, a=PH0, b=PH0 + 4 * PHRASE):
         u = (t - a) / (b - a)
-        return 0.05 + 0.10 * u, 2.6 - 1.2 * u
+        return 0.05 + 0.07 * u, 2.6 - 1.75 * u ** 1.3            # 越来越近地看那根载波：踢动的展开越来越大
 
-    def wf_frame(self, t, w=W, h=H, stops=CMAP_GREY, s=1.0):
+    def wf_frame(self, t, w=W, h=H, stops=None, s=1.0, cam=None):
+        if cam is not None:
+            return cam.shoot(t, self.omega, lambda ww, hh, ss: self.wf_frame(t, ww, hh, stops, ss, None), " Hz", "{:+.3f}")
+        stops = stops or PALETTE["stops"]
         c, sp = Kuramoto.view(t)
         lo, hi = c - sp / 2, c + sp / 2
         rows = np.array(self.rows, np.float64)
         im = self.wf.render(rows, lo, hi, w, h, stops, red_f=self.omega, s=s, tick=0.05, unit="Hz", fmt="{:+.2f}",
-                            labels=["WATERFALL", "Kuramoto population", f"N = {self.N}", "effective freq <dtheta_i/dt>/2pi, EMA 1 s",
+                            labels=["WATERFALL", "Kuramoto population", f"N = {self.N}", "effective freq <dtheta_i/dt>/2pi, EMA 0.5 s",
                                     f"bin {self.df * 1000:.0f} mHz", f"hop {1000 / ROWS_PER_S:.1f} ms"])
-        return hud(im, self.stats(t) + [f"carrier (red) = locked group  Omega/2pi = {self.omega:+.3f} Hz   wiggles = phase slips of drifting oscillators"],
-                   "01  RECALL / OSCILLATOR SPECTRUM", s)
+        lines = self.stats(t) + [f"carrier (red) = locked group  Omega/2pi = {self.omega:+.3f} Hz   wiggles = phase slips of drifting oscillators"]
+        if getattr(self, "_nohud", False):
+            self.hud_lines, self.hud_title = lines, "01  RECALL / OSCILLATOR SPECTRUM"
+            return im
+        return hud(im, lines, "01  RECALL / OSCILLATOR SPECTRUM", s)
+
+
+# ---------------------------------------------------------------- 瀑布图的镜头（借 animatic_v2 macro 视角的运动律）
+def onset_table(sn, t0=0.0, t1=40.0, pct=75):
+    """强起音 + 归一化强度（威胁通道 ±3 帧最大值，前 25 %）"""
+    on = np.array(sn["events"]["onsets"]); th = np.array(sn["channels"]["threat"]); fps = sn["fps"]
+    st = np.array([th[max(0, int(t * fps) - 1):int(t * fps) + 4].max() for t in on])
+    m = (on >= t0) & (on < t1)
+    keep = m & (st >= np.percentile(st[m], pct))
+    return on[keep], st[keep] / st[keep].max()
+
+
+def snap(t, on, win=0.4):
+    """把计划的推进时刻吸附到附近最强的起音上（镜头按声音点进）"""
+    near = on[np.abs(on - t) < win]
+    return float(near[0]) if len(near) else t
+
+
+class WFCam:
+    """animatic_v2 的 macro 视角：画面中心 = 环上 ψ 方向的点（同步团所在），固定 3×；
+    「移」= 同步团自己在转（Ω + 心跳通道），「晃」= 威胁通道每帧踢相位 + 强起音的 break。
+    搬到瀑布图（一台被拍的仪器）上：
+      · 缩放 z：乐句里按计划的推进点（吸附到强起音）一次次「进」（3 帧内到位的 70 %，0.35 s 指数缓），
+                 每个强起音再加一点（log z += 0.12·强度，2.5 帧进、0.6 s 缓）；
+      · 移：放大后画面中心滑向「那个东西」—— 歌 = 跟踪的载波频率，振子 = 锁相群的频率 Ω（EMA 0.25 s），纵向靠近最新的行；
+      · 晃：强起音 → 一次衰减的冲击（竖向 6 Hz 阻尼振荡 0.12 s，幅度 ∝ 强度 × z）+ 每帧 ∝ 威胁通道的微抖（种子固定）。
+    全在被拍的画面上做（局部放大），不是对整幅画面按拍缩放。仪器按 2–3 倍分辨率渲染再裁，放大后仍是 1:1 的细节。"""
+
+    def __init__(self, sn, owner, steps, zmax=3.2):
+        self.sn, self.owner = sn, owner
+        self.on, self.st = onset_table(sn)
+        self.steps = [(snap(tt, self.on) if dz > 0 else tt, dz) for tt, dz in steps]      # (时刻, Δlog z)；只有「进」吸附到起音
+        self.zmax = zmax
+        self.f = None
+        self.rng = np.random.default_rng(7)
+        self.dirs = np.random.default_rng(11).uniform(-1, 1, len(self.on))
+
+    def zoom(self, t):
+        lz = 0.0
+        for ts, dz in self.steps:
+            d = t - ts
+            if d > 0:
+                lz += dz * (1 - np.exp(-d / 0.35)) if d > 3 / FPS else dz * 0.7 * d / (3 / FPS)
+        d = t - self.on; m = d >= 0
+        lz += (0.12 * self.st[m] * np.minimum(1, d[m] / (2.5 / FPS)) * np.exp(-d[m] / 0.6)).sum()
+        return float(np.clip(np.exp(lz), 1.0, self.zmax))
+
+    def jolt(self, t, z):
+        d = t - self.on; m = (d >= 0) & (d < 0.6)
+        e = self.st[m] * np.exp(-d[m] / 0.12)
+        dy = (10 * e * np.cos(2 * np.pi * 6 * d[m])).sum() * z
+        dx = (6 * e * self.dirs[m] * np.cos(2 * np.pi * 6 * d[m] + 1.0)).sum() * z
+        th = channel(self.sn, "threat", t)
+        dx += self.rng.normal(0, 1.2) * th * z; dy += self.rng.normal(0, 1.2) * th * z
+        return dx, dy
+
+    def shoot(self, t, f_target, render, unit, fmt):
+        self.f = f_target if self.f is None else self.f + (f_target - self.f) / (0.25 * FPS)
+        z = self.zoom(t)
+        k = 1 if z < 1.15 else (2 if z < 2.0 else 3)
+        o = self.owner
+        o._nohud = True
+        try:
+            big = render(W * k, H * k, float(k))
+        finally:
+            o._nohud = False
+        x0, x1, y0, y1, lo, hi = o.wf.geom
+        wz = float(np.clip((z - 1) / 0.8, 0, 1))
+        fx = x0 + (self.f - lo) / (hi - lo) * (x1 - x0)
+        fy = y0 + 0.24 * (y1 - y0)
+        cx = W * k / 2 + (fx - W * k / 2) * wz; cy = H * k / 2 + (fy - H * k / 2) * wz
+        dx, dy = self.jolt(t, z)
+        cw, ch = W * k / z, H * k / z
+        cx -= dx * cw / W; cy -= dy * ch / H
+        cx = float(np.clip(cx, cw / 2, W * k - cw / 2)); cy = float(np.clip(cy, ch / 2, H * k - ch / 2))
+        im = big.resize((W, H), Image.LANCZOS, box=(cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2))
+        if z >= 1.15:                                                    # 放大后 HUD 压在数据上：垫一条半透明黑
+            a_ = np.asarray(im, np.float64)
+            a_[H - 128:, :760] *= 0.25
+            im = Image.fromarray(a_.astype(np.uint8))
+        return hud(im, o.hud_lines + [f"cam: zoom x{z:4.2f}  focus {fmt.format(self.f)}{unit}  jolt = onset strength (threat ch.)  [macro law, animatic_v2]"],
+                   o.hud_title)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -502,14 +625,23 @@ def ffmpeg_pipe(path, w=W, h=H):
 
 
 def mux(video, out, start, dur):
+    """音轨 = sensorium.decode 的播放时间样本（原曲音频起点 0.042 s 已补零）→ wav → aac。
+    v1 用 -ss 直接取原曲，丢了 0.042 s 的起点，音频早 ~22 ms。"""
+    import wave
     import imageio_ffmpeg
-    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(video), "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                    "-i", str(S.MUSIC), "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    import sensorium
+    x = sensorium.decode(S.MUSIC, start, dur, 48000, ac=2)
+    wav = Path(video).with_suffix(".wav")
+    with wave.open(str(wav), "wb") as wf:
+        wf.setnchannels(2); wf.setsampwidth(2); wf.setframerate(48000); wf.writeframes(np.ascontiguousarray(x, np.int16).tobytes())
+    subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(video), "-i", str(wav),
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "256k",
                     "-t", f"{dur:.3f}", str(out)], check=True)
     # 临时视频留在 --tmp 目录里，不删（不在作品目录里删任何东西）
 
 
-PLAN = [(PH0, "wf_song"), (PH0 + PHRASE, "scatter"), (PH0 + 2 * PHRASE, "ring"), (PH0 + 3 * PHRASE, "wf_kura")]
+PLAN = [(PH0, "wf_song"), (PH0 + PHRASE, "scatter"), (PH0 + 2 * PHRASE, "macro"), (PH0 + 3 * PHRASE, "wf_kura")]   # v3：26–32 用 macro（👤点名）
 
 
 def which(t):
@@ -535,15 +667,17 @@ def contact(thumbs, path, cols=8):
     print("  contact ->", path)
 
 
-def stills(ver):
+def stills(ver, only=None, palette="grey"):
     sw = SongWF()
     t = 36.5
-    for stops, suffix in ((CMAP_GREY, ""), (CMAP_SDR, "_色")):
+    jobs = [(PALETTES[palette], None)] if only else [(CMAP_GREY, ""), (CMAP_SDR, "_色")]
+    PALETTE.update(name=palette if only else "grey", stops=PALETTES[palette])
+    for stops, suffix in jobs:
         sw.wf.peak[:] = 0
         for tt in np.arange(t - 1.0, t, 1 / FPS):        # 峰值保持要有历史
             sw.wf.peak = np.maximum(sw.wf.peak * 0.92, sw.P[int(round(tt * ROWS_PER_S)) - 3:int(round(tt * ROWS_PER_S)) + 1].mean(0))
         im = sw.frame(t, 1920, 1080, stops, 1.5)
-        name = f"22{'b' if suffix else ''}_瀑布图_高解析_{ver}{suffix}.jpg"
+        name = only or f"22{'b' if suffix else ''}_瀑布图_高解析_{ver}{suffix}.jpg"
         out = S.MV / "静帧" / name
         if out.exists():
             raise SystemExit(f"不覆盖：{out}")
@@ -557,17 +691,25 @@ def main():
     ap.add_argument("--end", type=float, default=T_END)
     ap.add_argument("--start", type=float, default=0.0, help="试渲用：从这里开始出帧（模拟仍从头算）")
     ap.add_argument("--no-material", action="store_true")
+    ap.add_argument("--materials", default="wf_song,scatter,macro,ring,wf_kura", help="要单独出的视角素材，逗号分隔")
+    ap.add_argument("--palette", default="grey", choices=sorted(PALETTES), help="瀑布图配色")
+    ap.add_argument("--still-name", default=None, help="--still 时只出这一张（静帧/ 下的文件名），用 --palette 的配色")
     ap.add_argument("--still", action="store_true")
     ap.add_argument("--out", default=None)
     ap.add_argument("--tmp", default=None, help="无声临时视频放哪（默认系统临时目录/eidolon_opening），不会被删")
     a = ap.parse_args()
+    PALETTE.update(name=a.palette, stops=PALETTES[a.palette])
     if a.still:
-        stills(a.ver); return
+        stills(a.ver, a.still_name, a.palette); return
     sn = sense()
     out = Path(a.out) if a.out else S.MV / "样片" / f"15_开头_0-38.7_{a.ver}.mp4"
     if out.exists():
         raise SystemExit(f"不覆盖：{out}")
     st = String(sn); km = Kuramoto(sn); sw = SongWF()
+    starts = [PH0 + p * PHRASE for p in range(4)]
+    cam_song = WFCam(sn, sw, [x for a_ in starts for x in ((a_ + 1.6, np.log(1.35)), (a_ + 3.2, np.log(1.6)), (a_ + PHRASE - 1e-3, -np.log(1.35 * 1.6)))])
+    cam_kura = WFCam(sn, km, [x for a_ in starts for x in ((a_ + 1.6, np.log(1.3)), (a_ + 3.2, np.log(1.4)), (a_ + 4.8, np.log(1.5)),
+                                                         (a_ + PHRASE - 1e-3, -np.log(1.3 * 1.4 * 1.5)))])
     print(f"  tau = {st.tau * 1000:.2f} ms", flush=True)
     nf = int(np.ceil(a.end * FPS - 1e-9)) + (0 if abs(a.end * FPS - round(a.end * FPS)) < 1e-6 else 0)
     i0 = int(np.floor(a.start * FPS))
@@ -578,7 +720,7 @@ def main():
     main_p = ffmpeg_pipe(tmp)
     mats = {}
     if not a.no_material:
-        for v in ("wf_song", "scatter", "ring", "wf_kura"):
+        for v in [m for m in a.materials.split(",") if m]:
             p = S.MV / "样片" / f"15_开头素材_{v}_13.1-38.7_{a.ver}.mp4"
             if p.exists():
                 raise SystemExit(f"不覆盖：{p}")
@@ -601,8 +743,8 @@ def main():
             need = set(mats) if mats else {v}
             need.add(v)
             for name in need:
-                frames[name] = (sw.frame(t) if name == "wf_song" else km.scatter(t) if name == "scatter"
-                                else km.ring(t) if name == "ring" else km.wf_frame(t))
+                frames[name] = (sw.frame(t, cam=cam_song) if name == "wf_song" else km.scatter(t) if name == "scatter"
+                                else km.ring(t) if name == "ring" else km.macro(t) if name == "macro" else km.wf_frame(t, cam=cam_kura))
             for name, (p, _, _) in mats.items():
                 p.stdin.write(frames[name].tobytes())
         main_p.stdin.write(frames[v].tobytes())
