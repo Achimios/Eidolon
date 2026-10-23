@@ -304,6 +304,17 @@ class TestGoldenAge(unittest.TestCase):
         self.assertTrue(torch.allclose(B[[0, 3]][:, [0, 3]], torch.eye(2, device=F.DEV)))
         self.assertTrue(torch.allclose(R1 @ R1.T, torch.eye(4, device=F.DEV), atol=1e-6))
 
+    def test_rim_follows_camera_roll(self):
+        """轮廓光在相机（含 roll）的基里定：az = 180、el = 0 = 正后方（= 视线方向）；roll 改变它的世界方向（el ≠ 0 时）"""
+        import torch
+        sp = F.InsertSpec(2.0, rim=1.0, rim_az=180.0, rim_el=0.0)
+        k = dict(t=0.0, yaw=1.1)
+        _, fwd, _, _ = F.cam_basis(1.1, sp.pitch, 1.0)
+        self.assertTrue(torch.allclose(F.rim_dir(sp, k)[0], fwd, atol=1e-6))
+        sp2 = F.InsertSpec(2.0, rim=1.0, rim_az=-160.0, rim_el=45.0, roll_rate=-5.0)
+        d0, d1 = F.rim_dir(sp2, dict(t=0.0, yaw=1.1))[0], F.rim_dir(sp2, dict(t=2.0, yaw=1.1))[0]
+        self.assertLess(float(d0 @ d1), 0.999)
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)

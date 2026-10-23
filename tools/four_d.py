@@ -806,7 +806,7 @@ def sdf_ao(g, p, n, steps=5):
 
 
 def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.045, red_gain=1.0, dist=None, xray=True, cut_glow=0.55,
-           fov=34.0, target=(0.0, 0.0, 0.0), key=None, emit=0.0, roll=0.0):
+           fov=34.0, target=(0.0, 0.0, 0.0), key=None, emit=0.0, roll=0.0, rim_light=None, ambient=0.035):
     dist = dist or obj.cam
     """>v<🧊四维切片-渲染-球追踪截面 → 灰度 + 红权重（hxw）。look: line（等距平面切出的等高线 + 轮廓）| surface（Lambert + rim）
     | sculpt（一盏硬主光 key 斜扫 + 软阴影 + AO + 镜面高光，几乎无补光 → 深黑；平切面照样自发光）"""
@@ -859,7 +859,12 @@ def render(obj, R, c, w, h, look="line", yaw=0.6, pitch=0.42, ss=2, spacing=0.04
         spec = (nrm * hv).sum(1).clamp(min=0) ** 48
         lit = sh * (1.06 * lk ** 1.15 + 0.6 * spec)
         lam = lk * sh                                            # 切面亮度跟主光走（下面 face 用）
-        v = img(0.012 + 0.035 * ao + lit * (0.55 + 0.45 * ao) + 0.10 * rim ** 2 * ao)
+        v = 0.012 + ambient * ao + lit * (0.55 + 0.45 * ao) + 0.10 * rim ** 2 * ao
+        if rim_light is not None:          # 轮廓光（从身后打）：只亮背光侧的掠射边 → 勾侧脸 / 肩线；不投影，乘 AO
+            Lr, kr = rim_light
+            lr = (nrm @ Lr).clamp(min=0)
+            v = v + kr * lr ** 1.5 * (0.25 + 0.75 * rim ** 0.8) * ao
+        v = img(v)
         if getattr(obj, "emit", None) is not None and emit > 0:      # 生长前沿在皮肤上的亮带
             v = v + emit * img(obj.emit(ph, c))
     elif look == "surface":
@@ -1160,7 +1165,8 @@ class InsertSpec:
     def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
                  tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
                  red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0, cut_glow=0.55,
-                 fov=34.0, target=(0.0, 0.0, 0.0), key_az=-95.0, key_el=38.0, red_point=False, cold=0.0, roll0=0.0, roll_rate=0.0, body_rate=0.0):
+                 fov=34.0, target=(0.0, 0.0, 0.0), key_az=-95.0, key_el=38.0, red_point=False, cold=0.0, roll0=0.0, roll_rate=0.0, body_rate=0.0,
+                 rim=0.0, rim_az=150.0, rim_el=25.0, ambient=0.035):
         self.dur, self.fps, self.size = dur, fps, size
         self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
         self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
@@ -1171,6 +1177,7 @@ class InsertSpec:
         self.cut_glow = cut_glow
         self.fov, self.target = fov, tuple(float(x) for x in target)
         self.key_az, self.key_el, self.red_point, self.cold = key_az, key_el, red_point, cold
+        self.rim, self.rim_az, self.rim_el, self.ambient = rim, rim_az, rim_el, ambient   # 轮廓光强度 / 方向（度，相对「当前」相机 + roll：roll 时光跟着转 → 明暗在变）
         self.roll0, self.roll_rate, self.body_rate = roll0, roll_rate, body_rate   # 度、度/秒：相机绕视线 roll；身体绕侧向轴 x（yz 平面）匀速转
         self.hud_band, self.hud_scale = hud_band, hud_scale      # hud_band > 0：物体只渲染在上面 H − band 像素里，HUD 独占底部条带（不重叠）
         if not 0 <= hud_band < size[1] // 2:
@@ -1249,6 +1256,15 @@ class RedPoint:
         return (torch.exp(-d2 / (2 * self.sigma ** 2)) * 1.4 * self.a).clamp(0, 1)
 
 
+def rim_dir(sp, k):
+    """>v<🧊四维切片-雕塑光-轮廓光方向：在「此刻」相机（含 roll）的基里定 az / el（az 0 = 从相机打，180 = 正后方；el 沿画面的上方向）
+    → 相机 roll 时轮廓光跟着画框转，身上的亮边位置在变（主光仍固定在世界里），roll 不会只是把一张图转过去"""
+    _, fwd, right, up = cam_basis(k["yaw"], sp.pitch, 1.0, (0.0, 0.0, 0.0), math.radians(sp.roll0 + sp.roll_rate * k["t"]))
+    a, e = math.radians(sp.rim_az), math.radians(sp.rim_el)
+    d = math.cos(e) * (math.cos(a) * -fwd + math.sin(a) * right) + math.sin(e) * up
+    return d / d.norm(), sp.rim
+
+
 def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     """一帧：渲染 + Betti + HUD。hud_band > 0 时物体画在上方 (H − band) 区域，HUD 在底部条带里 → 永不重叠。rp = RedPoint（跨帧状态）"""
     Wd, Hd = sp.size
@@ -1258,7 +1274,8 @@ def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     R = insert_R(obj, sp, k["th"], k["t"])
     key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el) if sp.look == "sculpt" else None
     v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"],
-                    cut_glow=sp.cut_glow, fov=sp.fov, target=sp.target, key=key, roll=math.radians(sp.roll0 + sp.roll_rate * k["t"]))
+                    cut_glow=sp.cut_glow, fov=sp.fov, target=sp.target, key=key, roll=math.radians(sp.roll0 + sp.roll_rate * k["t"]),
+                    rim_light=rim_dir(sp, k) if sp.rim > 0 else None, ambient=sp.ambient)
     if sp.red_point:
         rp = rp or RedPoint(*red.shape)
         red = rp(red)
@@ -1274,7 +1291,7 @@ def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     if sp.body_rate:
         cam_s += f"  body R_yz {sp.body_rate * k['t']:+.1f} deg ({sp.body_rate:+g} deg/s)"
     if sp.look == "sculpt":
-        cam_s += f"   key light az {sp.key_az:+.0f} el {sp.key_el:+.0f} (fixed in world)"
+        cam_s += f"   key az {sp.key_az:+.0f} el {sp.key_el:+.0f} (world)" + (f"  rim {sp.rim:g} az {sp.rim_az:+.0f} el {sp.rim_el:+.0f} (camera)" if sp.rim else "")
     lines = [f"{name} ({obj.op}): {obj.eq}",
              f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
              f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
@@ -2039,6 +2056,8 @@ def main():
     g.add_argument("--red-point", action="store_true", help="全片只留一个红点（最强的相切处，跨帧跟踪）")
     g.add_argument("--cold", type=float, default=0.0, help="暗部冷偏强度（0 = 关；0.5 ≈ 很淡）")
     g.add_argument("--roll", default="0,0", help="相机 roll：起始角（度）, 匀速（度/秒）；负数写成 --roll=-4,2")
+    g.add_argument("--rim", default="0,150,25", help="轮廓光 '强度,az,el'（度；az 相对当前相机含 roll，150 = 侧后方；强度 0 = 关）")
+    g.add_argument("--ambient", type=float, default=0.035, help="sculpt 环境底光（小 = 暗部更深）")
     g.add_argument("--body-rate", type=float, default=0.0, help="身体绕侧向轴 x 匀速转（度/秒；光固定，跟相机 roll 不同）")
     g.add_argument("--plot", default=None, help="运动速度图 png 路径（理论角速度 + 实测法向光流 / 帧间差分）")
     g.add_argument("--song-t0", type=float, default=None, help="这个镜头在歌里的起点（秒，播放时间）：速度图上标重拍")
@@ -2144,7 +2163,8 @@ def main():
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
                         a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale, a.cut_glow,
                         a.fov, tuple(float(x) for x in a.target.split(",")), *(float(x) for x in a.key.split(",")), a.red_point, a.cold,
-                        *(float(x) for x in a.roll.split(",")), a.body_rate)
+                        *(float(x) for x in a.roll.split(",")), a.body_rate,
+                        *(float(x) for x in a.rim.split(",")), a.ambient)
         if a.plan:
             obj = OBJS[a.obj]
             for k in insert_track(obj, sp):
