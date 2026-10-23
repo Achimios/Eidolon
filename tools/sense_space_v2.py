@@ -19,7 +19,12 @@
 镜头：持续环绕 / 漂移（yaw、pitch、dist、lookat 都是慢正弦，叠加不归零的前馈事件移动：提前 2 帧起步，1 − (1 − u)^3.5 快起慢收）；
   结尾不推近：最后一拍（49.78 人声停）之后镜头后退、继续漂。
 
-用法：python tools/sense_space_v2.py [--seg0 38.71 --seg1 51.51] [--name 24_感官空间_开头_v2] [--still 秒,秒 --out x.jpg]
+⭐v3（默认，👤看 v2：「镜头杂乱无章、没有跟踪某个地方；层距太大；要在里面搜寻」）：
+  层距压到 ~0.38（相邻 130），雾按近距离重标定；镜头 = 搜寻：目标 = 本段显著度最高的事件（人声起必选，相邻 ≥ 1.1 s），
+  起音 → 那一刻通量最大的分轨 × 通量重心频带，人声起 → VOICE 层 f0；事件没到时目标在播放头（感官.json 的已知未来 = 前馈），
+  到了随鱼眼往左滑、镜头跟着；找到后 0.55 s「读数」转去 EXPECT 层同一事件的竖刺（只移视线）；每次出发 = 区间里最强的起音（提前 2 帧）；
+  准星：灰 = SEARCH x%，红 = FOUND 0.6 s。慢漂叠加不归零；最后后退不推近。v2 的通量 clip(−80, −10) 是 bug（v3 已改），--v 2 保留原样复现。
+用法：python tools/sense_space_v2.py [--v 3|2] [--seg0 38.71 --seg1 51.51] [--name …] [--still 秒,秒 --out x.jpg]
 输出：MV/样片/信息可视化/<name>.mp4（配乐）+ _接触表.jpg + _镜头速度.png + .json。不覆盖已有文件。
 注：v1（tools/sense_space.py）依赖 info_graph；本版自带几个小工具函数，不 import info_graph（别的会话在改它）。
 """
@@ -156,6 +161,13 @@ def fisheye_inv(x, t_now):
 
 
 # ───────────────────────── Kuramoto 抖动（opening.py 律，局部踢） ─────────────────────────
+def _flux_range(dbs):
+    if VER["v"] == 2:
+        return -80.0, -10.0
+    pool = np.concatenate([d[d > -100].ravel()[::7] for d in dbs])
+    return float(np.percentile(pool, 60)), float(np.percentile(pool, 99.7))
+
+
 def kura_tremor(sense, dbs, t1, seed=1):
     """返回 wig[(layer, frame, ridge)] 世界单位的竖向位移（frame = (t − K_T0)·FPS），以及每帧的 K、R、locked。"""
     fps = sense["fps"]
@@ -166,7 +178,8 @@ def kura_tremor(sense, dbs, t1, seed=1):
     # 每层每条山脊的正频谱通量（dB 差，限 −80…−10）→ 24 fps
     flux = []
     for db in dbs:
-        r = np.clip(db, -80, -10).reshape(len(db), NR, NB // NR).mean(2)
+        # ⚠️v2 用了 v1 的 clip(−80, −10)（以为是 dBFS），但这里的频带电平在 −30…+40 dB → 只有安静频带算得出通量。v3 改成「底噪（四轨 60 百分位）… 99.7 百分位」
+        r = np.clip(db, *_flux_range(dbs)).reshape(len(db), NR, NB // NR).mean(2)
         fl = np.r_[np.zeros((1, NR)), np.clip(np.diff(r, axis=0), 0, None)]
         flux.append(fl)
     T = int(round((t1 - K_T0) * FPS)) + 2
@@ -332,9 +345,175 @@ def splat(x, y, w):
     return out.reshape(H, W)
 
 
+FOG = dict(z0=2300.0, L=1500.0)
+VER = {"v": 2}
+
+
 def fog(z):
-    """相机深度 → 亮度（雾）：近 1，远处衰减到 0.22"""
-    return float(np.clip(np.exp(-max(0.0, z - 2300) / 1500), 0.3, 1.0))
+    """相机深度 → 亮度（雾）：近 1，远处衰减到 0.3"""
+    return float(np.clip(np.exp(-max(0.0, z - FOG["z0"]) / FOG["L"]), 0.3, 1.0))
+
+
+# ───────────────────────── v3：在里面搜寻（👤2026-10-23 看 v2：镜头漫无目的、层距太大） ─────────────────────────
+def set_v3():
+    """层距压到 v2 的 ~0.38（相邻 130 世界单位），雾按近距离相机重标定"""
+    global STEMS, Z_SENSE, Z_EXP, Z_VOICE
+    STEMS = [("drums", 100.0), ("other", 230.0), ("bass", 360.0), ("vocals", 490.0)]
+    Z_SENSE, Z_EXP, Z_VOICE = -300.0, -170.0, -40.0
+    FOG.update(z0=1300.0, L=1000.0)
+    VER["v"] = 3
+
+
+def search_targets(sense, dbs, seg, gap=1.1, n_max=9, min_key=1.0):
+    """每个时刻「最值得看」的那一处 = 本段里显著度（无则意外度）最高的事件，人声起必选；相邻 ≥ gap 秒。
+    位置：起音 / 动机 → 那一刻正频谱通量最大的分轨层 × 频带；人声起 → VOICE 层该乐句 f0 中位数；absence → EXPECT 层的竖刺顶。
+    用感官.json 的已知未来做前馈：事件到来之前，目标就在播放头（x = 0）它将出现的地方。"""
+    s0, s1 = seg
+    evs = [e for e in sense["expect"]["events"] if s0 + 0.4 <= e["t"] <= s1 - 0.4]
+    key = lambda e: (e.get("sal") if e.get("sal") is not None else e["bits"])   # noqa: E731
+    pick = [e for e in evs if e["s"] == "voice_on"]
+    for e in sorted(evs, key=lambda e: -key(e)):
+        if len(pick) >= n_max:
+            break
+        if e["s"] in ("voice_off",) or key(e) < min_key or any(abs(e["t"] - p["t"]) < gap for p in pick):
+            continue
+        pick.append(e)
+    pick.sort(key=lambda e: e["t"])
+    phr = {round(p["start"], 2): p for p in sense["voice"]["phrases"]}
+    ys_r = (np.arange(NR) + 0.5) / NR * HH
+    out = []
+    for e in pick:
+        if e["s"] == "voice_on":
+            p = phr.get(round(e["t"], 2))
+            fz = p["f0_med"] if p else 440.0
+            out.append(dict(t=e["t"], y=yf(fz), z=Z_VOICE, kind="voice",
+                            lab=f"VOICE ON  {e['bits']:.1f} bit · sal {key(e):.2f} · f0 {fz:.0f} Hz"))
+        elif e["s"] == "absence":
+            out.append(dict(t=e["t"], y=60 + 34 * min(e["bits"], 12), z=Z_EXP, kind="absence",
+                            lab=f"ABSENCE  {e['bits']:.1f} bit (expected onset missing)"))
+        else:
+            i = int(round(e["t"] / HOP))
+            best = (-1, 0, 0)
+            for k, db in enumerate(dbs):
+                r = np.clip(db[max(0, i - 3):i + 4], *_flux_range(dbs)).reshape(-1, NR, NB // NR).mean(2)
+                fl = np.clip(np.diff(r, axis=0), 0, None).sum(0)
+                if fl.sum() > best[0]:
+                    best = (fl.sum(), k, float((fl * ys_r).sum() / max(fl.sum(), 1e-9)))     # 被打中的分轨 × 通量重心频带
+            _, k, yb = best
+            fc = F_LO * (F_HI / F_LO) ** (yb / HH)
+            out.append(dict(t=e["t"], y=yb + RIDGE * 0.5, z=STEMS[k][1], kind=e["s"],
+                            lab=f"{e['s'].upper()}  {e['bits']:.1f} bit · sal {key(e):.2f} · {STEMS[k][0]} {fc:.0f} Hz"))
+        out[-1].update(bits=e["bits"], sal=key(e))
+    # 找到之后「读数」：0.55 s 后转去 EXPECT 层看这一下有多意外（同一事件的竖刺顶；人声起 → 审计 ▼）—— 只在离下一个目标 ≥ 1.4 s 时
+    reads = []
+    for i, tg in enumerate(out):
+        nxt = out[i + 1]["t"] if i + 1 < len(out) else s1
+        if tg["kind"] != "absence" and nxt - tg["t"] >= 1.4:
+            y = 60 + 34 * min(tg["bits"], 12) + (26 if tg["kind"] == "voice" else 0)
+            reads.append(dict(t=tg["t"] + 0.55, tx=tg["t"], y=y, z=Z_EXP, kind="readout",
+                              lab=f"EXPECT  {tg['bits']:.1f} bit · sal {tg['sal']:.2f}" + ("  ▼ no cut answered (audit)" if tg["kind"] == "voice" else "")))
+    return sorted(out + reads, key=lambda d: d["t"])
+
+
+def target_pos(tg, tn):
+    """目标此刻在空间里的位置：没到 → 播放头（将要出现的地方）；到了 → 随鱼眼时间往左滑"""
+    tx = tg.get("tx", tg["t"])
+    x = fisheye_x(tn - tx, tn) if tn >= tx else 0.0
+    return np.array([float(x), tg["y"], tg["z"]])
+
+
+def camera_v3(seg, T, sense, tgs):
+    """搜寻：每个目标一次移动 —— 出发 = 上一个目标停留（≥ 0.5 s）之后、本目标前 ≥ 0.45 s 内最强的起音（提前 LEAD 帧起步，
+    1 − (1 − u)^3.5：起步最快、到目标时慢慢停住），到达 ≈ 事件时刻；lookat 追的是目标的实时位置（停留时跟着它往左滑）。
+    每次换一个斜角（yaw 交替 0.42 / 1.02，贴着层面掠过）、距离 1250–1700。慢漂叠在上面、不归零：yaw 每秒 +0.03，lookat / dist 小正弦。
+    最后一个目标停留后：后退 + 继续漂（不推近）。"""
+    s0, s1 = seg
+    on = np.asarray(sense["events"]["onsets"], float)
+    th = np.asarray(sense["channels"]["threat"], float); fps = sense["fps"]
+    ost = np.array([th[max(0, int(t * fps) - 1):int(t * fps) + 4].max() for t in on])
+    lead = LEAD / FPS
+    yaws, pitches = (0.55, 0.82, 0.64, 0.90), (0.10, 0.18, 0.07, 0.15)
+    mv = []
+    prev_a = -1.0
+    for k, tg in enumerate(tgs):
+        a = tg["t"] - s0
+        lo_, hi_ = max(prev_a + 0.5, 0.0), a - 0.6
+        m = (on - s0 >= lo_) & (on - s0 <= hi_)
+        d = float(on[m][np.argmax(ost[m])] - s0) if m.any() else max(lo_, a - 1.2)
+        if k == 0:
+            d = min(d, max(0.0, a - 1.2))
+        if tg["kind"] == "readout":
+            d = prev_a + 0.2
+        d = max(min(d, a - 0.45), prev_a + 0.15, 0.0)
+        dist = 1300.0 if tg["kind"] == "voice" else 1500.0 + 200 * (k % 2)
+        mv.append(dict(d=d, a=a, tg=tg, yaw=yaws[k % 4], pitch=pitches[k % 4], dist=dist, kind=f"search→{tg['kind']} {tg['t']:.2f}"))
+        prev_a = a
+    end_t = s1 - s0
+    rel = max(prev_a + 0.7, end_t - 1.6) if mv else 0.0
+    st0 = np.array([-500.0, 360.0, 60.0, 0.75, 0.16, 2100.0])
+    out = np.zeros((T, 6)); info = []
+    cur_la, cur_o = st0[:3].copy(), st0[3:].copy()
+    k = -1
+    start_la, start_o = cur_la.copy(), cur_o.copy()
+    released = False
+    for f in range(T):
+        t = f / FPS
+        tn = s0 + t
+        while k + 1 < len(mv) and t >= mv[k + 1]["d"] - lead:
+            k += 1
+            start_la, start_o = cur_la.copy(), cur_o.copy()
+        if not released and mv and t >= rel - lead and k == len(mv) - 1:
+            released = True
+            rel_la, rel_o = cur_la.copy(), cur_o.copy()
+        if released:
+            u = (t - (rel - lead)) / 1.8
+            cur_la = rel_la + (np.array([-260.0, 40.0, -120.0]) ) * ease(u)
+            cur_o = rel_o + np.array([-0.15, 0.06, 650.0]) * ease(u)
+            info.append(None)
+        elif k >= 0:
+            m_ = mv[k]
+            D = m_["a"] - m_["d"] + 0.3 + lead
+            u = (t - (m_["d"] - lead)) / D
+            e = ease(u)
+            P = target_pos(m_["tg"], tn) + np.array([-240.0, 0.0, 0.0])   # 视线落在目标左边一点：目标在画面偏右，左边是刚听到的（右边是未来，不画）
+            cur_la = start_la + (P - start_la) * e
+            if m_["tg"]["kind"] != "readout":                    # 读数：只移视线，不换机位（不甩）
+                cur_o = start_o + (np.array([m_["yaw"], m_["pitch"], m_["dist"]]) - start_o) * e
+            info.append(dict(k=k, u=float(min(u, 1.0)), found=t >= m_["a"], since=t - m_["a"], tg=m_["tg"]))
+        else:
+            info.append(None)
+        dr = np.array([22 * math.sin(0.5 * t), 16 * math.sin(0.37 * t + 1), 30 * math.sin(0.43 * t + 2),
+                       0.03 * t + 0.04 * math.sin(0.7 * t), 0.02 * math.sin(0.55 * t), 70 * math.sin(0.3 * t)])
+        out[f] = np.r_[cur_la, cur_o] + dr
+    evs = [(m_["d"], m_["kind"]) for m_ in mv] + ([(rel, "release / pull back")] if mv else [])
+    return out, evs, info
+
+
+def draw_reticle(dr, st, inf, tn):
+    """搜寻准星：四角括号框住目标的实时位置；搜的时候灰、找到的 0.6 s 红、之后白；标签 = 目标的真数据"""
+    if inf is None:
+        return
+    tg = inf["tg"]
+    q, z = project(target_pos(tg, tn), st)
+    if z[0] < 60:
+        return
+    x, y = q[0, 0] * SS, q[0, 1] * SS
+    found, since = inf["found"], inf["since"]
+    if not found:
+        r = (26 + 40 * (1 - inf["u"])) * SS
+        col = MID
+    else:
+        r = 22 * SS
+        col = HOT if since < 0.6 else INK
+    L = r * 0.45
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            cx, cy = x + sx * r, y + sy * r
+            dr.line([(cx, cy), (cx - sx * L, cy)], fill=col, width=SS)
+            dr.line([(cx, cy), (cx, cy - sy * L)], fill=col, width=SS)
+    tag = ("FOUND  " if found else f"SEARCH {inf['u'] * 100:3.0f}%  ") + tg["lab"]
+    text(dr, (x + r + 8 * SS, y - r), tag, col, 13, knock=BG)
+    text(dr, (x + r + 8 * SS, y - r + 18 * SS), f"t {fmt_t(tg['t'])}   z {tg['z']:.0f}", DIM if not found else MID, 11, knock=BG)
 
 
 # ───────────────────────── 渲染 ─────────────────────────
@@ -363,7 +542,12 @@ def render(seg, only=None):
     css = [np.vstack([np.zeros(NB), np.cumsum(10 ** (db / 10), axis=0)]) for db in dbs]
     wig, kinfo, kref = kura_tremor(sense, dbs, s1)
     nL = len(STEMS)
-    cams, cam_ev = camera(seg, T, sense, voice_pts)
+    if VER["v"] == 3:
+        tgs = search_targets(sense, dbs, seg)
+        cams, cam_ev, cinfo = camera_v3(seg, T, sense, tgs)
+    else:
+        cams, cam_ev = camera(seg, T, sense, voice_pts)
+        cinfo = [None] * T
     refs = np.array([[x, y, z] for x in np.linspace(-X1, 0, 7) for y in (0, HH)
                      for z in (Z_SENSE, Z_EXP, Z_VOICE) + tuple(z_ for _, z_ in STEMS) + (500.0,)])
     ys_r = (np.arange(NR) + 0.5) / NR * HH
@@ -571,6 +755,7 @@ def render(seg, only=None):
             cur = ch[cname][min(int(tn * fps_s), len(ch[cname]) - 1)]
             label((0, y0 + 140 * cur, Z_SENSE), f"{SYM[cname]} {cname}  {cur:.2f}", HOT if (cname == "threat" and cur > 0.6) else INK, 15, dx=10, dy=-10, knock=True)
 
+        draw_reticle(dr, st, cinfo[f], tn)
         # HUD
         sid_now = next((s for s in segs if s[0] <= tn < s[1]), segs[-1])
         text(dr, (56 * SS, 40 * SS), f"{sid_now[2]}  {sid_now[3]}    SENSORY SPACE · OPENING    t = {tn:6.2f} s", INK, 13, cn=True)
@@ -601,10 +786,14 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seg0", type=float, default=38.71)
     ap.add_argument("--seg1", type=float, default=51.51)
-    ap.add_argument("--name", default="24_感官空间_开头_v2")
+    ap.add_argument("--v", type=int, default=3, choices=(2, 3), help="2 = 漂移环绕 + 层距大；3 = 在里面搜寻 + 层距压缩")
+    ap.add_argument("--name", default=None)
     ap.add_argument("--still", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
+    if a.v == 3:
+        set_v3()
+    a.name = a.name or f"24_感官空间_开头_v{a.v}"
     seg = (a.seg0, a.seg1)
     T = int(round((seg[1] - seg[0]) * FPS))
     if a.still:
@@ -638,7 +827,7 @@ def main():
     print(f"屏幕速度 px/帧：min {sp[1:].min():.2f}  median {np.median(sp[1:]):.2f}  max {sp.max():.2f}")
     speed_plot(sp, render.events, al, vid.with_name(vid.stem + "_镜头速度.png"), seg[0], vid.stem)
     vid.with_suffix(".json").write_text(json.dumps(dict(
-        tool="tools/sense_space_v2.py", seg=seg, stems=STEMS, z_sense=Z_SENSE, z_expect=Z_EXP, z_voice=Z_VOICE, fisheye_tau=TAU,
+        tool="tools/sense_space_v2.py", version=VER["v"], seg=seg, stems=STEMS, z_sense=Z_SENSE, z_expect=Z_EXP, z_voice=Z_VOICE, fisheye_tau=TAU,
         bands=[NB, NR, F_LO, F_HI],
         tremor=dict(law="opening.py Kuramoto", K0=K0, K_t0=K_T0, K_per_beat=K_BEAT, kick="N(0, 0.35*threat*clip(flux_band/p95,0,1)) per frame",
                     flux_p95_db=render.kref, v_gain=V_GAIN, hb_gain=HB_GAIN, tau_eff=TAU_EFF, tau_slow=TAU_SLOW, gain_world_per_hz=WIG_GAIN, clip=WIG_MAX),
