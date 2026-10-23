@@ -1140,7 +1140,11 @@ def ease_ff(u, p=None):
     return 1 - (1 - u) ** p
 
 
-def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7):
+V6 = dict(lead_frames=2, group_s=0.8, d1=1.1, cap1=220.0, cap2=700.0, faint_t=124.51, notice_t=125.05,
+          amp0=4.0, amp1=8.0, path_amp=1.4, ghost_k=3, ghost_k_path=5, ghost_dt=0.035, ghost_off=2.5, ghost_fall=0.6)
+
+
+def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7, v6=False):
     """前馈镜头（👤：节点生长对拍，镜头也要对拍 —— 事件时间已知，就按事件排程，不用弹簧追）。
     每个事件 = 一次移动：在事件前 lead 帧起步，x(t) = x_start + (目标 − x_start)·E((t − t_s)/D)，E = ease_ff（快起慢收），
     速度在起步那一帧最大；下一个事件从当下位置重新起步。不另加平滑滤波。另加一条很慢的恒定漂移（不停在静止）。
@@ -1148,7 +1152,7 @@ def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7):
     base = np.array([nd["pos"] for nd in mem.nodes])
     pop = sch["pop"]
     hops, t_cut = sch["hops"], sch["cut"]
-    lead = V5["lead_frames"] / FPS
+    lead = (V6 if v6 else V5)["lead_frames"] / FPS
     path = mem.path
     pp = base[path]
     z_fit = min(W * 0.62 / (np.ptp(pp[:, 0]) + 320), H * 0.55 / (np.ptp(pp[:, 1]) + 280))
@@ -1156,15 +1160,32 @@ def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7):
     jpos = base[mem.john]
     moves = []                                                   # (t_event, 目标位置, 目标变焦 or None, 时长_pos, 时长_zoom, 种类)
     vis = []
+    last_mv, group = -9.0, []
     for u, (tu, _) in sorted(pop.items(), key=lambda kv: kv[1][0]):
         vis.append(u)
         if u == mem.john:
             continue
         tgt = 0.8 * base[u] + 0.2 * base[vis].mean(0)
-        if tu < t_cut:
+        if v6 and tu < t_cut:                                    # v6 第一段 = 冷静：几个弹出合成一次移动（距上次移动 ≥ group_s 才动）
+            group.append(u)
+            if tu - last_mv >= V6["group_s"]:
+                moves.append((tu, 0.6 * base[group].mean(0) + 0.4 * base[vis].mean(0), None, V6["d1"], None, "pop-group"))
+                last_mv, group = tu, []
+        elif tu < t_cut:
             moves.append((tu, tgt, None, 0.8, None, "pop"))
         else:
             moves.append((tu, tgt, None, 0.5, None, "pop"))
+    if v6:                                                       # NOTICED：镜头往 John 那边偏一点（John 的画面先浮出来）
+        tn = V6["notice_t"] - seg[0]
+        prev = [u for u, (tu, _) in pop.items() if tu <= tn]
+        fr_ = base[max(prev, key=lambda u: pop[u][0])] if prev else base[mem.now]
+        both = np.stack([fr_, jpos])
+        z_both = min(z_rush, W * 0.7 / (np.ptp(both[:, 0]) + 360), H * 0.6 / (np.ptp(both[:, 1]) + 300))
+        moves.append((tn, both.mean(0), z_both, 0.6, 0.7, "noticed"))          # 前沿和 John 一起进画面
+        tf = V6["faint_t"] - seg[0]                                            # 隐约出现：往 John 那边让一点，John 露在画面一角
+        prevf = [u for u, (tu, _) in pop.items() if tu <= tf]
+        frf = base[max(prevf, key=lambda u: pop[u][0])] if prevf else base[mem.now]
+        moves.append((tf, 0.75 * frf + 0.25 * jpos, None, 0.6, None, "faint"))
     # 2:01.96 冲进前沿：位置 + 变焦一起，一次冲量（先快后慢）
     nxt = [u for u, (tu, _) in sorted(pop.items(), key=lambda kv: kv[1][0]) if tu >= t_cut][:4]
     rush_tgt = base[nxt].mean(0) if nxt else base[mem.now]
@@ -1182,6 +1203,7 @@ def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7):
     drift = np.array([10.0, -4.0])                               # 世界像素 / 秒
     cam, zs = np.zeros((T, 2)), np.zeros(T)
     mi = 0
+    accepted = []
     for f in range(T):
         t = f / FPS
         while mi < len(moves) and moves[mi][0] - lead <= t:
@@ -1199,14 +1221,23 @@ def camera_ff(mem, sch, seg, T, z_in=1.65, z_rush=2.7):
                 dn = np.linalg.norm(dlt)
                 dirv = dlt / dn if dn > 1e-6 else (cur["tgt"] - cur["x0"]) / (np.linalg.norm(cur["tgt"] - cur["x0"]) + 1e-9)
                 dlt = dirv * v_min * tp / pE
+            if v6:                                                          # 平均速度上限（屏幕像素 / 秒）：第一段冷静、第二段焦急
+                cap = V6["cap1"] if te < t_cut else V6["cap2"]
+                avg = np.linalg.norm(dlt) * z_now / tp
+                if avg > cap:
+                    dlt = dlt * cap / avg
+                if np.linalg.norm(dlt) * pE / tp < 1.2 * v_res and zt is None:   # 限速后追不上余速 → 这一拍不单独起步，并进当前这次移动
+                    mi += 1
+                    continue
             cur = dict(t_s=ts, x0=x_now, tgt=x_now + dlt, tau=tp, z0=z_now,
                        zt=(zt if zt is not None else cur["zt"]), tz=(tz if tz is not None else cur["tz"]))
+            accepted.append((te, moves[mi][5]))
             mi += 1
         e = ease_ff((t - cur["t_s"]) / cur["tau"])
         ez = ease_ff((t - cur["t_s"]) / cur["tz"])
         cam[f] = cur["x0"] + (cur["tgt"] - cur["x0"]) * e + drift * t
         zs[f] = cur["z0"] + (cur["zt"] - cur["z0"]) * ez
-    events = [(m[0], m[5]) for m in moves]
+    events = accepted
     return cam, zs, events
 
 
@@ -1224,7 +1255,7 @@ def string_offset(n_pts, dt, amp):
     return amp * y * math.exp(-dt / V5["tau_s"])
 
 
-def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
+def render_memory_v5(mem, sch, seg, pal, only=None, enter=True, v6=False):
     """v3 的构图 / 分层 / 节奏为底；加：前馈镜头、心魔（框不动，框里的延迟嵌入在转、在走，然后被压下）、
     2:01.96 冲进前沿、125.01 起前沿附近的边被拨成弦（谐波，克制）、四声第一声认出 John → 后三声确认 → 锁定 → 冲进接粒子海。"""
     _MINF["on"] = True
@@ -1279,10 +1310,13 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
             if tu <= t:
                 nw = u
         return nw
-    cam, zs, cam_events = camera_ff(mem, sch, seg, T)
+    cam, zs, cam_events = camera_ff(mem, sch, seg, T, v6=v6)
+    LEAD = (V6 if v6 else V5)["lead_frames"] / FPS
+    t_faint, t_not = (V6["faint_t"] - s0, V6["notice_t"] - s0) if v6 else (9e9, 9e9)
+    path_e = {(min(a_, b_), max(a_, b_)) for a_, b_ in zip(path[:-1], path[1:])}
     t_last = (T - 1) / FPS
     if enter:                                                     # 冲进 John：锁定那一拍起，变焦按指数，倒数第 3 帧铺满
-        t_dive = t_lock - V5["lead_frames"] / FPS
+        t_dive = t_lock - LEAD
         f_dive = int(math.ceil(t_dive * FPS))
         c_d, z_d = cam[f_dive - 1].copy(), zs[f_dive - 1]
         z_final = W / 240.0
@@ -1292,7 +1326,7 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
             zs[f] = z_d * (z_final / z_d) ** ease_ff(u, 2.0)   # 冲进：对数变焦也是快起慢收
             a = ease_ff(u, 3.0)
             cam[f] = (1 - a) * c_d + a * pos[mem.john]
-        cam_events.append((t_dive + V5["lead_frames"] / FPS, "enter"))
+        cam_events.append((t_dive + LEAD, "enter"))
     strip = dict(x0=150, x1=W - 150, y0=H - 118, y1=H - 46)
     meta = []
     for f in range(T):
@@ -1331,23 +1365,39 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
              + f"  ({mem.evr[1] * 100:.0f}% var)", P["dim"], 12)
         # 弦：125.01 起，每个起音（威胁峰 ≥ 0.3）拨一下「那一刻最新节点」的边；幅度 = 2 + 4·起音强度（屏幕像素）
         pl = {}
+        a0_, a1_ = (V6["amp0"], V6["amp1"]) if v6 else (2.0, 4.0)
         for tp_, sp_ in plucks:
             if tp_ <= t:
                 nw_ = newest_at(tp_)
-                for w_ in nbr[nw_]:
-                    pl.setdefault((min(nw_, w_), max(nw_, w_)), []).append((t - tp_, 2 + 4 * sp_))
+                own = {(min(nw_, w_), max(nw_, w_)) for w_ in nbr[nw_]}
+                for e_ in own:
+                    pl.setdefault(e_, []).append((t - tp_, a0_ + a1_ * sp_))
                 pp_ = par.get(nw_, -1)
                 if pp_ >= 0:
-                    pl.setdefault(("tree", nw_), []).append((t - tp_, 2 + 4 * sp_))
+                    pl.setdefault(("tree", nw_), []).append((t - tp_, a0_ + a1_ * sp_))
+                if v6:                                            # 「对的那根弦」：通往 John 的路径边每一拍都被拨，幅度 ×1.4
+                    for e_ in path_e - own:
+                        pl.setdefault(e_, []).append((t - tp_, (a0_ + a1_ * sp_) * V6["path_amp"]))
 
-        def pluck_pts(pts, key):
+        def pluck_pts(pts, key, shift=0.0):
             if key not in pl or locked:
                 return pts
-            y = sum(string_offset(len(pts), dt_, a_) for dt_, a_ in pl[key])
+            y = sum(string_offset(len(pts), dt_ - shift, a_) for dt_, a_ in pl[key])
+            if shift:
+                y = y + V6["ghost_off"] * (shift / V6["ghost_dt"]) * np.sin(np.linspace(0, math.pi, len(pts)))
             d = np.gradient(pts, axis=0)
             nrm = np.stack([-d[:, 1], d[:, 0]], 1)
             nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
             return pts + nrm * (y * SS)[:, None]
+
+        def ghosts(pts0, key, col):
+            """多层重影（layer_ghost 的语法搬到线上）：第 k 层 = 弦在 t − k·Δ 的形状，法向再错 k·层距（两端仍固定），权重 falloff^k"""
+            if not v6 or key not in pl or locked:
+                return
+            K = V6["ghost_k_path"] if key in path_e else V6["ghost_k"]
+            for k in range(K, 0, -1):
+                q, sq = resl(pluck_pts(pts0, key, shift=k * V6["ghost_dt"]))
+                draw_path(dr, q, sq, mix(col, V6["ghost_fall"] ** k, P["bg"]), 1)
 
         def resl(pts):
             return pts, np.concatenate([[0], np.cumsum(np.hypot(*np.diff(pts, axis=0).T))])
@@ -1357,6 +1407,8 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
             if kind == "same":
                 curv = 0.35
             pts, s = bezier(S2(pos[a]), S2(pos[b]), curv)
+            if v6 and kind != "story":
+                ghosts(pts, (a, b), P["hot"] if (min(a, b), max(a, b)) in path_e else P["mid"])
             pts, s = resl(pluck_pts(pts, (a, b)))
             seen = a in popped or b in popped
             if kind == "story":
@@ -1367,7 +1419,7 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
                 draw_path(dr, pts, s, P["mid"] if seen else P["dim"], 1, dash=(1.2, 3.0))
             else:
                 plucked = (a, b) in pl and not locked
-                draw_path(dr, pts, s, P["mid"] if plucked else (P["dim"] if seen else P["faint"]), 1, dash=(4, 5), phase=t * 9)
+                draw_path(dr, pts, s, (P["ink"] if v6 else P["mid"]) if plucked else (P["dim"] if seen else P["faint"]), 1, dash=(4, 5), phase=t * 9)
                 if mem.now in (a, b) and t < 1.2:
                     g0 = min(1.0, (t + 0.3) / 0.6)
                     q = pts[::-1] if mem.now == b else pts
@@ -1388,6 +1440,10 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
                 draw_arrow(dr, pts, s, g if g < 1 else 0.55, col, 5)
         for k in range(n_lit):                                      # 确认：路径逐跳变红（0.1 s 长满）
             pts, s = bezier(S2(pos[path[k]]), S2(pos[path[k + 1]]), 0.18)
+            if v6:
+                ek = (min(path[k], path[k + 1]), max(path[k], path[k + 1]))
+                ghosts(pts, ek, P["hot"])
+                pts, s = resl(pluck_pts(pts, ek))
             gk = min(1.0, (t - lit_at[k]) / 0.1)
             e = ease_pop(t - lit_at[k], 0.2)
             draw_path(dr, pts, s, P["hot"], 2.2 + 2.0 * e, upto=gk)
@@ -1402,6 +1458,26 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
             r = 3.5 * SS
             half = r
             un_live = i == un and t_ut <= t < t_ut + 2.0
+            if is_j and not vis and t >= t_faint:                    # v6：John 的画面先浮出来（搜索还没到）—— 先很淡很小，NOTICED 时亮起
+                noticed = t >= t_not
+                fr = min(1.0, (t - t_faint) / max(1e-6, t_not - t_faint))
+                a_ = 0.55 if noticed else 0.06 + 0.10 * fr
+                bw = (110 if noticed else 60 + 20 * fr) * min(z, 1.9) * SS
+                im = thumbs[i]
+                bwi, bhi = int(bw), int(bw * im.height / im.width)
+                if bwi > 4:
+                    x0, y0 = int(p[0] - bwi / 2), int(p[1] - bhi / 2)
+                    tim = np.asarray(im.resize((bwi, bhi), Image.BILINEAR), float)
+                    e_n = ease_pop(t - t_not, 0.25) if noticed else 0.0
+                    bgc = np.array(P["bg"], float)
+                    tim = bgc + (tim - bgc) * min(1.0, a_ + 0.4 * e_n)
+                    img.paste(Image.fromarray(tim.clip(0, 255).astype(np.uint8)), (x0, y0))
+                    if noticed:
+                        dr.rectangle([x0, y0, x0 + bwi, y0 + bhi], outline=mix(P["hot"], 0.5 + 0.5 * e_n, P["bg"]), width=SS)
+                    half = bwi / 2
+                if noticed:
+                    text(dr, (p[0] + half + 7 * SS, p[1] - 12 * SS), f"#{i}  NOTICED  {_fmt(nd['t0'])}  {nd['name']}", P["hot"], 12, cn=True, knock=P["bg"])
+                continue
             if un_live:
                 half = _draw_unstable_v5(dr, P, p, t - t_ut, tk, tk_meta, ch, fps_s, s0 + t, ons, t, und, cos_u)
             elif vis and i in thumbs and i != un:
@@ -1461,6 +1537,10 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True):
                    f"MEMORY GRAPH  |V| {n}  |E| {len(mem.edges)}   DIJKSTRA FROM NOW   visited {len(popped)}/{n}   w = ‖z_i − z_j‖₂"]
             for k_, line in enumerate(hud):
                 text(dr, (56 * SS, (40 + 18 * k_) * SS), line, P["ink"] if k_ == 0 else P["mid"], 12)
+            if t_not <= t < t_rec:
+                dj = next(d for u, d, _ in mem.order if u == mem.john)
+                text(dr, (56 * SS, (40 + 18 * 2 + 10) * SS), "NOTICED: #8 JOHN-117", P["hot"], 15)
+                text(dr, (56 * SS, (40 + 18 * 2 + 32) * SS), f"search not there yet  ·  visited {len(popped)}/{n}  ·  d(now, john) = {dj:.2f}", P["hot"], 12)
             if recog:
                 dj = next(d for u, d, _ in mem.order if u == mem.john)
                 head = "MATCH: JOHN-117" if locked else "CANDIDATE: JOHN-117"
@@ -1517,19 +1597,20 @@ def _draw_unstable_v5(dr, P, p, s, tk, meta, ch, fps, tp, ons, t, und, cos_u):
 
 
 def cmd_memory_v5(a):
+    v6 = a.v >= 6
     seg = (a.seg0, V4["end_t"])
     mem = build_memory(seg=seg, k=a.k)
     sch = schedule_v4(mem, seg, john_hop=0)
     T = int(round(sch["end"] * FPS))
-    cam, zs, evs = camera_ff(mem, sch, seg, T)
+    cam, zs, evs = camera_ff(mem, sch, seg, T, v6=v6)
     print(f"心魔 #{sch['unstable']}（第 {sch['ku'] + 1} 个）  John 第 {sch['jk'] + 1} 个 @ {sch['pop'][mem.john][0] + seg[0]:.3f}")
-    al = camera_alignment(cam, zs, evs, T)
+    al = camera_alignment(cam, zs, evs, T, lead=(V6 if v6 else V5)['lead_frames'])
     print(f"镜头速度峰值 vs 事件：{len(al)} 个事件，|Δ| 最大 {max(abs(d) for _, _, d in al)} 帧；分布 "
           f"{ {d: sum(1 for _, _, x in al if x == d) for d in sorted(set(x for _, _, x in al))} }")
     OUT_A.mkdir(parents=True, exist_ok=True)
     if a.still is not None:
         fs = {int(round(float(x) * FPS)) for x in str(a.still).split(",")}
-        ims = [(f"{seg[0] + f / FPS:.2f}s f{f}", im) for f, im, _ in render_memory_v5(mem, sch, seg, a.palette, only=fs)]
+        ims = [(f"{seg[0] + f / FPS:.2f}s f{f}", im) for f, im, _ in render_memory_v5(mem, sch, seg, a.palette, only=fs, v6=v6)]
         outp = Path(a.out or (Path(a.scratch) / f"v5_{a.palette}.jpg"))
         contact(ims, outp, cols=2, tw=960)
         print("->", outp)
@@ -1537,9 +1618,9 @@ def cmd_memory_v5(a):
     vid = safe_out(OUT_A, a.name + f"_{a.palette}", ".mp4")
     w = open_writer(vid, seg[0], T / FPS)
     picks = set(np.linspace(0, T - 1, 20).round().astype(int).tolist()) | {int(round((t - seg[0]) * FPS)) for t in
-                                                                          (V4["unstable_t"] + 0.6, V4["unstable_t"] + 1.5, V4["cut_t"] + 0.1, V5["string_start"] + 0.3, *V4["hops"])}
+                                                                          (V4["unstable_t"] + 0.6, V4["unstable_t"] + 1.5, V4["cut_t"] + 0.1, V5["string_start"] + 0.3, V6["faint_t"] + 0.2, V6["notice_t"] + 0.1, *V4["hops"])}
     sheet, meta = [], []
-    for f, im, m in render_memory_v5(mem, sch, seg, a.palette):
+    for f, im, m in render_memory_v5(mem, sch, seg, a.palette, v6=v6):
         w.stdin.write(np.asarray(im).tobytes())
         meta.append(m)
         if f in picks:
@@ -1548,8 +1629,8 @@ def cmd_memory_v5(a):
     w.wait()
     contact(sheet, vid.with_name(vid.stem + "_接触表.jpg"))
     cam2, zs2 = np.array([m["cam"] for m in meta]), np.array([m["zoom"] for m in meta])
-    speed_plot(cam2, zs2, evs, T, vid.with_name(vid.stem + "_镜头速度.png"), seg[0], vid.stem)
-    side = dict(tool="tools/info_graph.py memory --v 5", seg=[seg[0], V4["end_t"]], palette=a.palette, v4=V4, v5=V5,
+    speed_plot(cam2, zs2, evs, T, vid.with_name(vid.stem + "_镜头速度.png"), seg[0], vid.stem, lead=(V6 if v6 else V5)["lead_frames"])
+    side = dict(tool=f"tools/info_graph.py memory --v {a.v}", seg=[seg[0], V4["end_t"]], palette=a.palette, v4=V4, v5=V5, v6=(V6 if v6 else None),
                 unstable=sch["unstable"], john_pop=sch["jk"] + 1, confidence=round(mem.conf, 4), path=mem.path,
                 pop_times={str(u): [round(tt + seg[0], 3), sch["kinds"][u]] for u, (tt, _) in sch["pop"].items()},
                 camera_events=[[round(t + seg[0], 3), k] for t, k in evs],
@@ -1558,7 +1639,7 @@ def cmd_memory_v5(a):
     print("->", vid)
 
 
-def speed_plot(cam, zs, events, T, path, s0, title):
+def speed_plot(cam, zs, events, T, path, s0, title, lead=1):
     """镜头屏幕速度（像素 / 帧）随时间 + 每个事件一根竖线（红 = 速度峰值离事件 > 1 帧）"""
     sp = np.zeros(T)
     sp[1:] = np.hypot(*(np.diff(cam, axis=0).T)) * zs[1:] + np.abs(np.diff(np.log(zs))) * W
@@ -1570,7 +1651,7 @@ def speed_plot(cam, zs, events, T, path, s0, title):
     mx = sp.max() + 1e-9
     X = lambda f: m + f / (T - 1) * (Wp - 2 * m)                    # noqa: E731
     Y = lambda v: Hp - m - v / mx * (Hp - 2 * m)                   # noqa: E731
-    al = {round(t, 4): dd for t, _, dd in camera_alignment(cam, zs, events, T)}
+    al = {round(t, 4): dd for t, _, dd in camera_alignment(cam, zs, events, T, lead=lead)}
     for t, k in events:
         x = X(t * FPS)
         bad = abs(al.get(round(t, 4), 0)) > 1
@@ -1586,7 +1667,7 @@ def speed_plot(cam, zs, events, T, path, s0, title):
     im.save(path)
 
 
-def camera_alignment(cam, zs, events, T, win=(3, 6)):
+def camera_alignment(cam, zs, events, T, win=(3, 6), lead=1):
     """每个镜头事件：在 [事件帧 − 3, 事件帧 + 6] 里找屏幕速度（位移 × 变焦 + 变焦变化）峰值，返回 (t, 种类, 峰值帧 − 事件帧)"""
     sp = np.zeros(T)
     sp[1:] = np.hypot(*(np.diff(cam, axis=0).T)) * zs[1:] + np.abs(np.diff(np.log(zs))) * W
@@ -1595,7 +1676,7 @@ def camera_alignment(cam, zs, events, T, win=(3, 6)):
     for t, k in events:
         fe = int(round(t * FPS))
         nxt = [x for x in fes if x > fe]
-        a, b = max(1, fe - 1), min(T - 1, fe + win[1], (nxt[0] - 1) if nxt else T - 1)   # 窗口不跨进下一个事件
+        a, b = max(1, fe - 1), min(T - 1, fe + win[1], (nxt[0] - lead) if nxt else T - 1)   # 窗口不跨进下一个事件（它提前 lead 帧起步）
         if b <= a:
             continue
         fp = a + int(np.argmax(sp[a:b + 1]))

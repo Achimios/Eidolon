@@ -268,6 +268,18 @@ class TestMemoryV5(unittest.TestCase):
         for t, k, d in al:
             self.assertLessEqual(abs(d), 1, (t + self.seg[0], k, d))
 
+    def test_camera_v6_lead_and_cap(self):
+        """v6：提前 2 帧起步（峰值在起音前 1 帧或当帧），第一段平均速度 ≤ 上限，第二段比第一段快"""
+        T = int(round(self.sch["end"] * G.FPS))
+        cam, zs, ev = G.camera_ff(self.mem, self.sch, self.seg, T, v6=True)
+        al = G.camera_alignment(cam, zs, ev, T, lead=G.V6["lead_frames"])
+        for t, k, d in al:
+            self.assertIn(d, (-1, 0, 1), (t + self.seg[0], k, d))
+        sp = np.hypot(*np.diff(cam, axis=0).T) * zs[1:] * G.FPS
+        c = int(self.sch["cut"] * G.FPS)
+        self.assertLessEqual(sp[:c].mean(), G.V6["cap1"])
+        self.assertGreater(sp[c:].mean(), sp[:c].mean())
+
     def test_ease_shape(self):
         """快起慢收：E(0)=0、E(1)=1、速度单调减（起步那一刻最快）"""
         u = np.linspace(0, 1, 201)
