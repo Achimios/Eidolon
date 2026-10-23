@@ -25,6 +25,37 @@ def load16k(p):
     return np.frombuffer(raw, np.int16).astype(np.float32) / 32768.0
 
 
+PAD = 0.5          # 人声段前后放宽（秒）
+
+
+def gate_by_voice(out, mv):
+    """Whisper 在没人声的地方会编词（间奏里的「Thank you.」）→ 用 感官.json 的 voice.sections 判：
+    词的中点不在任何人声段（±PAD）里 → outside_voice；整行都在外面 → 这一行标 hallucination。只标不删。"""
+    sp = mv / "感官.json"
+    secs = json.loads(sp.read_text("utf-8")).get("voice", {}).get("sections") if sp.exists() else None
+    if not secs:
+        return 0
+    inside = lambda t: any(a - PAD <= t <= b + PAD for a, b in secs)
+    for w in out["words"]:
+        w["outside_voice"] = w["t0"] is not None and not inside((w["t0"] + w["t1"]) / 2)
+    n = 0
+    for l in out["lines"]:
+        ws = [w for w in out["words"] if w["t0"] is not None and l["t0"] - 1e-3 <= w["t0"] <= l["t1"] + 1e-3]
+        l["hallucination"] = bool(ws) and all(w["outside_voice"] for w in ws)
+        n += l["hallucination"]
+    out["gate"] = f"voice.sections ±{PAD:g} s（感官.json）：outside_voice = 词中点不在人声段；hallucination = 整行都在外面"
+    return n
+
+
+def save(out, mv):
+    p = mv / "歌词.json"
+    k = 2
+    while p.exists():                                  # 不覆盖用户可能看过的版本
+        p = mv / f"歌词_v{k}.json"; k += 1
+    p.write_text(json.dumps(out, ensure_ascii=False, indent=1), "utf-8")
+    return p
+
+
 def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser()
@@ -32,7 +63,18 @@ def main():
     ap.add_argument("--lang", default="en")
     ap.add_argument("--model", default="large-v3")
     ap.add_argument("--text", default=None, help="歌词原文（一行一句），有就只做强制对齐")
+    ap.add_argument("--regate", default=None, help="不重跑：读这份已有的 歌词*.json，只加人声门控，另存新版本")
     a = ap.parse_args()
+    if a.regate:
+        mv = Path(a.mv)
+        out = json.loads(Path(a.regate).read_text("utf-8"))
+        n = gate_by_voice(out, mv)
+        p = save(out, mv)
+        for l in out["lines"]:
+            if l.get("hallucination"):
+                print(f"  幻觉行 {l['t0']:.1f}-{l['t1']:.1f}: {l['text'][:60]!r}")
+        print(f"{n} hallucinated lines, {sum(w.get('outside_voice', False) for w in out['words'])} words outside voice  -> {p}")
+        return
     import torch
     import whisperx
     mv = Path(a.mv)
@@ -63,11 +105,8 @@ def main():
         lines_out.append({"text": s["text"].strip(), "t0": round(s["start"], 3), "t1": round(s["end"], 3)})
     out = {"source": src, "audio": "分轨/vocals.wav", "unit": "s（作品时间 = 播放时间）", "low_threshold": LOW,
            "lines": lines_out, "words": words}
-    p = mv / "歌词.json"
-    k = 2
-    while p.exists():                                  # 不覆盖用户可能看过的版本
-        p = mv / f"歌词_v{k}.json"; k += 1
-    p.write_text(json.dumps(out, ensure_ascii=False, indent=1), "utf-8")
+    gate_by_voice(out, mv)
+    p = save(out, mv)
     n_low = sum(w["low"] for w in words)
     print(f"{len(lines_out)} lines, {len(words)} words, low {n_low}  -> {p}")
     for w in [w for w in words if w["low"]][:15]:
