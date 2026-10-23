@@ -370,6 +370,38 @@ class TestGoldenAge(unittest.TestCase):
         Nm /= np.linalg.norm(Nm, axis=1, keepdims=True)
         self.assertGreater(float((N * Nm).sum(1).min()), math.cos(math.radians(45)))
 
+    def test_grow4_ends_as_body_and_starts_empty(self):
+        """真四维生长（球 r = 0.5 当身体，心口 = 球心）：c = w_end、θ = 0 → 截面 = 原球（扭转角 0，深度项不起作用）；
+        c 比 W 的最小值（≈ −0.5 − 噪声）还小 → 空；中间先出现的是离心口最远的外壳"""
+        import torch
+        ob = F.mesh_grow4(_Sphere(), heart=(0.0, 0.0, 0.0), prefix="t")
+        g = torch.Generator(device="cpu").manual_seed(2)
+        P = (torch.rand(5000, 3, generator=g) * 1.4 - 0.7).to(F.DEV)
+        inside = F.L(P[:, 0], P[:, 1], P[:, 2]) < 0.5
+        f_end = F.slice_fn(ob, F.rot4(), 0.3)(P)
+        self.assertTrue(torch.equal(f_end < 0, inside))
+        self.assertFalse(bool((F.slice_fn(ob, F.rot4(), -0.7)(P) < 0).any()))
+        mid = F.slice_fn(ob, F.rot4(), -0.42)(P) < 0                   # 只剩离心口 ≥ ~0.42 的外壳
+        r = F.L(P[:, 0], P[:, 1], P[:, 2])
+        self.assertTrue(bool(mid.any()))
+        self.assertGreater(float(r[mid].min()), 0.3)
+
+    def test_ply_cap_roundtrip(self):
+        import numpy as np
+        import tempfile
+        V = np.random.default_rng(0).normal(size=(10, 3)).astype(np.float32)
+        Q = np.arange(8, dtype=np.int32).reshape(2, 4)
+        cap = np.linspace(0, 1, 10).astype(np.float32)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "c.ply"
+            F.write_ply(p, V, Q, V, cap)
+            data = p.read_bytes()
+            self.assertIn(b"property float cap\n", data)
+            end = data.index(b"end_header\n") + 11
+            vert = np.frombuffer(data, "<f4", 70, end).reshape(10, 7)
+            self.assertTrue(np.array_equal(vert[:, 6], cap))
+            F.write_ply(p, np.zeros((0, 3), np.float32), np.zeros((0, 4), np.int32), np.zeros((0, 3), np.float32))   # 空截面也能写
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)

@@ -1285,6 +1285,8 @@ def insert_hud_lines(obj, name, sp, k, b, changed):
              _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
              ("red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32), tracked" if sp.red_point
               else "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)")]
+    if "hud2" in k:                       # 自定义轨迹（例：--grow4）写自己的运动公式
+        lines[1], lines[2] = k["hud2"], k["hud3"]
     return lines
 
 
@@ -2016,16 +2018,20 @@ def to_blender(P):
     return np.stack([P[..., 0], -P[..., 2], P[..., 1]], -1)
 
 
-def write_ply(path, V, Q, N):
-    """二进制 PLY：顶点（xyz + 法线）+ 四边形面；Blender 的 PLY 导入会把法线读成自定义法线（平滑）"""
-    vert = np.empty(len(V), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")])
+def write_ply(path, V, Q, N, cap=None):
+    """二进制 PLY：顶点（xyz + 法线 [+ cap = 平切面权重 0..1]）+ k 边形面；blender_four_d.py 直接读（法线 → 自定义法线，cap → 切面自发光）"""
+    fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")] + ([("cap", "<f4")] if cap is not None else [])
+    vert = np.empty(len(V), dtype=fields)
     vert["x"], vert["y"], vert["z"] = V[:, 0], V[:, 1], V[:, 2]
     vert["nx"], vert["ny"], vert["nz"] = N[:, 0], N[:, 1], N[:, 2]
-    k = Q.shape[1]                                     # 4 = 四边形（切片），3 = 三角形（高模）
+    if cap is not None:
+        vert["cap"] = cap
+    k = Q.shape[1] if Q.ndim == 2 and len(Q) else 4    # 4 = 四边形（切片），3 = 三角形（高模）
     face = np.empty(len(Q), dtype=[("n", "u1"), ("v", "<i4", (k,))])
     face["n"], face["v"] = k, Q
     hdr = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(V)}\nproperty float x\nproperty float y\nproperty float z\n"
-           f"property float nx\nproperty float ny\nproperty float nz\nelement face {len(Q)}\nproperty list uchar int vertex_indices\nend_header\n")
+           "property float nx\nproperty float ny\nproperty float nz\n" + ("property float cap\n" if cap is not None else "") +
+           f"element face {len(Q)}\nproperty list uchar int vertex_indices\nend_header\n")
     with open(path, "wb") as fh:
         fh.write(hdr.encode("ascii"))
         fh.write(vert.tobytes())
@@ -2081,7 +2087,7 @@ def export_hires(glb, ref, out_ply, lateral="sym", n_fit=40000):
     print(f"{out_ply}: {len(V)} verts, {len(Fc)} tris; fit to {ref.path.name}: median |sdf| {m0:.4f} -> {m1:.4f}, rot {ang:.2f} deg, t {np.round(t, 4)}")
 
 
-def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None):
+def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None, track=None, duty=1.0):
     """>v<🧊四维切片-导出-插入镜头 → 每帧一个 PLY（Blender 坐标、带 SDF 梯度法线）+ track.json（相机 eye / 朝向含 roll / fov、主光、轮廓光、
     唯一红点的 3D 位置与强度、HUD 行）。红点：顶点上算 4D 相切度 |n_xyz| / |n|，取最小的（偏向上一帧附近），强度 = (0.32 − r) / 0.22"""
     import json
@@ -2089,40 +2095,52 @@ def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None):
     box = box or obj.bound            # = 球追踪的包围半径：截面不会越出它（用 vbox 会把 θ ≈ −90° 时更宽的旋转体切掉）
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    track = insert_track(obj, sp)
+    track = track or insert_track(obj, sp)
     tag = tag or f"4D_INSERT / {name.upper()}"
     key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el)
-    frames, prev_b, prev_red, t0 = [], None, None, time.time()
+    frames, prev_b, prev_red, t0 = [], None, None, time.time()   # duty < 1：每帧之后歇 (1/duty − 1)·耗时（👤GPU 别占满）
     for k in track:
         t1 = time.time()
         R = insert_R(obj, sp, k["th"], k["t"])
         g = slice_fn(obj, R, k["c"])
         V, Q, N = surface_nets(g, box, n)
         Rr = R @ obj.R0 if obj.R0 is not None else R
-        Vt = torch.tensor(V, device=DEV)
-        g4 = grad4(obj, Rr, torch.cat([Vt, torch.full_like(Vt[:, :1], k["c"])], 1))
-        r = (g4[:, :3].norm(dim=1) / (g4.norm(dim=1) + 1e-9))
-        score = r.clone()
-        if prev_red is not None:
-            score = score + 0.15 * (Vt - prev_red).norm(dim=1)                          # 偏向原地（不乱跳）
-        j = int(torch.argmin(score))
-        strength = float(((0.32 - r[j]) / 0.22).clamp(0, 1))
-        prev_red = Vt[j] if strength > 0 else prev_red
+        Vt = torch.tensor(V, device=DEV).reshape(-1, 3)
+        q4 = torch.cat([Vt, torch.full_like(Vt[:, :1], k["c"])], 1)
+        cap = None
+        if obj.cap is not None:
+            cap = (obj.cap(q4 @ Rr) / 0.01).clamp(0, 1).cpu().numpy() if len(Vt) else np.zeros(0, np.float32)
+        if len(Vt):
+            g4 = grad4(obj, Rr, q4)
+            r = (g4[:, :3].norm(dim=1) / (g4.norm(dim=1) + 1e-9))
+            score = r.clone()
+            if prev_red is not None:
+                score = score + 0.15 * (Vt - prev_red).norm(dim=1)                      # 偏向原地（不乱跳）
+            j = int(torch.argmin(score))
+            strength = float(((0.32 - r[j]) / 0.22).clamp(0, 1))
+            red_pos, r_j = Vt[j], float(r[j])
+        else:                                                                           # 空截面（超平面还没碰到物体）
+            strength, red_pos, r_j = 0.0, (prev_red if prev_red is not None else torch.zeros(3, device=DEV)), float("nan")
+            V, Q, N = np.zeros((0, 3), np.float32), np.zeros((0, 4), np.int32), np.zeros((0, 3), np.float32)
+        prev_red = red_pos if strength > 0 else prev_red
         roll = math.radians(sp.roll0 + sp.roll_rate * k["t"])
         eye, fwd, right, up = cam_basis(k["yaw"], sp.pitch, k["dist"], sp.target, roll)
         b = betti(obj, R, k["c"], n=64)
         lines = insert_hud_lines(obj, name, sp, k, b, prev_b is not None and b != prev_b)
         prev_b = b
         fn = f"f{k['i']:04d}.ply"
-        write_ply(out / fn, to_blender(V), Q, to_blender(N))
+        write_ply(out / fn, to_blender(V).reshape(-1, 3), Q, to_blender(N).reshape(-1, 3), cap)
         rim = rim_dir(sp, k) if sp.rim > 0 else None
         frames.append(dict(i=k["i"], t=k["t"], mesh=fn, verts=len(V), quads=len(Q),
                            eye=to_blender(eye.cpu().numpy()).tolist(), fwd=to_blender(fwd.cpu().numpy()).tolist(),
                            up=to_blender(up.cpu().numpy()).tolist(), focus=float(k["dist"]),
                            rim=None if rim is None else to_blender(rim[0].cpu().numpy()).tolist(),
-                           red=to_blender(Vt[j].cpu().numpy()).tolist(), red_strength=strength, betti=list(b), hud=lines))
-        print(f"  frame {k['i']}/{len(track)}: {len(V)} verts, {len(Q)} quads, mesh-normal fallback {surface_nets.last_bad * 100:.1f}%,"
-              f" red r = {float(r[j]):.3f}  {time.time() - t1:.2f}s", flush=True)
+                           red=to_blender(red_pos.cpu().numpy()).tolist(), red_strength=strength, betti=list(b), hud=lines,
+                           c=float(k["c"]), theta=float(k["th"])))
+        dt = time.time() - t1
+        print(f"  frame {k['i']}/{len(track)}: {len(V)} verts, {len(Q)} quads, b = {b}, red r = {r_j:.3f}  {dt:.2f}s", flush=True)
+        if duty < 1:
+            time.sleep(dt * (1 / duty - 1))
     meta = dict(tag=tag, fps=sp.fps, size=list(sp.size), hud_band=sp.hud_band, hud_scale=sp.hud_scale, fov=sp.fov,
                 key=to_blender(key.cpu().numpy()).tolist(), key_az=sp.key_az, key_el=sp.key_el, rim=sp.rim, grid=n, box=box,
                 coords="Blender (x, -z, y) of model coords", frames=frames)
@@ -2141,8 +2159,10 @@ def compose_blender(frames_dir, track_json, out, contact=None):
     for fr in meta["frames"]:
         src = Path(frames_dir) / f"f{fr['i']:04d}.png"
         im = Image.open(src).convert("RGB")
-        if im.size != (Wd, Hd - band):
-            raise ValueError(f"{src}: {im.size} ≠ {(Wd, Hd - band)}")
+        if im.size != (Wd, Hd - band):                    # 预览档（Blender 用了 resolution_percentage）：同比例放大回去
+            if abs(im.size[0] / im.size[1] - Wd / (Hd - band)) > 0.01:
+                raise ValueError(f"{src}: {im.size} 与 {(Wd, Hd - band)} 比例不同")
+            im = im.resize((Wd, Hd - band), Image.LANCZOS)
         full = Image.new("RGB", (Wd, Hd), (0, 0, 0))
         full.paste(im, (0, 0))
         changed = "<- topology changed" in fr["hud"][4]
@@ -2169,6 +2189,130 @@ def compose_blender(frames_dir, track_json, out, contact=None):
         Path(contact).parent.mkdir(parents=True, exist_ok=True)
         sheet_.save(contact, quality=90)
         print(f"  contact sheet -> {contact}")
+
+
+
+# ---------- 真四维生长（--grow4，👤2026-10-24）：深度场 + 四维旋转 + w 向扭转 ----------
+def _lowfreq(p, seed=3, amp=0.08):
+    """低频平滑场（3 个随机方向的余弦，波长 ≈ 1.2–2 个身体单位），|∇| ≤ amp·Σ|k| ≈ 0.4 → 不破坏距离下界太多"""
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    out = torch.zeros(p.shape[0], device=DEV)
+    for _ in range(3):
+        k = torch.randn(3, generator=g)
+        k = (k / k.norm() * (3.2 + 1.6 * torch.rand(1, generator=g))).to(DEV)
+        ph = float(torch.rand(1, generator=g)) * 2 * math.pi
+        out = out + torch.cos(p @ k + ph)
+    return amp * out / 3
+
+
+def mesh_grow4(msh, heart=(0.0, 0.17, -0.04), k=0.55, w_end=0.3, amp=0.08, seed=3, prefix="mesh"):
+    """>v<🧊四维切片-真4D生长-4D 物体：身体只存在于 w ≥ W(p) 的那一侧，W(p) = −|p − 心口| + 低频场（四肢 / 头离心口远 → 最浅 → 先穿进来），
+    同时随 w 绕 y 扭转（Rot_y(k (w − w_end))，w_end = 结尾的切片位置 → 结尾正好是原样的她）：
+        f4(p, w) = max( f3( Rot_y(k (w − w_end)) p ),  W(p) − w )
+    超平面在 xw 平面里慢慢转（截面会拉伸 / 流动，不是刚体）同时往 w 正方向推：手、膝、肩、头在不相连的几处各自冒出来，
+    再合拢成一个人。W − w 那一项占上风的地方 = 真切面（生长前沿），cap > 0 → 自发光。
+    Lipschitz：|∇W| ≤ 1 + 0.4，扭转 ≤ sqrt(1 + (k r)²) → 球追踪步长用 0.6"""
+    hz = torch.tensor(heart, dtype=torch.float32, device=DEV)
+
+    def parts(p):
+        x, y, z, w = _cols(p)
+        a = k * (w - w_end)
+        ca, sa = torch.cos(a), torch.sin(a)
+        m = msh(ca * x + sa * z, y, -sa * x + ca * z)
+        W = -(p[:, :3] - hz).norm(dim=1) + _lowfreq(p[:, :3], seed, amp)
+        return m, W - w
+
+    def f(p):
+        m, e = parts(p)
+        return torch.maximum(m, e)
+
+    def cap(p):
+        m, e = parts(p)
+        return e - m
+    return Obj(f"{prefix}_grow4", "depth field + twist",
+               f"max( f3(Rot_y({k:g} (w - {w_end:g})) p),  W(p) - w ),  W = -|p - heart| + lowfreq({amp:g})   ({msh.label})",
+               f, 1.0, step=0.6, bound=1.6, cam=4.3, vbox=1.2, cap=cap, plane="xw")
+
+
+def grow4_track(sp, obj, empty=0.4, grow=4.4, th0=24.0, w_end=0.3, a0=0.25, a1=0.08):
+    """>v<🧊四维切片-真4D生长-每帧真参数：c 从「碰不到物体」开始，empty 秒后第一块截面出现（数值上找 W 的最小值），
+    Hermite 慢起慢收在 grow 秒推到 w_end，之后极慢漂（不过 w_end 太多）；切片在 xw 里的角度 θ 从 th0 慢慢转到 0（同一条 Hermite）。
+    相机、roll、身体自转沿用 InsertSpec（yaw_rate / dolly / roll / body_rate）"""
+    ax = torch.linspace(-obj.bound, obj.bound, 112, device=DEV)
+    X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
+    R0 = insert_R(obj, sp, th0, empty)
+
+    def nonempty(c):
+        g = slice_fn(obj, R0, c)
+        return any(bool((g(b) < 0).any()) for b in torch.split(X, 1 << 20))
+    lo, hi = -2.5, w_end                      # 二分：第一次接触的 c（θ = th0、身体在 t = empty 的角度下）
+    if not nonempty(hi) or nonempty(lo):
+        raise ValueError("找不到第一次接触：检查 w_end / 深度场")
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (lo, mid) if nonempty(mid) else (mid, hi)
+    Wmin = hi
+    n = insert_frames(sp.dur, sp.fps)
+    # 前 empty 秒：c 从 Wmin − 余量 线性走到 Wmin（空白，但已经在动）；之后 Hermite 推到 w_end
+    c_pre = Wmin - 0.06
+    v_pre = (Wmin - c_pre) / empty
+    out = []
+    for i in range(n):
+        t = i / sp.fps
+        if t < empty:
+            c, cv, S = c_pre + v_pre * t, v_pre, 0.0
+        else:
+            u = min((t - empty) / grow, 1.0)
+            S, dS = hermite01(u, a0, a1)
+            if t - empty > grow:
+                S, dS = 1.0 + a1 * ((t - empty - grow) / grow), a1
+            c, cv = Wmin + (w_end - Wmin) * S, (w_end - Wmin) * dS / grow
+        th = th0 * (1 - min(S, 1.0))
+        dist = obj.cam * sp.cam_scale * (1 - sp.dolly * t)
+        k = dict(i=i, t=t, c=c, cv=cv, th=th, v=th0 * 0, yaw=sp.yaw0 + sp.yaw_rate * t, dist=dist)
+        k["hud2"] = (f"p' = R_xw(theta) R_body p    theta = {th:+6.1f} deg (slice turning in the xw-plane, {th0:g} -> 0)"
+                     f"    body spin R_yz {sp.body_rate * t:+.1f} deg ({sp.body_rate:+g} deg/s)")
+        k["hud3"] = (f"slice w' = c = {c:+.3f}   dc/dt = {cv:+.3f}/s   (first contact c = {Wmin:+.3f} at t = {empty:g} s;"
+                     f" Hermite to {w_end:g} in {grow:g} s)     t = {t:.3f} / {sp.dur:g} s")
+        out.append(k)
+    return out, Wmin
+
+
+def b0_plot(track_json, out_png):
+    """连通块数 b0（和 b1）随时间的小图：灰 = b0，暗灰 = b1；红竖线 = b0 变化的帧"""
+    import json
+    meta = json.loads(Path(track_json).read_text(encoding="utf-8"))
+    fr = meta["frames"]
+    PW, PH = 900, 320
+    im = Image.new("RGB", (PW, PH), (0, 0, 0))
+    d = ImageDraw.Draw(im)
+    f = ImageFont.truetype(FONT, 13)
+    x0, x1, ya, yb = 60, PW - 20, 44, PH - 50
+    T = fr[-1]["t"] or 1
+    b0 = [x["betti"][0] for x in fr]
+    bmax = max(max(b0), 1)
+    tx = lambda t: x0 + (x1 - x0) * t / T  # noqa: E731
+    ty = lambda v: yb - (yb - ya) * v / (bmax + 0.5)  # noqa: E731
+    d.rectangle([x0, ya, x1, yb], outline=(60, 64, 68))
+    for a_, b_ in zip(fr, fr[1:]):
+        if a_["betti"][0] != b_["betti"][0]:
+            d.line([(tx(b_["t"]), ya), (tx(b_["t"]), yb)], fill=(90, 30, 34))
+    pts = []
+    for a_, b_ in zip(fr, fr[1:] + [fr[-1]]):
+        pts += [(tx(a_["t"]), ty(a_["betti"][0])), (tx(b_["t"]), ty(a_["betti"][0]))]
+    d.line(pts, fill=(200, 208, 214), width=2)
+    for v in range(0, bmax + 1):
+        d.text((x0 - 24, ty(v) - 7), str(v), font=f, fill=(150, 160, 168))
+    for j in range(int(T / 0.5) + 1):
+        d.text((tx(j * 0.5) - 10, yb + 6), f"{j * 0.5:.1f}s", font=f, fill=(150, 160, 168))
+    first = next((x["t"] for x in fr if x["betti"][0] > 0), None)
+    d.text((x0, 4), meta["tag"], font=f, fill=(200, 208, 214))
+    d.text((x0, 20), f"connected pieces b0 of the 3D slice (64^3 voxels) vs time;  first piece (voxels) at t = {first:.2f} s;  max {bmax} pieces",
+           font=f, fill=(200, 208, 214))
+    d.text((x0, PH - 22), "dark red lines = frames where the number of pieces changes (a piece is born / two pieces merge)", font=f, fill=(150, 160, 168))
+    Path(out_png).parent.mkdir(parents=True, exist_ok=True)
+    im.save(out_png)
+    print(f"  b0 plot -> {out_png}")
 
 
 
@@ -2313,6 +2457,10 @@ def main():
     g.add_argument("--ambient", type=float, default=0.035, help="sculpt 环境底光（小 = 暗部更深）")
     g.add_argument("--export-mesh", default=None, help="不渲染：每帧切片 → Surface Nets 网格 → <目录>/fNNNN.ply + track.json（给 tools/blender_four_d.py）")
     g.add_argument("--mesh-grid", type=int, default=320, help="--export-mesh 的网格分辨率 N（N³，盒 = 物体的包围半径）")
+    g.add_argument("--grow4", action="store_true", help="真四维生长：物体换成 mesh_grow4（深度场 + w 扭转），轨迹换成 grow4_track（先空白再多处冒出、xw 慢转）")
+    g.add_argument("--grow4-empty", type=float, default=0.4, help="第一块截面出现前的空白秒数")
+    g.add_argument("--duty", type=float, default=1.0, help="导出占空比（< 1：每帧后歇一会儿，GPU 别占满）")
+    g.add_argument("--b0-plot", default=None, help="--export-mesh 之后画「连通块数随时间」的图（png 路径）")
     g.add_argument("--export-hires", default=None, help="高模 GLB → 对齐到当前 --mesh 的 SDF → --out 的三角形 PLY（Blender 坐标）")
     g.add_argument("--compose-blender", default=None, help="Blender 渲好的帧目录（fNNNN.png）→ 加 HUD 条带出 mp4（--out / --contact，需 --track）")
     g.add_argument("--track", default=None, help="--compose-blender 用的 track.json")
@@ -2438,8 +2586,17 @@ def main():
                 print(f"  #{k['i']:02d} t={k['t']:.3f} theta={k['th']:+7.1f} v={k['v']:6.1f} c={k['c']:+.3f} dc/dt={k['cv']:+.3f}"
                       + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
             return
+        if a.grow4:
+            OBJS["mesh_grow4"] = mesh_grow4(MESH)
+            a.obj = "mesh_grow4"
+            track, cfirst = grow4_track(sp, OBJS[a.obj], a.grow4_empty)
+            print(f"  grow4: first contact c = {cfirst:+.4f} at t = {a.grow4_empty:g} s, {len(track)} frames")
+        else:
+            track = None
         if a.export_mesh:
-            export_insert_meshes(a.obj, sp, a.export_mesh, a.mesh_grid, a.tag)
+            export_insert_meshes(a.obj, sp, a.export_mesh, a.mesh_grid, a.tag, track=track, duty=a.duty)
+            if a.b0_plot:
+                b0_plot(Path(a.export_mesh) / "track.json", a.b0_plot)
             return
         out = Path(a.out or f"{a.obj}_insert.mp4")
         if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):

@@ -36,6 +36,9 @@ def args():
     ap.add_argument("--hires", default=None, help="高模 PLY（four_d --export-hires，已对齐）：--sweep 期间一个平面从头往下扫，扫过处换成高模")
     ap.add_argument("--sweep", default="46,70", help="扫的起止帧 a,b（之前全是切片，之后全是高模）")
     ap.add_argument("--seam", type=float, default=5.0, help="扫描线的自发光强度")
+    ap.add_argument("--cap-glow", type=float, default=2.5, help="切面（生长前沿，PLY 里的 cap 属性）自发光强度")
+    ap.add_argument("--duty", type=float, default=0.9, help="占空比：每帧渲完歇 (1/duty − 1)·耗时（👤GPU 别占满，≈ 90%）")
+    ap.add_argument("--percent", type=int, default=100, help="分辨率百分比（预览档用 75 / 50；合成时 four_d 会同比例放大）")
     ap.add_argument("--backdrop", default=None, help="背景图（可选）：贴在跟着相机的背景板上；不给 = 纯黑（板仍在场景里，以后换图即可）")
     return ap.parse_args(argv)
 
@@ -47,10 +50,18 @@ def read_ply(path):
     hdr = data[:end].decode("ascii").split("\n")
     nv = int(next(l for l in hdr if l.startswith("element vertex")).split()[-1])
     nf = int(next(l for l in hdr if l.startswith("element face")).split()[-1])
-    vert = np.frombuffer(data, dtype="<f4", count=nv * 6, offset=end).reshape(nv, 6)
-    k = data[end + nv * 24]
-    face = np.frombuffer(data, dtype=np.dtype([("n", "u1"), ("v", "<i4", (k,))]), count=nf, offset=end + nv * 24)
-    return vert[:, :3].copy(), vert[:, 3:].copy(), face["v"].copy()
+    i0 = next(i for i, l in enumerate(hdr) if l.startswith("element vertex"))
+    i1 = next(i for i, l in enumerate(hdr) if l.startswith("element face"))
+    props = [l.split()[-1] for l in hdr[i0 + 1:i1] if l.startswith("property float")]
+    npr = len(props)
+    vert = np.frombuffer(data, dtype="<f4", count=nv * npr, offset=end).reshape(nv, npr)
+    if nf == 0:
+        read_ply.cap = None
+        return vert[:, :3].copy(), vert[:, 3:6].copy(), np.zeros((0, 4), np.int32)
+    k = data[end + nv * 4 * npr]
+    face = np.frombuffer(data, dtype=np.dtype([("n", "u1"), ("v", "<i4", (k,))]), count=nf, offset=end + nv * 4 * npr)
+    read_ply.cap = vert[:, props.index("cap")].copy() if "cap" in props else None
+    return vert[:, :3].copy(), vert[:, 3:6].copy(), face["v"].copy()
 
 
 def build_mesh(name, V, N, Q, mat):
@@ -65,6 +76,10 @@ def build_mesh(name, V, N, Q, mat):
     me.update(calc_edges=True)
     me.validate(clean_customdata=False)
     me.normals_split_custom_set_from_vertices([tuple(n) for n in N])      # SDF 梯度法线 → 平滑（不靠面法线）
+    cap = getattr(read_ply, "cap", None)
+    if cap is not None and len(cap) == len(V):
+        at = me.attributes.new("cap", "FLOAT", "POINT")
+        at.data.foreach_set("value", cap.astype(np.float32))
     me.materials.append(mat)
     ob = bpy.data.objects.new(name, me)
     bpy.context.scene.collection.objects.link(ob)
@@ -94,7 +109,7 @@ def scene_setup(meta, a):
         bpy.data.objects.remove(ob, do_unlink=True)
     W, H = meta["size"]
     sc.render.resolution_x, sc.render.resolution_y = W, H - meta["hud_band"]
-    sc.render.resolution_percentage = 100
+    sc.render.resolution_percentage = a.percent
     sc.render.fps = meta["fps"]
     sc.render.image_settings.file_format = "PNG"
     sc.render.film_transparent = False
@@ -225,7 +240,19 @@ def plaster_material(name, a, side):
     add = nt.nodes.new("ShaderNodeAddShader")
     nt.links.new(mix.outputs[0], add.inputs[0])
     nt.links.new(emi.outputs[0], add.inputs[1])
-    nt.links.new(add.outputs[0], out.inputs["Surface"])
+    # 切面（生长前沿）自发光：顶点属性 cap（0..1）× cap_glow，冷白
+    at = nt.nodes.new("ShaderNodeAttribute")
+    at.attribute_name = "cap"
+    em2 = nt.nodes.new("ShaderNodeEmission")
+    em2.inputs[0].default_value = (0.82, 0.90, 1.0, 1)
+    mul2 = nt.nodes.new("ShaderNodeMath"); mul2.operation = "MULTIPLY"
+    mul2.inputs[1].default_value = a.cap_glow
+    nt.links.new(at.outputs["Fac"], mul2.inputs[0])
+    nt.links.new(mul2.outputs[0], em2.inputs[1])
+    add2 = nt.nodes.new("ShaderNodeAddShader")
+    nt.links.new(add.outputs[0], add2.inputs[0])
+    nt.links.new(em2.outputs[0], add2.inputs[1])
+    nt.links.new(add2.outputs[0], out.inputs["Surface"])
     return mat
 
 
@@ -295,8 +322,20 @@ def sweep_height(i, a, zlo, zhi):
     return (zhi + 0.02) - (zhi - zlo + 0.04) * u
 
 
+def low_priority():
+    """>v<🧊四维切片-Blender-本进程降到 Windows BelowNormal（👤GPU / 系统别被占满；不改驱动 / 功耗）"""
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        k32.SetPriorityClass(k32.GetCurrentProcess(), 0x00004000)
+        print("  process priority: BelowNormal")
+    except Exception as e:  # noqa: BLE001
+        print("  priority not changed:", e)
+
+
 def main():
     a = args()
+    low_priority()
     seq = Path(a.seq)
     meta = json.loads((seq / "track.json").read_text(encoding="utf-8"))
     out = Path(a.out)
@@ -328,7 +367,10 @@ def main():
         me = ob.data
         bpy.data.objects.remove(ob, do_unlink=True)
         bpy.data.meshes.remove(me)
-        print(f"  frame {fr['i']}: {len(Q)} quads" + ("" if h is None else f"  sweep z = {h:+.3f}") + f"  {time.time() - t1:.2f}s", flush=True)
+        dt = time.time() - t1
+        print(f"  frame {fr['i']}: {len(Q)} quads" + ("" if h is None else f"  sweep z = {h:+.3f}") + f"  {dt:.2f}s", flush=True)
+        if a.duty < 1:
+            time.sleep(dt * (1 / a.duty - 1))
     print(f"done: {len(frames)} frames, {time.time() - t0:.1f}s ({(time.time() - t0) / max(1, len(frames)):.2f} s/frame)")
 
 
