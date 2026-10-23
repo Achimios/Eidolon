@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""">v<👂感官层-期待-CLI：往 感官.json 里**加** `expect` 节点（意外度 + 情绪主导的显著度），出一张 感官_期待审计.jpg（已有就 _v2、_v3 …… 不覆盖）。
+""">v<👂感官层-期待-CLI：往 感官.json 里**加** `expect` 节点（意外度 + 情绪主导的显著度），出一张 感官_期待审计.jpg（已有就 _v2、_v3 …… 不覆盖）；给了剪辑表时分歧点按时间编号（A1… / B1…），同名 .md 出清单（编号 | 时间 | 意外度 | 当前画面 | 一句建议）。
 ⚠️这是积木 / 审计，不是导演（👤2026-10-23：「核心还是跟着 Thymos 和 emotion flow，数学是 building block 和审计视野」）。
 它不改剪辑表、不改画面、不改任何已有字段；分歧点只画出来给人看。
 
@@ -210,6 +210,57 @@ def audit(evs, rows, mot, fps, end):
     return A, B, key, thr
 
 
+def _mmss(t):
+    return f"{int(t // 60)}:{t % 60:05.2f}"
+
+
+def number(A, B, rows):
+    """分歧点按时间编号（A1, A2… / B1, B2…），让人能用一句话指认：「A3 加闪帧」「B2 留」。
+    每个点附上当前画面（落在哪一段剪辑）和一句**草稿**建议（规则给的，人来定）。"""
+    def shot(t):
+        for r in rows:
+            if r["t"] <= t < r["t"] + r["dur"]:
+                return r
+        return None
+    A = sorted(A, key=lambda e: e["t"])
+    for i, e in enumerate(A, 1):
+        e["id"] = f"A{i}"
+        r = shot(e["t"])
+        e["shot"] = r["src"] if r else "—"
+        into = e["t"] - r["t"] if r else 0.0
+        e["advice"] = {"onset": f"加闪帧（2–3 帧）或把切点挪到 {_mmss(e['t'])}（现在镜头开了 {into:.1f} s）",
+                       "voice_on": "人声进来：给她一个回应 —— 切点、亮度起或推近，对齐到起音",
+                       "voice_off": "人声收：画面跟着落（减速 / 暗下）",
+                       "motif": "动机：插独立镜头（同前几次出现的处理）",
+                       "absence": "该来的没来：可以留空白 / 定格，或不动"}.get(e["s"], "看一眼再定")
+    B = sorted(B, key=lambda b: b[0]["t"])
+    out = []
+    for i, (r, mb, pct) in enumerate(B, 1):
+        out.append((r, mb, pct, f"B{i}"))
+    return A, out
+
+
+def write_md(path, img, mv, edl, video, A, B, key, sense):
+    """和审计图同名的 .md 清单：编号 | 时间 | 意外度 | 当前画面 | 一句建议"""
+    L = [f"# {mv.name} 期待 / 意外 审计清单（{Path(img).name}）", "",
+         f"- 剪辑表：`{Path(edl).name}`；样片运动量：`{Path(video).name if video else '（没给，只看切点）'}`",
+         "- ⚠️积木 / 审计，不是导演。建议是规则起的**草稿**；你说「A3 加闪帧」「B2 留」这样就行，我按编号改剪辑表。",
+         f"- A = {('显著度' if key == 'sal' else '意外度')}高但画面没回应（没切点、没为它开的长码、样片没运动尖峰）；B = 剪辑给了长码，但那一刻很平常。", "",
+         "| 编号 | 时间 | 意外度（比特） | 事件 | 当前画面 | 一句建议 | 你的决定 |", "|---|---|---|---|---|---|---|"]
+    for e in A:
+        sal = f"，显著 {e['sal']}" if e.get("sal") is not None else ""
+        L.append(f"| **{e['id']}** | {_mmss(e['t'])} | {e['bits']:.1f}{sal} | {e['s']} | `{e['shot']}` | {e['advice']} |  |")
+    for r, mb, pct, bid in B:
+        alt = [x for x in sense.get("_evs", []) if abs(x["t"] - r["t"]) <= 1.5 and x["bits"] >= 3.0 and x["s"] != "voice_off"]
+        if alt:
+            x = max(alt, key=lambda x: x["bits"])
+            adv = f"把这个长码挪到 {_mmss(x['t'])}（{x['s']}，{x['bits']:.1f} 比特），或缩到 ~{r['med']:.1f} s"
+        else:
+            adv = f"缩到 ~{r['med']:.1f} s（邻近中位），或留（如果这份停留本身是情绪）"
+        L.append(f"| **{bid}** | {_mmss(r['t'])} | {mb:.1f}（本段第 {pct * 100:.0f} 百分位） | 长码：{'；'.join(r['long'])} | `{r['src']}` | {adv} |  |")
+    Path(path).write_text("\n".join(L) + "\n", "utf-8", newline="\n")
+
+
 # ───────────────────────── 图 ─────────────────────────
 def draw(path, title, sense, segs, exp, evs, surprise, ab, sal, rows=None, mot=None, A=(), B=(), key="bits", audit_end=None):
     dur = sense["duration"]; fps = sense["fps"]
@@ -221,12 +272,13 @@ def draw(path, title, sense, segs, exp, evs, surprise, ab, sal, rows=None, mot=N
         lanes = [("段落", 54), ("意外度", 150), ("absence", 50)] + ([("显著度", 150)] if sal is not None else [])
         if with_edit:
             lanes += [("剪辑", 70), ("样片运动", 60)]
-        H = sum(h + 8 for _, h in lanes) + 30
+        TOP = 58 if (A or B) else 0                 # 分歧点编号的标签带（3 层错开，避免互相压字）
+        H = sum(h + 8 for _, h in lanes) + 30 + TOP
         im = Image.new("RGB", (L + gw + R, H), (12, 13, 15)); g = ImageDraw.Draw(im)
 
         def X(t):
             return L + (t - t0) * pps
-        y = 4
+        y = 4 + TOP
         # 乐句（淡竖线）
         for t in sense["events"].get("phrases", []):
             if t0 <= t <= t1:
@@ -297,16 +349,26 @@ def draw(path, title, sense, segs, exp, evs, surprise, ab, sal, rows=None, mot=N
             g.line([(L, y + h + 4), (L + gw, y + h + 4)], fill=(30, 32, 36))
             y += h + 8
         # 分歧点
-        for e in A:
-            if t0 <= e["t"] <= t1:
-                x = X(e["t"])
-                g.polygon([(x - 6, 4), (x + 6, 4), (x, 16)], fill=(255, 42, 52))
-                g.line([(x, 16), (x, H - 28)], fill=(120, 30, 36))
-        for r, *_ in B:
-            if t0 <= r["t"] <= t1:
-                x = X(r["t"])
-                g.polygon([(x - 6, H - 28), (x + 6, H - 28), (x, H - 40)], fill=(255, 160, 40))
-                g.line([(x, 4), (x, H - 40)], fill=(110, 70, 20))
+        marks = [(e["t"], e.get("id", ""), (255, 42, 52), "A") for e in A] + [(b[0]["t"], b[3] if len(b) > 3 else "", (255, 160, 40), "B") for b in B]
+        marks.sort()
+        lvl_end = [-1e9, -1e9, -1e9]                 # 每层上一个标签的右端（像素）
+        for t, mid, col, kind in marks:
+            if not (t0 <= t <= t1):
+                continue
+            x = X(t)
+            lab = f"{mid} {_mmss(t)}" if with_edit else mid
+            wl = g.textlength(lab, font=fc) + 8
+            lv = next((i for i in range(3) if lvl_end[i] < x - 2), int(np.argmin(lvl_end)))
+            lvl_end[lv] = x + wl
+            ly = 4 + lv * 18
+            g.text((x + 2, ly), lab, font=fc, fill=col)
+            if kind == "A":
+                g.polygon([(x - 6, TOP + 4), (x + 6, TOP + 4), (x, TOP + 16)], fill=col)
+                g.line([(x, ly + 2), (x, TOP + 4)], fill=col)
+                g.line([(x, TOP + 16), (x, H - 28)], fill=(120, 30, 36))
+            else:
+                g.polygon([(x - 6, H - 28), (x + 6, H - 28), (x, H - 40)], fill=col)
+                g.line([(x, ly + 2), (x, H - 40)], fill=(110, 70, 20))
         if audit_end and t0 < audit_end < t1 and with_edit is False:
             g.line([(X(audit_end), 4), (X(audit_end), H - 28)], fill=(255, 160, 40))
         step = 5 if pps >= 16 else 10
@@ -324,10 +386,11 @@ def draw(path, title, sense, segs, exp, evs, surprise, ab, sal, rows=None, mot=N
            "颜色：灰 = 起音  黄 = 动机  蓝 = 人声起  浅蓝 = 人声止  紫 = 该来的没来（absence）。段落底色 = 她在等什么（红 = 冲击，金 = John，蓝 = 自己的声音）。"]
     if rows is not None:
         leg.append(f"▼红 = {('显著度' if key == 'sal' else '意外度')}高（≥ 前 8% 且 ≥ 2）但 ±0.2 s 没有切点、前 0.6 s 内也没开长码镜头、样片任何一块（6×6）也没有运动尖峰（−3~+5 帧，≥ 附近中位 2.5 倍）；▲橙 = 剪辑给了长码，但切点前 0.1 s 到后 0.6 s 内最大意外度 < 3 比特、且低于本段六成起音。只标出来，不改任何东西。")
-        for e in A[:8]:
-            leg.append(f"  ▼ {e['t']:7.2f}s  {e['s']:<9} 意外 {e['bits']:.1f} 比特  显著 {e['sal'] if e['sal'] is not None else '—'}  段 {e['seg']}")
-        for r, mb, pct in B:
-            leg.append(f"  ▲ {r['t']:7.2f}s  {r['src'][:46]}  长码：{'；'.join(r['long'])}  这一刻意外 {mb:.1f} 比特（本段第 {pct * 100:.0f} 百分位）")
+        for e in A:
+            leg.append(f"  ▼ {e.get('id', ''):<4} {_mmss(e['t'])}  {e['s']:<9} 意外 {e['bits']:.1f} 比特  显著 {e['sal'] if e['sal'] is not None else '—'}  段 {e['seg']}  画面 {e.get('shot', '')[:40]}")
+        for r, mb, pct, *bid in B:
+            leg.append(f"  ▲ {(bid[0] if bid else ''):<4} {_mmss(r['t'])}  {r['src'][:46]}  长码：{'；'.join(r['long'])}  这一刻意外 {mb:.1f} 比特（本段第 {pct * 100:.0f} 百分位）")
+        leg.append("  编号可直接用来说：「A3 加闪帧」「B2 留」—— 同名 .md 是清单。")
     lh = 22
     W = max(p.width for p in pans)
     Ht = len(leg) * lh + 16 + sum(p.height + 10 for p in pans)
@@ -375,16 +438,21 @@ def main():
             print(f"  样片 {nfr} 帧")
         A, B, key, thr = audit(evs, rows, mot, sense["fps"], end)
         print(f"audit 0–{end:.1f}s：{len(rows)} 段，长码 {sum(bool(r['long']) for r in rows)} 段；A（{key} ≥ {thr:.2f} 无回应）{len(A)} 个，B（长码低意外）{len(B)} 个")
-        for e in A[:8]:
-            print(f"  A {e['t']:7.2f} {e['s']:<9} bits {e['bits']:.2f} sal {e['sal']} seg {e['seg']}")
-        for r, mb, pct in B:
-            print(f"  B {r['t']:7.2f} {r['src']}  {r['long']}  bits {mb:.2f}  pct {pct:.2f}")
+        A, B = number(A, B, rows)
+        for e in A:
+            print(f"  {e['id']:<4} {e['t']:7.2f} {e['s']:<9} bits {e['bits']:.2f} sal {e['sal']} seg {e['seg']}")
+        for r, mb, pct, bid in B:
+            print(f"  {bid:<4} {r['t']:7.2f} {r['src']}  {r['long']}  bits {mb:.2f}  pct {pct:.2f}")
     img = mv / "感官_期待审计.jpg"
     k = 2
     while img.exists():                           # 不覆盖用户可能看过的图（2026-10-23：voice 重算后重跑会撞名）
         img = mv / f"感官_期待审计_v{k}.jpg"; k += 1
     draw(img, f"{mv.name}  期待 / 意外 审计", sense, segs, exp, evs, surprise, ab, sal, rows, mot, A, B, key, end)
     print(f"  -> {img}")
+    if rows is not None:
+        md = img.with_suffix(".md")
+        write_md(md, img, mv, a.edl, a.video, A, B, key, {**sense, "_evs": evs})
+        print(f"  -> {md}")
     if a.dry:
         return
     if "expect" not in sense and not (mv / BAK).exists():
