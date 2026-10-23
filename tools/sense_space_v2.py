@@ -489,7 +489,78 @@ def camera_v3(seg, T, sense, tgs):
     return out, evs, info
 
 
-def draw_reticle(dr, st, inf, tn):
+def camera_v4(seg, T, sense, tgs, mode):
+    """v4 A/B/C 节奏试验（👤看 v3：「镜头运动和节奏还是对不上」）。诊断 v3：11 次出发里 8 次落在拍内（拍相位 0.2–0.7）——
+    「读数」按 +0.55 s 计时出发、出发吸附到切分起音（41.25 / 44.45 是八分音符的「&」），移动间隔 0.85–2.5 s 不成脉冲。
+    v4 一律去掉「读数」，出发只落在拍网格上（感官.json beats / downbeats，提前 LEAD 帧）：
+      A = 只在小节首拍做一次明确的移动（D 0.9 s），拍内只有慢漂；
+      B = A + 其余每拍一个「点」（推近 + yaw 小偏，2 帧起、τ 0.12 s 收回，幅度 ∝ 该拍的威胁峰）；
+      C = 移动跟乐句走（每 2 小节 = 半个乐句一次，D 2.4 s），拍点不动镜头，只作用在准星（每拍一跳）和层上的局部抖动。
+    目标 = 这次移动之后一个周期里显著度最高的目标（没有 → 下一个）；lookat 追它的实时位置（偏左 240）。"""
+    s0, s1 = seg
+    beats = np.asarray(sense["events"]["beats"], float)
+    dbt = np.asarray(sense["events"]["downbeats"], float)
+    th = np.asarray(sense["channels"]["threat"], float); fps = sense["fps"]
+    tgs = [t for t in tgs if t["kind"] != "readout"]
+    if mode == "C":
+        bar = float(np.median(np.diff(dbt)))
+        starts = [t for t in dbt if s0 - 1e-3 <= t < s1 - 0.5]
+        ph = [t for t in sense["events"]["phrases"] if s0 - bar * 2 < t < s1]
+        starts = sorted({round(t, 3) for t in starts if any(abs((t - p) / bar - 2 * round((t - p) / bar / 2)) < 0.1 for p in ph)})
+        period, D = 2 * bar, 2.4
+    else:
+        starts = [float(t) for t in dbt if s0 - 1e-3 <= t < s1 - 0.5]
+        period, D = float(np.median(np.diff(dbt))), 0.9
+    lead = LEAD / FPS
+    yaws, pitches, dists = (0.60, 0.74, 0.66, 0.80), (0.11, 0.16, 0.09, 0.14), (1550.0, 1450.0, 1600.0, 1500.0)   # v3 的甩（51 px/帧）收小
+    mv = []
+    for k, t0 in enumerate(starts):
+        win = [g for g in tgs if t0 <= g["t"] < t0 + period]
+        nxt = [g for g in tgs if g["t"] >= t0]
+        g = max(win, key=lambda g: g.get("sal", 0) + (10 if g["kind"] == "voice" else 0)) if win else (nxt[0] if nxt else tgs[-1])
+        mv.append(dict(d=t0 - s0, tg=g, o=np.array([yaws[k % 4], pitches[k % 4], dists[k % 4]]), kind=f"{mode} move {t0:.2f} → {g['kind']} {g['t']:.2f}"))
+    pts = []
+    if mode == "B":
+        for b in beats:
+            if s0 <= b < s1 and np.min(np.abs(dbt - b)) > 0.05:
+                s_ = float(th[max(0, int(b * fps) - 1):int(b * fps) + 4].max())
+                pts.append((b - s0, s_))
+    out = np.zeros((T, 6)); info = []
+    g0 = mv[0]["tg"] if mv else tgs[0]                     # 开场就看着第一个目标附近（不让第一次移动变成一次大甩）
+    cur_la = target_pos(g0, s0) + np.array([-420.0, 40.0, -60.0])
+    cur_o = (mv[0]["o"] if mv else np.array([0.6, 0.12, 1500.0])) + np.array([-0.10, 0.03, 150.0])
+    k = -1
+    start_la, start_o = cur_la.copy(), cur_o.copy()
+    for f in range(T):
+        t = f / FPS
+        tn = s0 + t
+        while k + 1 < len(mv) and t >= mv[k + 1]["d"] - lead:
+            k += 1
+            start_la, start_o = cur_la.copy(), cur_o.copy()
+        if k >= 0:
+            m_ = mv[k]
+            u = (t - (m_["d"] - lead)) / D
+            e = ease(u)
+            P = target_pos(m_["tg"], tn) + np.array([-240.0, 0.0, 0.0])
+            cur_la = start_la + (P - start_la) * e
+            cur_o = start_o + (m_["o"] - start_o) * e
+            info.append(dict(k=k, u=float(min(u, 1.0)), found=tn >= m_["tg"]["t"], since=tn - m_["tg"]["t"], tg=m_["tg"]))
+        else:
+            info.append(None)
+        dr = np.array([22 * math.sin(0.5 * t), 16 * math.sin(0.37 * t + 1), 30 * math.sin(0.43 * t + 2),
+                       0.03 * t + 0.04 * math.sin(0.7 * t), 0.02 * math.sin(0.55 * t), 70 * math.sin(0.3 * t)])
+        kick = np.zeros(6)
+        for i, (tb, s_) in enumerate(pts):                  # B：每拍一点（快起快收，回到原处）
+            dt_ = t - (tb - lead)
+            if 0 <= dt_ < 0.8:
+                a_ = min(1.0, dt_ / (2 / FPS)) * math.exp(-max(0.0, dt_ - 2 / FPS) / 0.12) * s_
+                kick += a_ * np.array([0.0, 0.0, 0.0, (1 if i % 2 else -1) * 0.025, 0.0, -110.0])
+        out[f] = np.r_[cur_la, cur_o] + dr + kick
+    evs = [(m_["d"], m_["kind"]) for m_ in mv] + [(tb, "beat point") for tb, _ in pts]
+    return out, sorted(evs), info
+
+
+def draw_reticle(dr, st, inf, tn, pulse=0.0):
     """搜寻准星：四角括号框住目标的实时位置；搜的时候灰、找到的 0.6 s 红、之后白；标签 = 目标的真数据"""
     if inf is None:
         return
@@ -505,6 +576,9 @@ def draw_reticle(dr, st, inf, tn):
     else:
         r = 22 * SS
         col = HOT if since < 0.6 else INK
+    r *= 1 + 0.6 * pulse
+    if pulse > 0.5 and col == MID:
+        col = INK
     L = r * 0.45
     for sx in (-1, 1):
         for sy in (-1, 1):
@@ -542,7 +616,10 @@ def render(seg, only=None):
     css = [np.vstack([np.zeros(NB), np.cumsum(10 ** (db / 10), axis=0)]) for db in dbs]
     wig, kinfo, kref = kura_tremor(sense, dbs, s1)
     nL = len(STEMS)
-    if VER["v"] == 3:
+    if VER["v"] == 4:
+        tgs = search_targets(sense, dbs, seg)
+        cams, cam_ev, cinfo = camera_v4(seg, T, sense, tgs, VER["mode"])
+    elif VER["v"] == 3:
         tgs = search_targets(sense, dbs, seg)
         cams, cam_ev, cinfo = camera_v3(seg, T, sense, tgs)
     else:
@@ -755,7 +832,12 @@ def render(seg, only=None):
             cur = ch[cname][min(int(tn * fps_s), len(ch[cname]) - 1)]
             label((0, y0 + 140 * cur, Z_SENSE), f"{SYM[cname]} {cname}  {cur:.2f}", HOT if (cname == "threat" and cur > 0.6) else INK, 15, dx=10, dy=-10, knock=True)
 
-        draw_reticle(dr, st, cinfo[f], tn)
+        pulse = 0.0
+        if VER.get("mode") == "C":                        # C：拍点只作用在准星上（每拍一跳，τ 0.12 s）
+            bb = np.asarray(sense["events"]["beats"], float)
+            d_ = tn - bb[(bb <= tn + LEAD / FPS) & (bb > tn - 0.6)] + LEAD / FPS
+            pulse = float(np.sum(np.exp(-np.maximum(d_, 0) / 0.12)))
+        draw_reticle(dr, st, cinfo[f], tn, pulse)
         # HUD
         sid_now = next((s for s in segs if s[0] <= tn < s[1]), segs[-1])
         text(dr, (56 * SS, 40 * SS), f"{sid_now[2]}  {sid_now[3]}    SENSORY SPACE · OPENING    t = {tn:6.2f} s", INK, 13, cn=True)
@@ -786,14 +868,22 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seg0", type=float, default=38.71)
     ap.add_argument("--seg1", type=float, default=51.51)
-    ap.add_argument("--v", type=int, default=3, choices=(2, 3), help="2 = 漂移环绕 + 层距大；3 = 在里面搜寻 + 层距压缩")
+    ap.add_argument("--v", type=int, default=3, choices=(2, 3, 4), help="2 = 漂移环绕 + 层距大；3 = 在里面搜寻 + 层距压缩；4 = 节奏 A/B/C 试验（--mode）")
+    ap.add_argument("--mode", default="A", choices=("A", "B", "C"))
+    ap.add_argument("--lowres", action="store_true", help="960×540（A/B 试听用）")
     ap.add_argument("--name", default=None)
     ap.add_argument("--still", default=None)
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    if a.v == 3:
+    if a.v >= 3:
         set_v3()
-    a.name = a.name or f"24_感官空间_开头_v{a.v}"
+    if a.v == 4:
+        VER.update(v=4, mode=a.mode)
+    if a.lowres:
+        global W, H, FOCAL
+        W, H = 960, 540
+        FOCAL = (W / 2) / math.tan(math.radians(25))
+    a.name = a.name or (f"24_感官空间_开头_v4_{a.mode}" if a.v == 4 else f"24_感官空间_开头_v{a.v}")
     seg = (a.seg0, a.seg1)
     T = int(round((seg[1] - seg[0]) * FPS))
     if a.still:
