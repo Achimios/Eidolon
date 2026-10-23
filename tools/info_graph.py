@@ -1248,7 +1248,10 @@ V7 = dict(lead_frames=2, d_pop=1.3, d_open=1.3, d_zoom=1.6, rush_d=0.55, rush_p=
 V8 = dict(orbit_r=46.0, orbit_w=0.55, drift=(9.0, -3.0))
 
 
-def camera_ff_v7(mem, sch, seg, T, v8=False):
+V9 = dict(john_t=124.948, w_pop=0.65, w_rec=0.8, w_conf=0.9)
+
+
+def camera_ff_v7(mem, sch, seg, T, v8=False, v9=False):
     """v7（👤：前半段回到 A v1 acid 的镜头 —— 「几乎完美」）：v1 是弹簧追「0.65·最新节点 + 0.35·已访问重心」、
     开场从 0:00 那一侧以 2.2×距离/秒 扫向「此刻」、变焦 0.62 → 1.05（随进度到 1.30）。这里保留它的目标和速度量级，
     但改成前馈：每个弹出提前 2 帧起步、1 − (1 − u)^p 快起慢收（p = 3.5，时长 1.3 s ≈ 弹簧 ω = 2.6 的建立时间），不分组、不限速。
@@ -1263,6 +1266,7 @@ def camera_ff_v7(mem, sch, seg, T, v8=False):
     pc = (pp.min(0) + pp.max(0)) / 2
     jpos = base[mem.john]
     t_path = hops[0]
+    t_lock = hops[3]
     moves = []                                                   # (t, 位置目标, 变焦目标 or None, D_pos, D_zoom, p, 种类)
     vis = []
     for u, (tu, _) in sorted(pop.items(), key=lambda kv: kv[1][0]):
@@ -1292,6 +1296,18 @@ def camera_ff_v7(mem, sch, seg, T, v8=False):
     conf_nodes = [path[2], path[3], mem.john]
     for k in (1, 2, 3):
         moves.append((hops[k], 0.65 * (0.5 * pc + 0.5 * jpos) + 0.35 * base[conf_nodes[k - 1]], None, 0.45, None, V5["ease_p"], f"confirm{k}"))
+    if v9:                                                       # v9：2:04.948（起音）起镜头移到 John（最终图）附近，NOTICED / 四声都在这一带发生；结束时 John 居中
+        tj = V9["john_t"] - seg[0]
+        mv2 = []
+        for m_ in moves:
+            if m_[0] < tj:
+                mv2.append(m_)
+                continue
+            k_ = m_[-1]
+            w = V9["w_conf"] if k_.startswith("confirm") else (V9["w_rec"] if k_ in ("recognize", "noticed") else V9["w_pop"])
+            mv2.append((m_[0], (1 - w) * np.asarray(m_[1]) + w * jpos) + m_[2:])
+        moves = mv2 + [(tj, 0.7 * jpos + 0.3 * pc, max(z_fit, 1.25), 0.7, 0.8, V5["ease_p"], "to-john"),
+                       (t_lock, jpos.copy(), None, 1.2, None, V5["ease_p"], "lock-center")]
     moves.sort(key=lambda m: m[0])
     if v8:                                                       # v8 ①重叠：每段时长至少盖过到下一个事件的间隔 ×1.6 → 上一段还在走，下一段就接上
         mv2 = []
@@ -1327,11 +1343,11 @@ def camera_ff_v7(mem, sch, seg, T, v8=False):
             mi += 1
         cam[f] = cur["x0"] + (cur["tgt"] - cur["x0"]) * ease_ff((t - cur["t_s"]) / cur["D"], cur["p"])
         zs[f] = cur["z0"] + (cur["zt"] - cur["z0"]) * ease_ff((t - cur["t_s"]) / cur["Dz"], cur["p"])
-        if t > t_lock + 0.45:                                        # 锁定后：留出口 —— 缓慢漂移（不冲进），速度很小、不归零
+        if t > t_lock + 0.45 and not v9:                             # 锁定后：留出口 —— 缓慢漂移（不冲进），速度很小、不归零
             cam[f] += np.array([1.0, -0.4]) * 14.0 * (t - t_lock - 0.45)
             zs[f] *= 1 + 0.012 * (t - t_lock - 0.45)
         if v8:                                                       # ②漂浮的船：一层永不停的慢环绕 + 慢平移（世界像素），叠在排程之上
-            cam[f] += np.array([V8["orbit_r"] * math.cos(V8["orbit_w"] * t), V8["orbit_r"] * 0.6 * math.sin(V8["orbit_w"] * t)])                 + np.array(V8["drift"]) * t
+            cam[f] += np.array([V8["orbit_r"] * math.cos(V8["orbit_w"] * t), V8["orbit_r"] * 0.6 * math.sin(V8["orbit_w"] * t)])                 + (np.array(V8["drift"]) * (t if not v9 else 2.2 * math.sin(0.45 * t)))   # v9：平移改成来回（不累积，结束时 John 仍居中）
     return cam, zs, acc
 
 
@@ -1349,7 +1365,7 @@ def string_offset(n_pts, dt, amp, f1=None, tau=None):
     return amp * y * math.exp(-dt / (tau or V5["tau_s"]))
 
 
-def render_memory_v5(mem, sch, seg, pal, only=None, enter=True, v6=False, v7=False, v8=False):
+def render_memory_v5(mem, sch, seg, pal, only=None, enter=True, v6=False, v7=False, v8=False, v9=False):
     """v3 的构图 / 分层 / 节奏为底；加：前馈镜头、心魔（框不动，框里的延迟嵌入在转、在走，然后被压下）、
     2:01.96 冲进前沿、125.01 起前沿附近的边被拨成弦（谐波，克制）、四声第一声认出 John → 后三声确认 → 锁定 → 冲进接粒子海。"""
     _MINF["on"] = True
@@ -1407,7 +1423,7 @@ def render_memory_v5(mem, sch, seg, pal, only=None, enter=True, v6=False, v7=Fal
                 nw = u
         return nw
     if v7:
-        cam, zs, cam_events = camera_ff_v7(mem, sch, seg, T, v8=v8)
+        cam, zs, cam_events = camera_ff_v7(mem, sch, seg, T, v8=v8, v9=v9)
         enter = False
     else:
         cam, zs, cam_events = camera_ff(mem, sch, seg, T, v6=v6)
@@ -1708,11 +1724,12 @@ def cmd_memory_v5(a):
     v6 = a.v >= 6
     v7 = a.v >= 7
     v8 = a.v >= 8
+    v9 = a.v >= 9
     seg = (a.seg0, V4["end_t"])
     mem = build_memory(seg=seg, k=a.k)
     sch = schedule_v4(mem, seg, john_hop=0)
     T = int(round(sch["end"] * FPS))
-    cam, zs, evs = camera_ff_v7(mem, sch, seg, T, v8=v8) if v7 else camera_ff(mem, sch, seg, T, v6=v6)
+    cam, zs, evs = camera_ff_v7(mem, sch, seg, T, v8=v8, v9=v9) if v7 else camera_ff(mem, sch, seg, T, v6=v6)
     spd = np.zeros(T)
     spd[1:] = np.hypot(*(np.diff(cam, axis=0).T)) * zs[1:] + np.abs(np.diff(np.log(zs))) * W
     print(f"屏幕速度（px/帧）：最低 {spd[1:].min():.2f}  5 百分位 {np.percentile(spd[1:], 5):.2f}  中位 {np.median(spd[1:]):.2f}")
@@ -1723,7 +1740,7 @@ def cmd_memory_v5(a):
     OUT_A.mkdir(parents=True, exist_ok=True)
     if a.still is not None:
         fs = {int(round(float(x) * FPS)) for x in str(a.still).split(",")}
-        ims = [(f"{seg[0] + f / FPS:.2f}s f{f}", im) for f, im, _ in render_memory_v5(mem, sch, seg, a.palette, only=fs, v6=v6, v7=v7, v8=v8)]
+        ims = [(f"{seg[0] + f / FPS:.2f}s f{f}", im) for f, im, _ in render_memory_v5(mem, sch, seg, a.palette, only=fs, v6=v6, v7=v7, v8=v8, v9=v9)]
         outp = Path(a.out or (Path(a.scratch) / f"v5_{a.palette}.jpg"))
         contact(ims, outp, cols=2, tw=960)
         print("->", outp)
@@ -1733,7 +1750,7 @@ def cmd_memory_v5(a):
     picks = set(np.linspace(0, T - 1, 20).round().astype(int).tolist()) | {int(round((t - seg[0]) * FPS)) for t in
                                                                           (V4["unstable_t"] + 0.6, V4["unstable_t"] + 1.5, V4["cut_t"] + 0.1, V5["string_start"] + 0.3, V6["faint_t"] + 0.2, V6["notice_t"] + 0.1, *V4["hops"])}
     sheet, meta = [], []
-    for f, im, m in render_memory_v5(mem, sch, seg, a.palette, v6=v6, v7=v7, v8=v8):
+    for f, im, m in render_memory_v5(mem, sch, seg, a.palette, v6=v6, v7=v7, v8=v8, v9=v9):
         w.stdin.write(np.asarray(im).tobytes())
         meta.append(m)
         if f in picks:
@@ -1743,7 +1760,7 @@ def cmd_memory_v5(a):
     contact(sheet, vid.with_name(vid.stem + "_接触表.jpg"))
     cam2, zs2 = np.array([m["cam"] for m in meta]), np.array([m["zoom"] for m in meta])
     speed_plot(cam2, zs2, evs, T, vid.with_name(vid.stem + "_镜头速度.png"), seg[0], vid.stem, lead=(V7 if v7 else (V6 if v6 else V5))["lead_frames"])
-    side = dict(tool=f"tools/info_graph.py memory --v {a.v}", seg=[seg[0], V4["end_t"]], palette=a.palette, v4=V4, v5=V5, v6=(V6 if v6 else None), v7=(V7 if v7 else None), v8=(V8 if v8 else None),
+    side = dict(tool=f"tools/info_graph.py memory --v {a.v}", seg=[seg[0], V4["end_t"]], palette=a.palette, v4=V4, v5=V5, v6=(V6 if v6 else None), v7=(V7 if v7 else None), v8=(V8 if v8 else None), v9=(V9 if v9 else None),
                 unstable=sch["unstable"], john_pop=sch["jk"] + 1, confidence=round(mem.conf, 4), path=mem.path,
                 pop_times={str(u): [round(tt + seg[0], 3), sch["kinds"][u]] for u, (tt, _) in sch["pop"].items()},
                 camera_events=[[round(t + seg[0], 3), k] for t, k in evs],
