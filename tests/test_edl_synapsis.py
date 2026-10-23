@@ -40,5 +40,15 @@ class RowsFromTimeline(unittest.TestCase):
         self.assertEqual([r[0] for r in rows], [0.0, 2.0, 3.0])     # 重叠的后一条从前一条结束处开始
 
 
+class Flatten(unittest.TestCase):
+    def test_sections_expand_to_shots(self):
+        pages = {
+            "剪辑": {"items": [item("剪辑/04", 51.5, 60.0), item("剪辑/05", 60.0, 70.0, src="原片@1:00")]},
+            "剪辑/04": {"items": [item("剪辑/04/a", 51.5, 55.0, src="样片:x.mp4@0"), item("剪辑/04/b", 55.0, 60.0)]},
+        }
+        flat = edl.flatten_items(pages["剪辑"], pages.get)
+        self.assertEqual([i["id"] for i in flat], ["剪辑/04/a", "剪辑/04/b", "剪辑/05"])   # 有 src 的不展开
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -115,15 +115,34 @@ def rows_from_timeline(tl):
     return rows
 
 
-def read_synapsis(page, ws=None):
-    """调 Synapsis CLI 拿时间轴页（下游现读上游，不存副本）"""
-    ws = ws or str(MV)
+def _timeline_json(page, ws):
+    import json
     r = subprocess.run(["node", SYN_CLI, "timeline", page, "--json", "--ws", ws], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        sys.exit(f"Synapsis 时间轴读不到：{r.stderr.strip()}")
-    import json
-    return rows_from_timeline(json.loads(r.stdout))
+    return json.loads(r.stdout) if r.returncode == 0 else None
+
+
+def flatten_items(tl, fetch, depth=0):
+    """段落节点本身也是时间轴页（剪辑 → 段落 → 镜头）：没写 src 的条若能作为时间轴页打开，就展开成它的子条。
+    子条的 t0/t1 本来就是成片时间，不用再换算。fetch(页id) → 导出 dict 或 None。"""
+    out = []
+    for it in tl["items"]:
+        sub = None if it.get("src") or depth > 4 else fetch(it["id"])
+        if sub and sub.get("items"):
+            out += flatten_items(sub, fetch, depth + 1)
+        else:
+            out.append(it)
+    return out
+
+
+def read_synapsis(page, ws=None):
+    """调 Synapsis CLI 拿时间轴页（下游现读上游，不存副本）；嵌套的段落页自动展开"""
+    ws = ws or str(MV)
+    tl = _timeline_json(page, ws)
+    if tl is None:
+        sys.exit(f"Synapsis 时间轴读不到：{page}（不是 timeline 页或不存在）")
+    items = flatten_items(tl, lambda p: _timeline_json(p, ws))
+    return rows_from_timeline({"items": items})
 
 
 def resolve(src):
