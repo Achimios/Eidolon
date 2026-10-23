@@ -299,10 +299,13 @@ class Scene:
             sz = int(min(270, 8 * 2 ** (p * 5)))
             if np.any(np.abs(s.onsets - t) < 0.05):
                 sz = min(270, sz * 2)
-            h2, w2 = H // sz, W // sz
-            small = lum[:h2 * sz, :w2 * sz].reshape(h2, sz, w2, sz).mean((1, 3))
+            # 网格随时间慢漂（§16 船：方块阶段也不能有完全静止的帧）
+            ox = int((t * 41.0) % sz); oy = int((t * 23.0) % sz)
+            padded = np.pad(lum, ((oy, sz), (ox, sz)), mode="edge")
+            h2, w2 = padded.shape[0] // sz, padded.shape[1] // sz
+            small = padded[:h2 * sz, :w2 * sz].reshape(h2, sz, w2, sz).mean((1, 3))
             big = np.repeat(np.repeat(small, sz, 0), sz, 1)
-            lum = np.pad(big, ((0, H - big.shape[0]), (0, W - big.shape[1])), mode="edge")
+            lum = big[oy:oy + H, ox:ox + W] * (1.0 + 0.05 * math.sin(2 * math.pi * t * 1.3))   # 块亮度缓慢呼吸（不是闪）
 
         # ① 刻版：黑底 + 底图透 30%（海报化）+ 亮线；方块阶段只有块
         if p > 0.0:
