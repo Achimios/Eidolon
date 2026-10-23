@@ -336,7 +336,7 @@ class Scene:
         # 橙辫子：唯一的饱和色
         r, g, b = img[..., 0], img[..., 1], img[..., 2]
         mx = img.max(-1); sat = (mx - img.min(-1)) / (mx + 1e-6)
-        orange = (((r > g * 1.55) & (g > b * 1.9) & (sat > 0.62) & (mx > 0.45)).astype(np.float32) * (mask > 0.3))[..., None]   # 只认「她」图层里的辫子（ReadScreen 定：灯、奖杯压成单色）
+        orange = (((r > g * 1.35) & (g > b * 1.5) & (sat > 0.52) & (mx > 0.4)).astype(np.float32) * (mask > 0.3))[..., None]   # 只认「她」图层里的辫子（ReadScreen 定：灯、奖杯压成单色）
         out = out * (1 - orange) + img * np.array([1.0, 0.9, 0.55]) * orange
         out = np.clip(out * fade, 0, 1)
         im = Image.fromarray((out * 255).astype(np.uint8))
