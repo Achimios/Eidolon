@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """>v<👂感官层-人声-CLI：作品文件夹的 分轨/vocals.wav → 往 感官.json 里**加** `voice` 节点（不动已有字段）+ 一张 人声_条带.jpg。
-用法：python tools/sense_voice.py <作品文件夹> [--vocals 路径] [--dry]
+用法：python tools/sense_voice.py <作品文件夹> [--vocals 路径] [--method crepe|crepe_raw|yin] [--crepe-model full|tiny] [--dry]
+- f0 默认 crepe-full + YIN 细化（对照见 tools/voice_compare.py）；yin = 旧算法（回退）
+- 条带图不覆盖：已有 人声_条带.jpg 就出 _v2、_v3 ……
 - 帧数 = 已有 channels 的帧数（同 fps、同长度 —— 必须相等）；时间 = 播放时间（vocals.wav 由 separate.py 出，已对齐）
 - 第一次加 voice 前把原文件拷成 `感官.json.bak_2026-10-23_voice`；写完重读，除 voice 外逐字段比对旧文件，不等就不落盘
 - 交叉校验：人声分轨在门以上的能量有多少落在乐句里（应 ≈ 100%）
@@ -116,6 +118,8 @@ def main():
     ap.add_argument("mv")
     ap.add_argument("--vocals", default=None)
     ap.add_argument("--dry", action="store_true", help="只算 + 出图，不写 感官.json")
+    ap.add_argument("--method", default="crepe", choices=["crepe", "crepe_raw", "yin"])
+    ap.add_argument("--crepe-model", default="full", choices=["full", "tiny"])
     a = ap.parse_args()
     mv = Path(a.mv)
     sp = mv / "感官.json"
@@ -124,7 +128,7 @@ def main():
     voc = Path(a.vocals) if a.vocals else mv / "分轨" / "vocals.wav"
     n_out = len(sense["channels"]["heartbeat"])
     x = S.decode(voc, sr=V.SR, fmt="f32le").astype(np.float64)
-    d = V.analyze_voice(x, fps=sense["fps"], n_out=n_out)
+    d = V.analyze_voice(x, fps=sense["fps"], n_out=n_out, f0_method=a.method, crepe_model=a.crepe_model)
     F = d["_frames"]
     e_in, v_in = coverage(F, d["phrases"])
     try:
@@ -139,7 +143,12 @@ def main():
     ff = np.array([z for z in node["f0"] if z is not None])
     if len(ff):
         print(f"  f0 p5/p50/p95 = {np.percentile(ff, 5):.0f}/{np.median(ff):.0f}/{np.percentile(ff, 95):.0f} Hz")
-    strip(x, V.SR, d, sense, mv / "人声_条带.jpg", f"{mv.name}  voice  ({rel})")
+    sp_img = mv / "人声_条带.jpg"
+    k = 2
+    while sp_img.exists():                       # 不覆盖用户可能看过的图
+        sp_img = mv / f"人声_条带_v{k}.jpg"; k += 1
+    strip(x, V.SR, d, sense, sp_img, f"{mv.name}  voice  ({rel})  f0: {d['method'].split('(')[0]}")
+    print(f"  method {d['method']}  -> {sp_img.name}")
     if a.dry:
         return
     if "voice" not in sense and not (mv / BAK).exists():

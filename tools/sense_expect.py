@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""">v<👂感官层-期待-CLI：往 感官.json 里**加** `expect` 节点（意外度 + 情绪主导的显著度），出一张 感官_期待审计.jpg。
+""">v<👂感官层-期待-CLI：往 感官.json 里**加** `expect` 节点（意外度 + 情绪主导的显著度），出一张 感官_期待审计.jpg（已有就 _v2、_v3 …… 不覆盖）。
 ⚠️这是积木 / 审计，不是导演（👤2026-10-23：「核心还是跟着 Thymos 和 emotion flow，数学是 building block 和审计视野」）。
 它不改剪辑表、不改画面、不改任何已有字段；分歧点只画出来给人看。
 
@@ -379,8 +379,12 @@ def main():
             print(f"  A {e['t']:7.2f} {e['s']:<9} bits {e['bits']:.2f} sal {e['sal']} seg {e['seg']}")
         for r, mb, pct in B:
             print(f"  B {r['t']:7.2f} {r['src']}  {r['long']}  bits {mb:.2f}  pct {pct:.2f}")
-    draw(mv / "感官_期待审计.jpg", f"{mv.name}  期待 / 意外 审计", sense, segs, exp, evs, surprise, ab, sal, rows, mot, A, B, key, end)
-    print(f"  -> {mv / '感官_期待审计.jpg'}")
+    img = mv / "感官_期待审计.jpg"
+    k = 2
+    while img.exists():                           # 不覆盖用户可能看过的图（2026-10-23：voice 重算后重跑会撞名）
+        img = mv / f"感官_期待审计_v{k}.jpg"; k += 1
+    draw(img, f"{mv.name}  期待 / 意外 审计", sense, segs, exp, evs, surprise, ab, sal, rows, mot, A, B, key, end)
+    print(f"  -> {img}")
     if a.dry:
         return
     if "expect" not in sense and not (mv / BAK).exists():

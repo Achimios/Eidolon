@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """>v<👂感官层-人声-从人声分轨（Demucs vocals.wav）算声学特征 → 感官.json 的 `voice` 节点（2026-10-23）。
-通用：任何歌的人声分轨都能喂；不做歌词识别 / 转写，只要声学特征。只依赖 numpy。
+通用：任何歌的人声分轨都能喂；不做歌词识别 / 转写，只要声学特征。
+⭐2026-10-23 v2：f0 / 有声默认走 **torchcrepe full**（👤同意装；GPU），viterbi 路径 + 路径附近 ±4 格加权平均（不用 torchcrepe 自带的
+抖动 dither —— 它给每帧加 ±20 音分三角噪声，颤音会被淹掉）；有声 = periodicity（3 帧平均）的 logistic（0.45 → 0.5）× 响度门。
+再用 YIN 细化（`f0_method="crepe"`，默认）：在 crepe 给的周期 ±10% 里找 YIN 的 CMNDF 谷（谷 < 0.5 才换）——
+crepe 定八度和有声，YIN 定细音高（合成信号上 crepe 单用整体偏 +5 音分、颤音深度少 17%，YIN 准到 < 1 音分；`f0_method="crepe_raw"` 不细化）。
+旧算法（numpy YIN）保留为回退：`f0_method="yin"`，或 torch / torchcrepe 不可用时（method 字段写明，stderr 报一句）。
+两首歌上的对照见 `tools/voice_compare.py`。
 
 逐帧（和 channels 同 fps、同长度）：
   loudness       响度 0~1（40 ms RMS 的 dB，50 ms 平滑；0 = 比全曲人声峰值低 40 dB）
   voiced         有声概率 0~1（CMNDF 最低谷值 d 的 logistic：d=0.2 → 0.5，d≤0.1 → >0.9；再乘响度门）
                  （先试过 pYIN 的 Beta(2,18) 阈值先验 CDF：d=0.1 只给 0.42，真人声段有声率被压到一半，2026-10-23 换掉）
-  f0             基频 Hz；只在有声帧给，其余 null（YIN + 抛物线插值 + 八度跳变修正 + 5 帧中值）
+  f0             基频 Hz；只在有声帧给，其余 null（crepe；回退 = YIN + 抛物线插值 + 八度跳变修正；都再 5 帧中值）
   vibrato        颤音强度 0~1（f0 在 0.6 s 窗里拟合 二次趋势 + 4–8 Hz 正弦，= 正弦解释的方差比 × 深度饱和）
   vibrato_cents  颤音半幅（音分）；vibrato_hz 颤音频率 —— 只在拟合可信（强度 > 0）的帧给，其余 null
 区段（秒）：
@@ -30,6 +36,7 @@ BREATH_MAX = 1.0          # 换气上限
 SECTION_GAP = 3.0         # 人声段
 VIB_WIN = 0.6             # 颤音拟合窗（秒）
 VIB_BAND = (4.0, 8.0)
+CREPE_MID, CREPE_WIDTH = 0.45, 0.08   # periodicity → 有声概率
 
 
 def frame_rms_db(x, hop=HOP, win=W):
@@ -200,17 +207,80 @@ def _segments(mask, fr, merge, min_len=0.2):          # < 0.2 s 的孤立有声�
     return [(a, b) for a, b in segs if (b - a) / fr >= min_len]
 
 
-def analyze_voice(x, sr=SR, fps=24, n_out=None):
+def _viterbi_local(logits):
+    """viterbi 选路径（同 torchcrepe：±11 格三角转移）→ 路径格 ±4 格的 sigmoid 加权平均音分（CREPE 原版的 local average，无抖动）"""
+    import librosa
+    import torch
+    import torchcrepe
+    if not hasattr(_viterbi_local, "T"):
+        xx, yy = np.meshgrid(range(360), range(360))
+        T = np.maximum(12 - abs(xx - yy), 0)
+        _viterbi_local.T = T / T.sum(1, keepdims=True)
+    with torch.no_grad():
+        probs = torch.nn.functional.softmax(logits, dim=1).cpu().numpy()
+        sig = torch.sigmoid(logits).cpu().numpy()
+    bins = np.array([librosa.sequence.viterbi(q, _viterbi_local.T).astype(np.int64) for q in probs])   # (B, T)
+    cents_of_bin = torchcrepe.CENTS_PER_BIN * np.arange(360) + 1997.3794084376191
+    off = np.arange(-4, 5)
+    idx = np.clip(bins[:, None, :] + off[None, :, None], 0, 359)                                     # (B, 9, T)
+    w = np.take_along_axis(sig, idx, axis=1)
+    c = (w * cents_of_bin[idx]).sum(1) / (w.sum(1) + 1e-12)
+    dev = logits.device
+    return torch.tensor(bins, device=dev), torch.tensor(10 * 2 ** (c / 1200), device=dev, dtype=torch.float32)
+
+
+def crepe_track(x, sr=SR, model="full", device=None, batch=2048):
+    """→ (f0 Hz, periodicity)，第 k 帧中心 = k·HOP 样本（torchcrepe 默认 pad = 中心对齐）"""
+    import torch
+    import torchcrepe
+    dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    f, per = torchcrepe.predict(torch.tensor(x, dtype=torch.float32)[None], sr, HOP, FMIN, FMAX, model,
+                                decoder=_viterbi_local, return_periodicity=True, batch_size=batch, device=dev)
+    return f[0].cpu().numpy().astype(np.float64), per[0].cpu().numpy().astype(np.float64)
+
+
+def analyze_voice(x, sr=SR, fps=24, n_out=None, f0_method="crepe", crepe_model="full"):
     """>v<👂感官层-人声-分析：单声道人声（sr=16 kHz，样本 i ↔ 播放时间 i/sr）→ voice 节点 dict"""
     assert sr == SR, "先重采样到 16 kHz（sensorium.decode(path, sr=16000)）"
     fr = sr / HOP
     db = frame_rms_db(x)
     ref = float(np.percentile(db, 99.5))
     loud = np.clip((db - (ref - FLOOR_DB)) / FLOOR_DB, 0, 1)
-    tau, dmin, cm = yin(x)
-    n = min(len(db), len(tau))
-    db, loud, tau, dmin, cm = db[:n], loud[:n], tau[:n], dmin[:n], cm[:n]
-    p_period = 1 / (1 + np.exp((dmin - P_MID) / P_WIDTH))
+    method = f0_method
+    raw = f0_method == "crepe_raw"
+    if raw:
+        f0_method = "crepe"
+    if f0_method == "crepe":
+        try:
+            fc, per = crepe_track(x, sr, crepe_model)
+        except Exception as e:                       # 回退要说出来，不静默
+            import sys
+            print(f"[voice] crepe 不可用（{type(e).__name__}: {e}）→ 回退 YIN", file=sys.stderr)
+            method = f"yin (crepe failed: {type(e).__name__})"
+            f0_method = "yin"
+    if f0_method == "crepe":
+        n = min(len(db), len(fc))
+        db, loud, fc, per = db[:n], loud[:n], fc[:n], per[:n]
+        per3 = np.convolve(np.pad(per, 1, mode="edge"), np.ones(3) / 3, "valid")
+        p_period = 1 / (1 + np.exp(-(per3 - CREPE_MID) / CREPE_WIDTH))
+        tau = np.where(fc > 0, sr / np.maximum(fc, 1e-9), 0.0)
+        cm = None
+        method = f"crepe-{crepe_model}(viterbi+local_avg, no dither)+periodicity_logistic+median5"
+        if not raw:
+            _, _, cmy = yin(x)
+            cmy = cmy[:n]
+            for k in np.nonzero(tau > 0)[0]:
+                t2, v2 = _trough_near(cmy[k], tau[k], rel=0.10)
+                if t2 is not None and v2 < 0.5:
+                    tau[k] = t2
+            method = method.replace("+periodicity", "+yin_refine+periodicity")
+    else:
+        tau, dmin, cm = yin(x)
+        n = min(len(db), len(tau))
+        db, loud, tau, dmin, cm = db[:n], loud[:n], tau[:n], dmin[:n], cm[:n]
+        p_period = 1 / (1 + np.exp((dmin - P_MID) / P_WIDTH))
+        if not method.startswith("yin ("):
+            method = "yin(40ms)+logistic_voicing+octave_fix+median5"
     gate = np.clip((db - (ref - FLOOR_DB)) / 6.0, 0, 1)  # 门：底线以上 6 dB 内渐入
     pv = p_period * gate
     # 迟滞：0.5 进、0.3 出；短于 50 ms 的有声段扔掉
@@ -223,10 +293,12 @@ def analyze_voice(x, sr=SR, fps=24, n_out=None):
             v[a:b] = False
     f0 = np.where(v & (tau > 0), sr / np.maximum(tau, 1e-9), np.nan)
     v &= np.isfinite(f0)
-    f0 = octave_fix(f0, v, cm)
+    if cm is not None:
+        f0 = octave_fix(f0, v, cm)                   # crepe 的 viterbi 本身不许跳八度，不需要
     # 颤音在中值之前算（5 帧中值会把 5.5 Hz 的颤音削掉 ~5%）；YIN 的 40 ms 积分窗 = 盒式平均，深度 ÷ sinc(f·W) 补回
     vs, vd, vr = vibrato(np.where(v, f0, 1.0), v, fr)
-    vd = vd / np.sinc(np.nan_to_num(vr, nan=0.0) * W / sr)
+    if cm is not None or (f0_method == "crepe" and not raw):   # 细音高来自 YIN 的 40 ms 盒式窗
+        vd = vd / np.sinc(np.nan_to_num(vr, nan=0.0) * W / sr)
     f0 = median_fill(f0, v)
     # 区段
     ph = _segments(v, fr, MERGE_GAP)
@@ -258,7 +330,7 @@ def analyze_voice(x, sr=SR, fps=24, n_out=None):
         return [round(float(z), nd) if np.isfinite(z) else None for z in a]
     return {
         "source": None,
-        "method": "yin(40ms)+logistic_voicing+octave_fix+median5; vibrato=lsq trend+sine 3.5-9Hz on 0.6s",
+        "method": method + "; vibrato=lsq trend+sine 3.5-9Hz on 0.6s",
         "loudness_ref_db": round(ref, 2), "floor_db": FLOOR_DB,
         "loudness": np.round(np.interp(t, tk, loud), 3).tolist(),
         "voiced": np.round(np.interp(t, tk, pv), 3).tolist(),

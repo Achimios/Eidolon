@@ -38,14 +38,24 @@ def cents(a, f):
     return 1200 * np.log2(a / f)
 
 
+try:
+    import torchcrepe  # noqa: F401
+    HAS_CREPE = True
+except Exception:
+    HAS_CREPE = False
+
+
 class TestVoice(unittest.TestCase):
+    """旧算法（numpy YIN，回退）；下面 TestVoiceCrepe 用同一组断言跑默认的 crepe + YIN 细化"""
+    METHOD = "yin"
+
     @classmethod
     def setUpClass(cls):
         rng = np.random.default_rng(0)
         # 0.5 静 | 1.5 s 220 Hz 锯齿 | 0.3 s 换气 | 2.0 s 440 Hz ±50 音分 5.5 Hz 颤音 | 2.0 s 休止 | 1.5 s 660 Hz 正弦 | 0.5 静 | 1.0 s 白噪 | 0.5 静
         cls.x = np.concatenate([z(0.5), tone(1.5, 220), z(0.3), tone(2.0, 440, vib=50), z(2.0), tone(1.5, 660, kind="sine"),
                                 z(0.5), 0.1 * rng.standard_normal(int(1.0 * SR)), z(0.5)]) + 1e-4 * rng.standard_normal(int(9.8 * SR))
-        cls.d = V.analyze_voice(cls.x)
+        cls.d = V.analyze_voice(cls.x, f0_method=cls.METHOD)
         cls.F = cls.d["_frames"]
 
     def test_f0_matches_synth_pitch(self):
@@ -94,21 +104,21 @@ class TestVoice(unittest.TestCase):
 
     def test_frame_count_and_ranges(self):
         n = 200
-        d = V.analyze_voice(self.x, n_out=n)
+        d = V.analyze_voice(self.x, n_out=n, f0_method=self.METHOD)
         for k in ("loudness", "voiced", "f0", "vibrato", "vibrato_cents", "vibrato_hz"):
             self.assertEqual(len(d[k]), n, k)
         lo = np.array(d["loudness"]); self.assertGreaterEqual(lo.min(), 0); self.assertLessEqual(lo.max(), 1)
 
     def test_timing_is_playback_time(self):
         """音在 1.000 s 起：乐句起点 = 1.00 ± 20 ms（中心对齐的分析帧，无整体偏移）"""
-        d = V.analyze_voice(np.concatenate([z(1.0), tone(1.0, 300), z(1.0)]))
+        d = V.analyze_voice(np.concatenate([z(1.0), tone(1.0, 300), z(1.0)]), f0_method=self.METHOD)
         self.assertLess(abs(d["phrases"][0]["start"] - 1.0), 0.02)
         self.assertLess(abs(d["phrases"][0]["end"] - 2.0), 0.02)
 
     def test_write_keeps_other_fields(self):
         """sensorium.write 加 voice 节点后，其余字段逐个不变"""
         base = {"fps": 24, "duration": 1.0, "bpm": 120.0, "channels": {"heartbeat": [0.1, 0.2]}, "events": {"onsets": [0.5]}}
-        d = V.analyze_voice(self.x, n_out=2)
+        d = V.analyze_voice(self.x, n_out=2, f0_method=self.METHOD)
         node = {k: v for k, v in d.items() if not k.startswith("_")}
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "s.json"
@@ -117,6 +127,30 @@ class TestVoice(unittest.TestCase):
             vb = back.pop("voice")
             self.assertEqual(back, {"source": "x", **base})
             self.assertEqual(vb["phrases"], node["phrases"])
+
+
+@unittest.skipUnless(HAS_CREPE, "torchcrepe 没装")
+class TestVoiceCrepe(TestVoice):
+    METHOD = "crepe"
+
+    def test_method_label(self):
+        self.assertTrue(self.d["method"].startswith("crepe-full"), self.d["method"])
+        self.assertIn("yin_refine", self.d["method"])
+
+
+class TestFallback(unittest.TestCase):
+    def test_crepe_failure_falls_back_to_yin_and_says_so(self):
+        orig = V.crepe_track
+
+        def boom(*a, **k):
+            raise RuntimeError("no gpu")
+        V.crepe_track = boom
+        try:
+            d = V.analyze_voice(np.concatenate([z(0.5), tone(1.0, 300), z(0.5)]))
+        finally:
+            V.crepe_track = orig
+        self.assertTrue(d["method"].startswith("yin (crepe failed"), d["method"])
+        self.assertEqual(len(d["phrases"]), 1)
 
 
 if __name__ == "__main__":
