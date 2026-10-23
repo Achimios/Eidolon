@@ -47,8 +47,9 @@ def main():
     d = S.analyze(x)
     out = Path(a.out)
     S.write(d, out / "感官.json", source=Path(a.src).name)
+    # 段落标签只属于《Can't Kill Us》；别的歌不画（2026-10-23：新歌会被盖上错的段名）
     sec = [(0, "INTRO"), (10, "BUILD"), (46, "INHALE"), (52, "DROP1"), (110, "BRIDGE"), (128, "DROP2"),
-           (154, "BREAKDOWN"), (172, "REBUILD"), (204, "DROP3"), (282, "OUTRO")]
+           (154, "BREAKDOWN"), (172, "REBUILD"), (204, "DROP3"), (282, "OUTRO")] if Path(a.src).resolve() == Path(stills.MUSIC).resolve() else []
     strip(d, out / "感官_条带.jpg", sec)
     print(f"bpm {d['bpm']}  onsets {len(d['events']['onsets'])}  beats {len(d['events']['beats'])}  -> {out / '感官.json'}")
 

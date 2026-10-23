@@ -22,12 +22,14 @@ def main():
     mv = Path(sys.argv[1] if len(sys.argv) > 1 else "C:/Users/Administrator/Desktop/Projekt_Visual/MV_Cant_Kill_Us")
     sense = json.loads((mv / "感官.json").read_text("utf-8"))
     bt = json.loads((mv / "节拍.json").read_text("utf-8"))
-    grid = next(r for r in json.loads((mv / "锚点.json").read_text("utf-8"))["rules"] if r["name"] == "phrase_grid")
+    # 乐句格子来自用户的切点（锚点.json）；新歌还没有锚点就不出 phrases（不替用户猜格子，2026-10-23）
+    anc = mv / "锚点.json"
+    grid = next((r for r in json.loads(anc.read_text("utf-8"))["rules"] if r["name"] == "phrase_grid"), None) if anc.exists() else None
     dur = sense["duration"]
     down = bt["downbeats"]
     g = []
-    t = grid["start"]
-    while t > grid["period"]:
+    t = grid["start"] if grid else dur
+    while grid and t > grid["period"]:
         t -= grid["period"]                       # 格子也往前铺（13.11 之前的 6.71 / 0.31）
     while t < dur:
         g.append(t); t += grid["period"]
@@ -46,7 +48,8 @@ def main():
     sense["beat_source"] = bt.get("model", "beat_this")
     sense["events"]["beats"] = [round(b, 3) for b in bt["beats"]]
     sense["events"]["downbeats"] = [round(b, 3) for b in down]
-    sense["events"]["phrases"] = phrases
+    if grid:
+        sense["events"]["phrases"] = phrases
     if motifs:
         sense["motifs"] = motifs
     src = sense.pop("source", None)

@@ -191,7 +191,7 @@ def write(data, path, source=None):
     data = dict(data)
     if source:
         data = {"source": source, **data}
-    head = {k: v for k, v in data.items() if k not in ("channels", "events")}
+    head = {k: v for k, v in data.items() if k not in ("channels", "events", "voice")}
     # 一个通道一行：文件小一点，人扫一眼也能看
     lines = ["{"] + [f' {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)},' for k, v in head.items()]
     lines.append(' "channels": {')
@@ -201,5 +201,10 @@ def write(data, path, source=None):
     lines.append(' "events": {')
     evs = list(data["events"].items())
     lines += [f'  {json.dumps(k)}: {json.dumps(v)}' + ("," if i < len(evs) - 1 else "") for i, (k, v) in enumerate(evs)]
+    if "voice" in data:                              # 人声节点（voice.py，2026-10-23）：一个字段一行，放最后
+        lines.append(" },")
+        lines.append(' "voice": {')
+        vs = list(data["voice"].items())
+        lines += [f'  {json.dumps(k)}: {json.dumps(v, ensure_ascii=False)}' + ("," if i < len(vs) - 1 else "") for i, (k, v) in enumerate(vs)]
     lines += [" }", "}"]
     Path(path).write_text("\n".join(lines) + "\n", "utf-8", newline="\n")

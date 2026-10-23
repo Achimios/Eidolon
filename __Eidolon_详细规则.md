@@ -48,6 +48,33 @@
 - `onsets` 精度：合成点击音实测误差 ≤ 6ms（10ms 分析帧量化）。
 - `bpm`：sensorium 自己估的可能差两倍；merge_events 之后用 beat_this 的值（《Can't Kill Us》= 150.0，已和用户的乐句格子交叉验证）。
 - 生成：`python tools/sense_song.py <音频或视频> --out <作品文件夹>`，会同时出一张 `感官_条带.jpg` 给人看。
+- ⚠️完整顺序：`separate.py`（分轨）→ `sense_song.py`（**整个重写** 感官.json，会丢掉下面的 voice）→ `beats.py` → `merge_events.py`（保留 voice）→ `sense_voice.py`（加 voice）。
+
+### 人声 `voice`（2026-10-23 新增，`src/voice.py` + `tools/sense_voice.py`）
+从 Demucs 人声分轨（`分轨/vocals.wav`）算的**纯声学特征**（不识别歌词）。只新增顶层 `voice` 节点，其余字段一个字都不动（写入时逐字段比对；《Can't Kill Us》旧件留 `感官.json.bak_2026-10-23_voice`）。
+```json
+"voice": {
+ "source": "分轨/vocals.wav", "method": "…", "loudness_ref_db": -12.3, "floor_db": 40.0,
+ "loudness": [0~1, 每帧], "voiced": [0~1], "f0": [Hz 或 null], "vibrato": [0~1], "vibrato_cents": [音分 或 null], "vibrato_hz": [Hz 或 null],
+ "phrases": [{"start": 秒, "end": 秒, "f0_med": Hz, "f0_lo": Hz, "f0_hi": Hz, "peak": 0~1, "tail_vibrato": 0~1}, ...],
+ "breaths": [[秒, 秒], ...], "sections": [[秒, 秒], ...]
+}
+```
+| 字段 | 意思 | 怎么算的 | 典型接法 |
+|---|---|---|---|
+| `loudness` | 人声响度 | 40 ms RMS 的 dB、50 ms 平滑；0 = 比人声峰值（99.5 百分位，`loudness_ref_db`）低 `floor_db` dB | 粒子海的浪高 / 亮度跟她的音量 |
+| `voiced` | 有声概率 | YIN 的 CMNDF 最低谷 d 的 logistic（d = 0.2 → 0.5）× 响度门 | 「她在唱」的软开关 |
+| `f0` | 基频（Hz） | YIN（40 ms 窗，65–1100 Hz）+ 抛物线插值 + 八度跳变修正 + 5 帧中值；**只在有声帧给，其余 `null`** | 音高 → 高度 / 色相；下游自己决定 null 时保持还是回落 |
+| `vibrato` | 颤音强度 | 0.6 s 窗里 f0（音分）= 二次趋势 + 正弦 的最小二乘，扫 3.5–9 Hz；正弦解释方差 > 0.5、频率在 4–8 Hz、半幅 > 8 音分才算；= 解释比 × min(1, 半幅/40) | 尾音的颤 → 粒子的细颤 |
+| `vibrato_cents` / `vibrato_hz` | 颤音半幅 / 频率 | 同上（已补 YIN 窗的盒式平均）；不可信的帧为 `null` | —— |
+| `phrases` | 乐句 | 有声段间空隙 < 0.18 s 并成一句，短于 0.2 s 的扔掉；start / end = 首 / 末有声帧中心；`tail_vibrato` = 最后 0.5 s 的平均颤音 | 一句一个「浪」 |
+| `breaths` | 换气 | 相邻两句之间 0.18–1.0 s 的空隙；更长的是休止 | 吸气 / 回落 |
+| `sections` | 人声段 | 乐句间空隙 < 3 s 并成一段 | 「女声在哪」的大区段 |
+
+- 逐帧字段的长度 = channels 的帧数（同 fps，第 i 个 ↔ `i / fps` 秒，播放时间）。
+- 精度：合成锯齿 / 正弦 f0 误差 < 5 音分、无八度错；合成 ±50 音分 5.5 Hz 颤音检出 5.5 Hz / ≈49 音分；乐句边界 ±30 ms（`tests/test_sensorium_voice.py`）。⚠️**真实人声没有标注真值**，只验了合成信号 + 「门以上人声能量落在乐句里」的比例（两首 ≈ 74–78%，其余是串音 / 气声 / 混响尾，见条带图）。
+- 诊断图：`<作品>/人声_条带.jpg`（波形 + 响度 + f0 + 有声概率 / 颤音；暗底 = 乐句，红线 = 换气，顶上红条 = 人声段）。
+- 生成：`python tools/sense_voice.py <作品文件夹>`（要先有 `感官.json` 和 `分轨/vocals.wav`）。
 
 ## 二、stems（`<作品>/stems/<镜头id>/`）—— 草案
 
