@@ -315,6 +315,31 @@ class TestGoldenAge(unittest.TestCase):
         d0, d1 = F.rim_dir(sp2, dict(t=0.0, yaw=1.1))[0], F.rim_dir(sp2, dict(t=2.0, yaw=1.1))[0]
         self.assertLess(float(d0 @ d1), 0.999)
 
+    def test_surface_nets_sphere(self):
+        """必须相等的量：球 r = 0.5 → 顶点都在球面上、法线 = 径向、每条棱正好两个四边形（水密）、χ = V − E + F = 2、面都朝外；
+        PLY 写出再读回逐值相等；Blender 坐标变换行列式 +1"""
+        import numpy as np
+        import tempfile
+        g = lambda p: F.L(p[:, 0], p[:, 1], p[:, 2]) - 0.5  # noqa: E731
+        V, Q, N = F.surface_nets(g, 1.0, 48)
+        r = np.linalg.norm(V, axis=1)
+        self.assertLess(np.abs(r - 0.5).max(), 1e-4)
+        self.assertLess(np.abs((N * V / r[:, None]).sum(1) - 1).max(), 1e-4)
+        E = np.sort(np.stack([Q, np.roll(Q, -1, 1)], -1).reshape(-1, 2), 1)
+        _, cnt = np.unique(E, axis=0, return_counts=True)
+        self.assertTrue((cnt == 2).all())
+        self.assertEqual(len(V) - len(cnt) + len(Q), 2)
+        P = V[Q]
+        self.assertTrue(((np.cross(P[:, 2] - P[:, 0], P[:, 3] - P[:, 1]) * P.mean(1)).sum(1) > 0).all())
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "s.ply"
+            F.write_ply(path, V, Q, N)
+            data = path.read_bytes()
+            end = data.index(b"end_header\n") + 11
+            vert = np.frombuffer(data, "<f4", len(V) * 6, end).reshape(-1, 6)
+            self.assertTrue(np.array_equal(vert[:, :3], V.astype(np.float32)))
+        self.assertAlmostEqual(float(np.linalg.det(F.to_blender(np.eye(3)))), 1.0)
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)

@@ -1265,6 +1265,29 @@ def rim_dir(sp, k):
     return d / d.norm(), sp.rim
 
 
+def insert_hud_lines(obj, name, sp, k, b, changed):
+    """插入镜头 HUD 的 6 行（真参数）；_insert_frame 与 Blender 合成共用"""
+    plane = sp.plane or obj.plane
+    rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
+    tilt_s = " ".join(f"{a}={math.degrees(v):+.0f}" for a, v in sp.tilt_r.items()) or "none"
+    cam_s = (f"cam: orbit {math.degrees(sp.yaw_rate):+.1f} deg/s about ({sp.target[0]:+.2f},{sp.target[1]:+.2f},{sp.target[2]:+.2f})"
+             f"  yaw {math.degrees(k['yaw']):6.1f}  pitch {math.degrees(sp.pitch):+.1f}  fov {sp.fov:g}  d {k['dist']:.2f}")
+    if sp.roll_rate or sp.roll0:
+        cam_s += f"  roll {sp.roll0 + sp.roll_rate * k['t']:+.1f} ({sp.roll_rate:+g} deg/s)"
+    if sp.body_rate:
+        cam_s += f"  body R_yz {sp.body_rate * k['t']:+.1f} deg ({sp.body_rate:+g} deg/s)"
+    if sp.look == "sculpt":
+        cam_s += f"   key az {sp.key_az:+.0f} el {sp.key_el:+.0f} (world)" + (f"  rim {sp.rim:g} az {sp.rim_az:+.0f} el {sp.rim_el:+.0f} (camera)" if sp.rim else "")
+    lines = [f"{name} ({obj.op}): {obj.eq}",
+             f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
+             f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
+             cam_s,
+             _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
+             ("red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32), tracked" if sp.red_point
+              else "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)")]
+    return lines
+
+
 def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     """一帧：渲染 + Betti + HUD。hud_band > 0 时物体画在上方 (H − band) 区域，HUD 在底部条带里 → 永不重叠。rp = RedPoint（跨帧状态）"""
     Wd, Hd = sp.size
@@ -1284,21 +1307,7 @@ def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     if sp.hud_band:
         rgb = torch.cat([rgb, torch.zeros(sp.hud_band, Wd, 3, device=rgb.device)], 0)
     changed = prev_b is not None and b != prev_b
-    cam_s = (f"cam: orbit {math.degrees(sp.yaw_rate):+.1f} deg/s about ({sp.target[0]:+.2f},{sp.target[1]:+.2f},{sp.target[2]:+.2f})"
-             f"  yaw {math.degrees(k['yaw']):6.1f}  pitch {math.degrees(sp.pitch):+.1f}  fov {sp.fov:g}  d {k['dist']:.2f}")
-    if sp.roll_rate or sp.roll0:
-        cam_s += f"  roll {sp.roll0 + sp.roll_rate * k['t']:+.1f} ({sp.roll_rate:+g} deg/s)"
-    if sp.body_rate:
-        cam_s += f"  body R_yz {sp.body_rate * k['t']:+.1f} deg ({sp.body_rate:+g} deg/s)"
-    if sp.look == "sculpt":
-        cam_s += f"   key az {sp.key_az:+.0f} el {sp.key_el:+.0f} (world)" + (f"  rim {sp.rim:g} az {sp.rim_az:+.0f} el {sp.rim_el:+.0f} (camera)" if sp.rim else "")
-    lines = [f"{name} ({obj.op}): {obj.eq}",
-             f"p' = {rot_s} R_tilt p    theta = {k['th']:+7.1f} deg    v(t) = {k['v']:6.1f} deg/s = {sp.v_end:g} + ({sp.v0:g} - {sp.v_end:g}) e^(-t/{sp.tau:g})",
-             f"slice w' = c = {k['c']:+.3f}   dc/dt = {k['cv']:+.3f}/s     R_tilt: {tilt_s} deg     t = {k['t']:.3f} / {sp.dur:g} s",
-             cam_s,
-             _b_str(b) + "   (voxels 64^3)" + ("   <- topology changed" if changed else ""),
-             ("red point = strongest tangency of hyperplane and 4D surface (|n_xyz| / |n| < 0.32), tracked" if sp.red_point
-              else "red = hyperplane tangent to the 4D surface (|n_xyz| / |n| < 0.32)")]
+    lines = insert_hud_lines(obj, name, sp, k, b, changed)
     im = to_pil(rgb)
     hud(im, lines, tag, red_line=4 if changed else None, scale=Hd / 1080 * 1.15 * sp.hud_scale)
     return im, rgb, b, rp
@@ -1919,6 +1928,188 @@ def rise_plot(path, track, bs, flows, sp, tag, song_t0=None):
 
 
 
+# ---------- 网格序列导出（→ Blender 真实光照 / 景深，👤2026-10-23） ----------
+def surface_nets(g, B=1.15, n=256, chunk=1 << 21, project=2):
+    """>v<🧊四维切片-导出-朴素 Surface Nets（不装 skimage）：n³ 网格上采 g；每个跨符号的体素放一个顶点（12 条棱交点的均值），
+    每条跨符号的网格棱 → 一个四边形（连周围 4 个体素的顶点，按内外符号定朝向）。顶点再沿梯度做 project 次牛顿投影回 g = 0，
+    法线 = g 的归一化梯度（中心差分）→ 平滑着色。返回 (V[m,3], Q[k,4], N[m,3]) numpy，坐标 = 模型坐标"""
+    ax = torch.linspace(-B, B, n, device=DEV)
+    h = float(ax[1] - ax[0])
+    X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
+    vals = torch.cat([g(b) for b in torch.split(X, chunk)]).reshape(n, n, n)       # [i, j, k] = (x, y, z)
+    del X
+    ins = vals < 0
+    m = n - 1
+    corners = [(a, b, c) for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    cs = torch.stack([ins[a:a + m, b:b + m, c:c + m] for a, b, c in corners], 0)
+    active = cs.any(0) & ~cs.all(0)
+    idx = torch.nonzero(active)                                                     # [nv, 3] 体素的整数坐标
+    vid = torch.full((m, m, m), -1, dtype=torch.long, device=DEV)
+    vid[idx[:, 0], idx[:, 1], idx[:, 2]] = torch.arange(len(idx), device=DEV)
+    # 体素顶点 = 12 条棱上过零点的均值
+    acc = torch.zeros(len(idx), 3, device=DEV)
+    cnt = torch.zeros(len(idx), device=DEV)
+    for a, b in [(p, q) for p in range(8) for q in range(p + 1, 8) if sum(abs(x - y) for x, y in zip(corners[p], corners[q])) == 1]:
+        ca, cb = torch.tensor(corners[a], device=DEV), torch.tensor(corners[b], device=DEV)
+        va = vals[idx[:, 0] + ca[0], idx[:, 1] + ca[1], idx[:, 2] + ca[2]]
+        vb = vals[idx[:, 0] + cb[0], idx[:, 1] + cb[1], idx[:, 2] + cb[2]]
+        cross = (va < 0) != (vb < 0)
+        tt = (va / (va - vb + 1e-12)).clamp(0, 1)
+        pos = (idx + ca).float() + tt[:, None] * (cb - ca).float()
+        acc[cross] += pos[cross]
+        cnt[cross] += 1
+    V = -B + h * acc / cnt.clamp(min=1)[:, None]
+    # 每条跨符号棱 → 四边形
+    quads = []
+    for axis in range(3):
+        o1, o2 = [d for d in range(3) if d != axis]
+        sl = [slice(None)] * 3
+        sl[axis] = slice(0, n - 1)
+        s0 = ins[tuple(sl)]
+        sl[axis] = slice(1, n)
+        s1 = ins[tuple(sl)]
+        e = torch.nonzero(s0 != s1)                                                 # 棱起点 p（沿 axis 到 p + e_axis）
+        ok = (e[:, o1] >= 1) & (e[:, o1] <= m - 1) & (e[:, o2] >= 1) & (e[:, o2] <= m - 1)
+        e = e[ok]
+        cells = []
+        for d1, d2 in ((0, 0), (-1, 0), (-1, -1), (0, -1)):
+            c = e.clone()
+            c[:, o1] += d1
+            c[:, o2] += d2
+            cells.append(vid[c[:, 0], c[:, 1], c[:, 2]])
+        q = torch.stack(cells, 1)
+        quads.append(q[(q >= 0).all(1)])
+    Q = torch.cat(quads)
+    # 牛顿投影 + 梯度法线
+    def grad(P):
+        gs = []
+        for d in range(3):
+            dv = torch.zeros(3, device=DEV); dv[d] = 0.5 * h
+            gs.append(g(P + dv) - g(P - dv))
+        return torch.stack(gs, 1) / h
+    for _ in range(project):
+        gr = grad(V)
+        V = V - (g(V) / (gr * gr).sum(1).clamp(min=1e-8))[:, None] * gr
+    N = grad(V)
+    N = N / N.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    # 面的朝向：对角线叉积 vs 四个顶点法线的均值，反了就翻（比按轴奇偶推导稳）
+    P4 = V[Q]
+    fn = torch.linalg.cross(P4[:, 2] - P4[:, 0], P4[:, 3] - P4[:, 1])
+    Q = torch.where(((fn * N[Q].sum(1)).sum(1) < 0)[:, None], Q.flip(1), Q)
+    return V.cpu().numpy(), Q.cpu().numpy(), N.cpu().numpy()
+
+
+def to_blender(P):
+    """模型坐标（y 上）→ Blender（z 上）：(x, y, z) → (x, −z, y)，行列式 +1"""
+    P = np.asarray(P, np.float32)
+    return np.stack([P[..., 0], -P[..., 2], P[..., 1]], -1)
+
+
+def write_ply(path, V, Q, N):
+    """二进制 PLY：顶点（xyz + 法线）+ 四边形面；Blender 的 PLY 导入会把法线读成自定义法线（平滑）"""
+    vert = np.empty(len(V), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")])
+    vert["x"], vert["y"], vert["z"] = V[:, 0], V[:, 1], V[:, 2]
+    vert["nx"], vert["ny"], vert["nz"] = N[:, 0], N[:, 1], N[:, 2]
+    face = np.empty(len(Q), dtype=[("n", "u1"), ("v", "<i4", (4,))])
+    face["n"], face["v"] = 4, Q
+    hdr = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(V)}\nproperty float x\nproperty float y\nproperty float z\n"
+           f"property float nx\nproperty float ny\nproperty float nz\nelement face {len(Q)}\nproperty list uchar int vertex_indices\nend_header\n")
+    with open(path, "wb") as fh:
+        fh.write(hdr.encode("ascii"))
+        fh.write(vert.tobytes())
+        fh.write(face.tobytes())
+
+
+def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None):
+    """>v<🧊四维切片-导出-插入镜头 → 每帧一个 PLY（Blender 坐标、带 SDF 梯度法线）+ track.json（相机 eye / 朝向含 roll / fov、主光、轮廓光、
+    唯一红点的 3D 位置与强度、HUD 行）。红点：顶点上算 4D 相切度 |n_xyz| / |n|，取最小的（偏向上一帧附近），强度 = (0.32 − r) / 0.22"""
+    import json
+    obj = OBJS[name]
+    box = box or obj.bound            # = 球追踪的包围半径：截面不会越出它（用 vbox 会把 θ ≈ −90° 时更宽的旋转体切掉）
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    track = insert_track(obj, sp)
+    tag = tag or f"4D_INSERT / {name.upper()}"
+    key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el)
+    frames, prev_b, prev_red, t0 = [], None, None, time.time()
+    for k in track:
+        t1 = time.time()
+        R = insert_R(obj, sp, k["th"], k["t"])
+        g = slice_fn(obj, R, k["c"])
+        V, Q, N = surface_nets(g, box, n)
+        Rr = R @ obj.R0 if obj.R0 is not None else R
+        Vt = torch.tensor(V, device=DEV)
+        g4 = grad4(obj, Rr, torch.cat([Vt, torch.full_like(Vt[:, :1], k["c"])], 1))
+        r = (g4[:, :3].norm(dim=1) / (g4.norm(dim=1) + 1e-9))
+        score = r.clone()
+        if prev_red is not None:
+            score = score + 0.15 * (Vt - prev_red).norm(dim=1)                          # 偏向原地（不乱跳）
+        j = int(torch.argmin(score))
+        strength = float(((0.32 - r[j]) / 0.22).clamp(0, 1))
+        prev_red = Vt[j] if strength > 0 else prev_red
+        roll = math.radians(sp.roll0 + sp.roll_rate * k["t"])
+        eye, fwd, right, up = cam_basis(k["yaw"], sp.pitch, k["dist"], sp.target, roll)
+        b = betti(obj, R, k["c"], n=64)
+        lines = insert_hud_lines(obj, name, sp, k, b, prev_b is not None and b != prev_b)
+        prev_b = b
+        fn = f"f{k['i']:04d}.ply"
+        write_ply(out / fn, to_blender(V), Q, to_blender(N))
+        rim = rim_dir(sp, k) if sp.rim > 0 else None
+        frames.append(dict(i=k["i"], t=k["t"], mesh=fn, verts=len(V), quads=len(Q),
+                           eye=to_blender(eye.cpu().numpy()).tolist(), fwd=to_blender(fwd.cpu().numpy()).tolist(),
+                           up=to_blender(up.cpu().numpy()).tolist(), focus=float(k["dist"]),
+                           rim=None if rim is None else to_blender(rim[0].cpu().numpy()).tolist(),
+                           red=to_blender(Vt[j].cpu().numpy()).tolist(), red_strength=strength, betti=list(b), hud=lines))
+        print(f"  frame {k['i']}/{len(track)}: {len(V)} verts, {len(Q)} quads, red r = {float(r[j]):.3f}  {time.time() - t1:.2f}s", flush=True)
+    meta = dict(tag=tag, fps=sp.fps, size=list(sp.size), hud_band=sp.hud_band, hud_scale=sp.hud_scale, fov=sp.fov,
+                key=to_blender(key.cpu().numpy()).tolist(), key_az=sp.key_az, key_el=sp.key_el, rim=sp.rim, grid=n, box=box,
+                coords="Blender (x, -z, y) of model coords", frames=frames)
+    (out / "track.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"{out}: {len(frames)} meshes + track.json, {time.time() - t0:.1f}s ({(time.time() - t0) / len(frames):.2f} s/frame)")
+
+
+def compose_blender(frames_dir, track_json, out, contact=None):
+    """>v<🧊四维切片-导出-Blender 渲染的帧（物体区，W × (H − band)）+ 底部 HUD 条带（track.json 里每帧的真参数）→ mp4（+ 接触表）"""
+    import json
+    meta = json.loads(Path(track_json).read_text(encoding="utf-8"))
+    Wd, Hd = meta["size"]
+    band = meta["hud_band"]
+    sink = Sink(out, meta["fps"], (Wd, Hd))
+    thumbs = []
+    for fr in meta["frames"]:
+        src = Path(frames_dir) / f"f{fr['i']:04d}.png"
+        im = Image.open(src).convert("RGB")
+        if im.size != (Wd, Hd - band):
+            raise ValueError(f"{src}: {im.size} ≠ {(Wd, Hd - band)}")
+        full = Image.new("RGB", (Wd, Hd), (0, 0, 0))
+        full.paste(im, (0, 0))
+        changed = "<- topology changed" in fr["hud"][4]
+        hud(full, fr["hud"], meta["tag"], red_line=4 if changed else None, scale=Hd / 1080 * 1.15 * meta["hud_scale"])
+        sink.add(full)
+        if contact:
+            thumbs.append((full.resize((Wd // 4, Hd // 4), Image.LANCZOS), fr))
+    sink.close()
+    print(f"{out}: {sink.i} frames")
+    if contact:
+        cols, pad, lab = 6, 8, 20
+        tw, th_ = thumbs[0][0].size
+        rows = math.ceil(len(thumbs) / cols)
+        sheet_ = Image.new("RGB", (cols * (tw + pad) + pad, rows * (th_ + lab + pad) + pad + 30), (0, 0, 0))
+        d = ImageDraw.Draw(sheet_)
+        f = ImageFont.truetype(FONT, 13)
+        for j, (tb, fr) in enumerate(thumbs):
+            x, y = pad + (j % cols) * (tw + pad), pad + (j // cols) * (th_ + lab + pad)
+            sheet_.paste(tb, (x, y))
+            bb = fr["betti"]
+            d.text((x, y + th_ + 3), f"#{fr['i']:02d} t={fr['t']:.2f} b={bb[0]} {bb[1]} {bb[2]} quads={fr['quads'] // 1000}k", font=f, fill=(150, 160, 168))
+        d.text((pad, sheet_.height - 24), f"{meta['tag']}   Blender render of surface-nets meshes ({meta['grid']}^3 per frame, SDF-gradient normals)",
+               font=f, fill=(150, 160, 168))
+        Path(contact).parent.mkdir(parents=True, exist_ok=True)
+        sheet_.save(contact, quality=90)
+        print(f"  contact sheet -> {contact}")
+
+
+
 # ---------- 接触表 ----------
 SHEET_ROWS = [
     ("tiger", "rotate", None), ("ditorus", "rotate", None), ("loft_sphere_torus", "slice", None),
@@ -2058,6 +2249,10 @@ def main():
     g.add_argument("--roll", default="0,0", help="相机 roll：起始角（度）, 匀速（度/秒）；负数写成 --roll=-4,2")
     g.add_argument("--rim", default="0,150,25", help="轮廓光 '强度,az,el'（度；az 相对当前相机含 roll，150 = 侧后方；强度 0 = 关）")
     g.add_argument("--ambient", type=float, default=0.035, help="sculpt 环境底光（小 = 暗部更深）")
+    g.add_argument("--export-mesh", default=None, help="不渲染：每帧切片 → Surface Nets 网格 → <目录>/fNNNN.ply + track.json（给 tools/blender_four_d.py）")
+    g.add_argument("--mesh-grid", type=int, default=320, help="--export-mesh 的网格分辨率 N（N³，盒 = 物体的包围半径）")
+    g.add_argument("--compose-blender", default=None, help="Blender 渲好的帧目录（fNNNN.png）→ 加 HUD 条带出 mp4（--out / --contact，需 --track）")
+    g.add_argument("--track", default=None, help="--compose-blender 用的 track.json")
     g.add_argument("--body-rate", type=float, default=0.0, help="身体绕侧向轴 x 匀速转（度/秒；光固定，跟相机 roll 不同）")
     g.add_argument("--plot", default=None, help="运动速度图 png 路径（理论角速度 + 实测法向光流 / 帧间差分）")
     g.add_argument("--song-t0", type=float, default=None, help="这个镜头在歌里的起点（秒，播放时间）：速度图上标重拍")
@@ -2158,6 +2353,12 @@ def main():
             sys.exit(f"已存在，不覆盖：{out} / {a.contact} / {a.plot}（换版本号）")
         emerge(obj, sp, str(out), a.tag, a.contact, a.plot, a.song_t0, a.still)
         return
+    if a.compose_blender:
+        out = Path(a.out)
+        if out.exists() or (a.contact and Path(a.contact).exists()):
+            sys.exit(f"已存在，不覆盖：{out} / {a.contact}（换版本号）")
+        compose_blender(a.compose_blender, a.track, str(out), a.contact)
+        return
     if a.insert is not None:
         w, h = (int(x) for x in a.size.lower().split("x"))
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
@@ -2170,6 +2371,9 @@ def main():
             for k in insert_track(obj, sp):
                 print(f"  #{k['i']:02d} t={k['t']:.3f} theta={k['th']:+7.1f} v={k['v']:6.1f} c={k['c']:+.3f} dc/dt={k['cv']:+.3f}"
                       + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
+            return
+        if a.export_mesh:
+            export_insert_meshes(a.obj, sp, a.export_mesh, a.mesh_grid, a.tag)
             return
         out = Path(a.out or f"{a.obj}_insert.mp4")
         if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):
