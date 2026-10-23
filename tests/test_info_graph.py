@@ -289,6 +289,15 @@ class TestMemoryV5(unittest.TestCase):
         fl = int(self.sch["hops"][3] * G.FPS)
         self.assertLess(zs[-1], zs[fl] * 1.05)
 
+    def test_camera_v8_never_still(self):
+        """v8：镜头永不停（每帧屏幕位移 > 0.5 px），速度峰值仍贴事件"""
+        T = int(round(self.sch["end"] * G.FPS))
+        cam, zs, ev = G.camera_ff_v7(self.mem, self.sch, self.seg, T, v8=True)
+        sp = np.hypot(*np.diff(cam, axis=0).T) * zs[1:]
+        self.assertGreater(sp.min(), 0.5)
+        for t, k, d in G.camera_alignment(cam, zs, ev, T, lead=G.V7["lead_frames"]):
+            self.assertIn(d, (-1, 0, 1), (t + self.seg[0], k, d))
+
     def test_ease_shape(self):
         """快起慢收：E(0)=0、E(1)=1、速度单调减（起步那一刻最快）"""
         u = np.linspace(0, 1, 201)
