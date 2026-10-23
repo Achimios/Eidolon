@@ -16,6 +16,8 @@
     黑                      黑场
   速度：可选，默认 1（0.5 = 慢放，2 = 快放）
   preview 选项：--edl 另一份剪辑表  --end 只出到第几秒  --out 输出  --hd（1280×720）
+  ⭐--synapsis <页id>：剪辑真源 = Synapsis 时间轴页（👤2026-10-24 定），读 `cli.js timeline <页> --json`；
+     节点属性 src（剪辑表语法）> 第一张图（静帧）> 文字卡；只取主轨，空隙补黑
 """
 import argparse
 import re
@@ -86,6 +88,44 @@ def read_edl(edl=None):
     return rows
 
 
+SYN_CLI = "C:/Users/Administrator/Desktop/Obsidian_V_Synapsis/core/cli.js"
+
+
+def rows_from_timeline(tl):
+    """Synapsis 时间轴导出（cli.js timeline <页> --json）→ read_edl 同格式的行（👤2026-10-24：剪辑真源 = Synapsis 节点）。
+    只取主轨（track 0）；t0 ≥ t1 的条跳过；条之间的空隙补「黑」。
+    素材：节点属性 src（剪辑表语法，如 样片:xxx.mp4@1.2）优先；否则第一张图 → 静帧（慢推）；都没有 → 文字卡（标签）。"""
+    items = sorted((it for it in tl["items"] if int(it.get("track") or 0) == 0
+                    and it.get("t0") is not None and it.get("t1") is not None and it["t0"] < it["t1"]),
+                   key=lambda it: it["t0"])
+    rows, end = [], 0.0
+    for it in items:
+        t0, t1 = float(it["t0"]), float(it["t1"])
+        if t0 > end + 1e-6:
+            rows.append((end, "黑", 1.0))
+        if it.get("src"):
+            src = it["src"]
+        elif it.get("pics"):
+            src = "图:" + it["pics"][0]
+        else:
+            src = "文字:" + (it.get("label") or it["id"])
+        rows.append((max(t0, end), src, float(it.get("speed") or 1.0)))
+        end = max(end, t1)
+    rows.append((end, "黑", 1.0))
+    return rows
+
+
+def read_synapsis(page, ws=None):
+    """调 Synapsis CLI 拿时间轴页（下游现读上游，不存副本）"""
+    ws = ws or str(MV)
+    r = subprocess.run(["node", SYN_CLI, "timeline", page, "--json", "--ws", ws], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    if r.returncode != 0:
+        sys.exit(f"Synapsis 时间轴读不到：{r.stderr.strip()}")
+    import json
+    return rows_from_timeline(json.loads(r.stdout))
+
+
 def resolve(src):
     """素材 → (视频路径或 None, 起点秒, 静帧图或 None)"""
     if src == "黑":
@@ -128,13 +168,13 @@ def count_frames(ff, path):
     return int(m[-1]) if m else -1
 
 
-def preview(edl=None, end=END, out=None, hd=False):
+def preview(edl=None, end=END, out=None, hd=False, synapsis=None):
     global PW, PH
     if hd:
         PW, PH = 1280, 720
     import imageio_ffmpeg
     ff = imageio_ffmpeg.get_ffmpeg_exe()
-    rows = [r for r in read_edl(edl) if r[0] < end]
+    rows = [r for r in (read_synapsis(synapsis) if synapsis else read_edl(edl)) if r[0] < end]
     out = Path(out) if out else MV / "样片" / "预览_剪辑表.mp4"
     END_ = end
     with tempfile.TemporaryDirectory() as td:
@@ -179,5 +219,6 @@ if __name__ == "__main__":
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--edl", default=None); ap.add_argument("--end", type=float, default=END)
     ap.add_argument("--out", default=None); ap.add_argument("--hd", action="store_true")
+    ap.add_argument("--synapsis", default=None, help="Synapsis 时间轴页 id（剪辑真源；给了就不读 --edl）")
     a = ap.parse_args()
-    export(a.force) if a.cmd == "export" else preview(a.edl, a.end, a.out, a.hd)
+    export(a.force) if a.cmd == "export" else preview(a.edl, a.end, a.out, a.hd, a.synapsis)
