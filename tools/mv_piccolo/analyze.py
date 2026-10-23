@@ -82,19 +82,25 @@ def melody(y, sr):
             "voiced": [round(float(x), 3) for x in v]}
 
 
-def envelopes(y, sr):
+def envelopes(y, sr, drums=None):
+    """crackle = 唱片底噪：> 7 kHz 的帧间不稳定度，按 intro（前 8 s）归一，再用鼓轨响度门掉（hi-hat 不是底噪）。
+    loud = 全曲响度 0~1。"""
     import librosa
     S = np.abs(librosa.stft(y, n_fft=2048, hop_length=HOP))
     fr = librosa.fft_frequencies(sr=sr, n_fft=2048)
-    hi = S[fr > 6000]
-    # 底噪 = 高频里「不稳定」的部分：帧间差的均值（持续的高频乐器差小，爆裂声差大）
+    hi = S[fr > 7000]
     crack = np.abs(np.diff(hi, axis=1, prepend=hi[:, :1])).mean(0)
-    crack = crack / (np.percentile(crack, 98) + 1e-9)
+    n8 = int(8.0 * sr / HOP)
+    crack = crack / (np.percentile(crack[:n8], 98) + 1e-9)
+    if drums is not None:
+        rd = librosa.feature.rms(y=drums, frame_length=2048, hop_length=HOP)[0]
+        n = min(len(rd), len(crack))
+        gate = 1 - np.clip(rd[:n] / (np.percentile(rd, 95) + 1e-9), 0, 1) ** 0.5
+        crack = crack[:n] * gate
     rms = librosa.feature.rms(S=S)[0]
     db = 20 * np.log10(rms + 1e-9)
     loud = np.clip((db - (db.max() - 40)) / 40, 0, 1)
-    return {"hop_s": HOP / sr, "v": [round(float(x), 3) for x in np.clip(crack, 0, 1)]}, \
-           {"hop_s": HOP / sr, "v": [round(float(x), 3) for x in loud]}
+    return {"hop_s": HOP / sr, "v": [round(float(x), 3) for x in np.clip(crack, 0, 1)]},            {"hop_s": HOP / sr, "v": [round(float(x), 3) for x in loud]}
 
 
 def beats_from_sense(path):
@@ -132,9 +138,13 @@ def main():
               "downbeats": [round(float(b), 4) for b in beats[ph::4]], "source": "librosa"}
     other = MV / "分轨" / "other.wav"
     mel = melody(Sn.load_audio(other, sr=SR).astype(np.float32) if other.exists() else y, SR)
-    crack, loud = envelopes(y, SR)
+    drums = MV / "分轨" / "drums.wav"
+    crack, loud = envelopes(y, SR, Sn.load_audio(drums, sr=SR).astype(np.float32) if drums.exists() else None)
+    # 人声乐句（ReadScreen 的 voice.phrases）原样带上，给镜头当事件
+    sense = MV / "感官.json"
+    phrases = json.loads(sense.read_text("utf-8")).get("voice", {}).get("phrases", []) if sense.exists() else []
     out = {"music": Path(a.music).name, "duration": round(len(y) / SR, 3), **bt, "bands": centers,
-           "holes": holes, "melody": mel, "crackle": crack, "loud": loud}
+           "holes": holes, "melody": mel, "crackle": crack, "loud": loud, "phrases": phrases}
     Path(a.out).write_text(json.dumps(out, ensure_ascii=False), "utf-8")
     print(f"holes {len(holes)}  beats {len(bt['beats'])}  bpm {bt['bpm']:.2f}  src {bt['source']}  -> {a.out}")
 
