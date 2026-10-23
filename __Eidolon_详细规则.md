@@ -48,7 +48,7 @@
 - `onsets` 精度：合成点击音实测误差 ≤ 6ms（10ms 分析帧量化）。
 - `bpm`：sensorium 自己估的可能差两倍；merge_events 之后用 beat_this 的值（《Can't Kill Us》= 150.0，已和用户的乐句格子交叉验证）。
 - 生成：`python tools/sense_song.py <音频或视频> --out <作品文件夹>`，会同时出一张 `感官_条带.jpg` 给人看。
-- ⚠️完整顺序：`separate.py`（分轨）→ `sense_song.py`（**整个重写** 感官.json，会丢掉下面的 voice）→ `beats.py` → `merge_events.py`（保留 voice）→ `sense_voice.py`（加 voice）。
+- ⚠️完整顺序：`separate.py`（分轨）→ `sense_song.py`（**整个重写** 感官.json，会丢掉下面的 voice）→ `beats.py` → `merge_events.py`（保留 voice / expect）→ `sense_voice.py`（加 voice）→ `sense_expect.py`（加 expect；读 voice，voice 重算后要重跑）。
 
 ### 人声 `voice`（2026-10-23 新增，`src/voice.py` + `tools/sense_voice.py`）
 从 Demucs 人声分轨（`分轨/vocals.wav`）算的**纯声学特征**（不识别歌词）。只新增顶层 `voice` 节点，其余字段一个字都不动（写入时逐字段比对；《Can't Kill Us》旧件留 `感官.json.bak_2026-10-23_voice`）。
@@ -75,6 +75,38 @@
 - 精度：合成锯齿 / 正弦 f0 误差 < 5 音分、无八度错；合成 ±50 音分 5.5 Hz 颤音检出 5.5 Hz / ≈49 音分；乐句边界 ±30 ms（`tests/test_sensorium_voice.py`）。⚠️**真实人声没有标注真值**，只验了合成信号 + 「门以上人声能量落在乐句里」的比例（两首 ≈ 74–78%，其余是串音 / 气声 / 混响尾，见条带图）。
 - 诊断图：`<作品>/人声_条带.jpg`（波形 + 响度 + f0 + 有声概率 / 颤音；暗底 = 乐句，红线 = 换气，顶上红条 = 人声段）。
 - 生成：`python tools/sense_voice.py <作品文件夹>`（要先有 `感官.json` 和 `分轨/vocals.wav`）。
+
+### 期待 / 意外 `expect`（2026-10-23 新增，`src/expect.py` + `tools/sense_expect.py`）
+> ⚠️**这是积木 / 审计，不是导演。** 👤「不要太数学化，核心还是跟着 Thymos 和 emotion flow。数学是 building block 和审计视野等作用。」
+> 它不改剪辑、不改画面、不替谁做决定；规则可以读它当一个参数，审计图把分歧点标出来给人看。意义由故事（Thymos）给，意外度只说「哪里罕见」（哲学 §15）。
+
+每个声音事件在**她此刻所在的情绪段落**里有多罕见（意外度，比特），再乘上**她此刻在等什么 / 怕什么**（显著度）。同样的鼓点，在「憋住」段是意外，在 drop 段是日常 —— 所以上下文是情绪段落，不是全曲一个分布。只新增顶层 `expect` 节点（放在 `voice` 后面），其余字段一个字都不动（写入时逐字段比对；旧件留 `感官.json.bak_2026-10-23_expect`）。
+```json
+"expect": {
+ "version": "2026-10-23", "role": "积木 / 审计，不是导演 …", "method": "…", "context": "情绪大图/草案.json 的段（15 段）" | "滑动窗口 12.8 s（这首没有情绪大图）",
+ "expect_source": "情绪大图/期待.json（⚠️草稿，待👤过）" | null, "salience_note": null | "为什么显著度留空", "params": {…},
+ "segments": [[start, end, "id", "名"], ...] | null,
+ "events": [{"t": 秒, "s": "onset|motif|voice_on|voice_off|absence", "m": 大小, "bits": 比特, "rate": 比特, "mag": 比特, "seg": "段 id" | null, "sal": 显著度 | null}, ...],
+ "surprise": [每帧，比特], "absence": [每帧，比特], "salience": [每帧] | null
+}
+```
+| 字段 | 意思 | 怎么算的 |
+|---|---|---|
+| `events[].s` | 事件流 | `onset` = events.onsets（大小 `m` = 起音那一帧的 threat）；`motif` = motifs 的 hits；`voice_on` / `voice_off` = voice.phrases 的起 / 止（`m` = peak / 乐句长度）；`absence` = 该来的起音没来（`m` = 这段空隙的长度，秒） |
+| `bits` | 意外度 = `rate + mag`（上限 12） | 只用**这一刻之前**听到的（期待只能从已经听到的东西里长出来）。记忆：同段全记，之前段落的 3 s 内淡掉（刚换段时还带着上一段的期待，约 2 小节适应过来）；没有情绪大图时用 12.8 s 滑动窗口 |
+| `rate` | 「这一拍里来一个」有多罕见 | λ = 记忆里的事件率（带半个事件的全曲先验）；p = min(1, λ·拍长)，−log2 p。`voice_off` 不算（结束由开始决定） |
+| `mag` | 「这么大或更大」有多罕见 | 记忆里 ≥ 它的比例（秩，自己算一个，带全曲分布的先验），−log2 p。`motif` 不算（大小恒定） |
+| `absence`（每帧） | 缺席：从上一个起音到现在一个都没来，按此刻的期待有多罕见 | λ·gap / ln2；超过 4 比特记一个 `absence` 事件（「等太久了」被感到的那一刻）；第一个起音之前、最后一个之后 = 0 |
+| `sal` / `salience` | 显著度 = 乘子 × 门 × 意外度 | 乘子 = `期待.json` 该段 `attend[事件流]`（没列 = 0.3）；门 = logistic，中心按 `tolerance`：低 0.5 / 中 1.5 / 高 3 比特。**没有 期待.json 或没有情绪大图 → null**，`salience_note` 写原因 |
+| `surprise`（每帧） | 意外度的包络 | 事件处冲到 bits，180 ms 指数衰减（同 threat）；absence 不进它，单独一条 |
+
+- `情绪大图/期待.json`（作品数据，和草案.json 同 id）：每段 `expecting`（她在等什么）、`fear`、`tolerance`（低 / 中 / 高）给人读、给人改；`attend` 是从前三个推出的机器字段。⚠️现在是 Eidolon 起草的**草稿，待👤逐段过**。
+- 审计图 `<作品>/感官_期待审计.jpg`：段落色带（= 她在等什么）+ 意外度 + absence + 显著度；给了 `--edl` 再加剪辑（切点 / 长码 / 闪帧）+ 样片逐帧运动（6×6 块里最大那块的帧差）。
+  - ▼红 = 显著度（没有就意外度）在审计区前 8% 且 ≥ 2，但 ±0.2 s 没切点、前 0.6 s 内没开长码镜头、样片也没有运动尖峰 —— **画面没回应**。
+  - ▲橙 = 剪辑给了长码（停留 ≥ 邻近中位 1.5 倍且 ≥ 2.4 s / 静帧慢推 / ⭐），但那一刻（切点前 0.1 到后 0.6 s）意外度 < 3 比特且低于本段六成起音 —— **长码给了平常的一刻**（常常是故事给的，合理；只是标出来）。
+  - 闪帧后接回同一素材 = 原镜头的续，不算新开的长码。
+- ⚠️已知局限：样片运动只看帧差，镜头本来就一直在动时的「速度鼓包」抓不到（所以加了「前 0.6 s 开了长码镜头」那条）；剪辑表只有 0–97 s 是真剪辑。起音强度（threat）在强段常常饱和到 ≈ 1，大小的区分度有限。
+- 生成：`python tools/sense_expect.py <作品文件夹> [--edl 剪辑表 --video 按这份剪辑表出的样片 --audit-end 秒] [--dry]`。剪辑表和样片只用于审计图，不写进 `感官.json`。
 
 ## 二、stems（`<作品>/stems/<镜头id>/`）—— 草案
 
