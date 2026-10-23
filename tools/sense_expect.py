@@ -343,6 +343,10 @@ def draw(path, title, sense, segs, exp, evs, surprise, ab, sal, rows=None, mot=N
 
 # ───────────────────────── 主程序 ─────────────────────────
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows 控制台默认 GBK，⚠️ 等字符会让 print 崩
+    except AttributeError:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("mv")
     ap.add_argument("--edl", default=None, help="审计用的剪辑表（不写进 感官.json）")
