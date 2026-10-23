@@ -178,11 +178,26 @@ class Plates:
                 arr = np.asarray(canvas).astype(np.float32) / 255
                 layers.append((arr, L.get("z_index", 0), (L.get("name") or "") + " " + (L.get("description") or "")))
             layers.sort(key=lambda x: x[1])
-            # 最远层 = 整幅底图（含她）+ 背景层盖上去（背景层是补好的、只覆盖它的包围盒）
+            # 最远层 = 整幅底图，但把所有前景层（她、道具）的区域挖掉、用模糊归一化填补（简易 inpaint），
+            # 再把拆层给的背景层盖上去 —— 这样视差一动不会出现两个她 / 两把汤匙（ReadScreen 第 2 轮抓到的重影）
             if layers:
+                from PIL import ImageFilter
+                fg = np.zeros(base.shape[:2], np.float32)
+                for arr, _, _ in layers[1:]:
+                    fg = np.maximum(fg, arr[..., 3])
+                fg = np.clip((fg - 0.2) / 0.3, 0, 1)
+                # 稍微膨胀遮罩（边缘残留）
+                fgi = Image.fromarray((fg * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(9))
+                fg = np.asarray(fgi).astype(np.float32) / 255
+                keep = (1 - fg)[..., None]
+                num = Image.fromarray((np.clip(base * keep, 0, 1) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(60))
+                den = Image.fromarray((keep[..., 0] * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(60))
+                num = np.asarray(num).astype(np.float32) / 255; den = np.asarray(den).astype(np.float32)[..., None] / 255
+                fill = num / np.maximum(den, 1e-3)
+                far = base * keep + fill * (1 - keep)
                 bg = layers[0][0]
-                full = np.concatenate([base, np.ones(base.shape[:2] + (1,), np.float32)], -1)
-                full[..., :3] = full[..., :3] * (1 - bg[..., 3:4]) + bg[..., :3] * bg[..., 3:4]
+                far = far * (1 - bg[..., 3:4]) + bg[..., :3] * bg[..., 3:4]
+                full = np.concatenate([np.clip(far, 0, 1), np.ones(base.shape[:2] + (1,), np.float32)], -1)
                 layers[0] = (full, layers[0][1], layers[0][2])
             for i, (_, _, nm) in enumerate(layers):
                 if any(w in nm.lower() for w in ("person", "woman", "girl", "character", "figure", "she ")):
@@ -251,7 +266,7 @@ class Scene:
             out = out * (1 - a[..., None]) + rgb * a[..., None]
             if pl["person"] is not None and i == pl["person"]:
                 mask = a
-        return out, (mask if mask is not None else ell)
+        return out, (mask if mask is not None else ell)   # 没有「她」图层时用椭圆（压缩用）；橙色检测另见 draw
 
     # 刻版排线：黑底亮线，密度 = 亮度
     def scratch(self, lum, t):
@@ -321,7 +336,7 @@ class Scene:
         # 橙辫子：唯一的饱和色
         r, g, b = img[..., 0], img[..., 1], img[..., 2]
         mx = img.max(-1); sat = (mx - img.min(-1)) / (mx + 1e-6)
-        orange = ((r > g * 1.55) & (g > b * 1.9) & (sat > 0.62) & (mx > 0.45)).astype(np.float32)[..., None]   # 只认信号橙，不认暖光皮肤
+        orange = (((r > g * 1.55) & (g > b * 1.9) & (sat > 0.62) & (mx > 0.45)).astype(np.float32) * (mask > 0.3))[..., None]   # 只认「她」图层里的辫子（ReadScreen 定：灯、奖杯压成单色）
         out = out * (1 - orange) + img * np.array([1.0, 0.9, 0.55]) * orange
         out = np.clip(out * fade, 0, 1)
         im = Image.fromarray((out * 255).astype(np.uint8))
