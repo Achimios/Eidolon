@@ -209,5 +209,46 @@ class TestMemoryGraph(unittest.TestCase):
         self.assertIn(self.mem.john, self.sch["pop"])
 
 
+class TestMemoryV4(unittest.TestCase):
+    """v4 只改节奏：顺序 / 数值和 v3 一样；锚点踩在指定的真实起音上"""
+    @classmethod
+    def setUpClass(cls):
+        if not G.SENSE.exists():
+            raise unittest.SkipTest("没有 感官.json")
+        cls.seg = (115.51, G.V4["end_t"])
+        cls.mem = G.build_memory(seg=cls.seg)
+        cls.sch = G.schedule_v4(cls.mem, cls.seg)
+
+    def test_order_preserved_and_stops_at_john(self):
+        order = [u for u, _, _ in self.mem.order]
+        pops = sorted(self.sch["pop"].items(), key=lambda kv: kv[1][0])
+        self.assertEqual([u for u, _ in pops], order[:self.sch["jk"] + 1])   # 弹出顺序 == Dijkstra 顺序，到 John 停
+        ts = [tt for _, (tt, _) in pops]
+        self.assertTrue(all(b > a for a, b in zip(ts, ts[1:])))
+
+    def test_anchors(self):
+        s0 = self.seg[0]
+        self.assertAlmostEqual(self.sch["pop"][self.sch["unstable"]][0] + s0, 118.552, places=2)
+        self.assertAlmostEqual(self.sch["pop"][self.mem.john][0] + s0, 127.741, places=3)
+        self.assertEqual(self.sch["jk"] + 1, 28)
+        zj = np.array(self.mem.nodes[self.mem.john]["z"])
+        zu = np.array(self.mem.nodes[self.sch["unstable"]]["z"])
+        cu = zu @ zj / np.linalg.norm(zu) / np.linalg.norm(zj)
+        for u in [u for u, _, _ in self.mem.order][1:12]:                    # 心魔 = 前 11 个里和 John 最不像的
+            z = np.array(self.mem.nodes[u]["z"])
+            self.assertGreaterEqual(z @ zj / np.linalg.norm(z) / np.linalg.norm(zj), cu - 1e-12)
+        _, fps, ch, ev = G.load_sense()
+        on = np.array(ev["onsets"])
+        for h in G.V4["hops"]:
+            self.assertLess(np.abs(on - h).min(), 0.002)                     # 四声都是真实起音
+
+    def test_takens_delay(self):
+        nd = self.mem.nodes[self.sch["unstable"]]
+        P3, m = G.takens_points(nd["t0"], nd["t1"])
+        tau = int(round(m["tau_ms"] * m["sr"] / 1000))
+        np.testing.assert_allclose(P3[tau:, 1], P3[:-tau, 0], atol=1e-12)    # 第二坐标 == 第一坐标晚 τ
+        self.assertLessEqual(np.abs(P3).max(), 1.0 + 1e-12)
+
+
 if __name__ == "__main__":
     unittest.main()
