@@ -24,7 +24,9 @@
   起音 → 那一刻通量最大的分轨 × 通量重心频带，人声起 → VOICE 层 f0；事件没到时目标在播放头（感官.json 的已知未来 = 前馈），
   到了随鱼眼往左滑、镜头跟着；找到后 0.55 s「读数」转去 EXPECT 层同一事件的竖刺（只移视线）；每次出发 = 区间里最强的起音（提前 2 帧）；
   准星：灰 = SEARCH x%，红 = FOUND 0.6 s。慢漂叠加不归零；最后后退不推近。v2 的通量 clip(−80, −10) 是 bug（v3 已改），--v 2 保留原样复现。
-用法：python tools/sense_space_v2.py [--v 3|2] [--seg0 38.71 --seg1 51.51] [--name …] [--still 秒,秒 --out x.jpg]
+⭐v5（👤：正面、长焦、层更近；只平移 + 推拉）：camera_v5 —— yaw = pitch = 0、半视场 8°、层距 70；小节首拍一次移动（v4 A），--points 加每拍一点（v4 B）。
+v4（A/B/C 节奏试听，--v 4 --mode A|B|C --lowres）见 camera_v4。
+用法：python tools/sense_space_v2.py [--v 5|4|3|2] [--points] [--seg0 38.71 --seg1 51.51] [--name …] [--still 秒,秒 --out x.jpg]
 输出：MV/样片/信息可视化/<name>.mp4（配乐）+ _接触表.jpg + _镜头速度.png + .json。不覆盖已有文件。
 注：v1（tools/sense_space.py）依赖 info_graph；本版自带几个小工具函数，不 import info_graph（别的会话在改它）。
 """
@@ -560,6 +562,101 @@ def camera_v4(seg, T, sense, tgs, mode):
     return out, sorted(evs), info
 
 
+
+# ───────────────────────── v5：正面长焦（👤2026-10-23：镜头在正面、长焦、层更近；只平移 + 推拉；不环绕 / 转向 / roll） ─────────────────────────
+V5 = dict(half_fov=8.0, spacing=70.0, fogL=380.0, points=False)
+
+
+def set_v5(points=False):
+    """层距 70（v3 的 ~0.54、v2 的 ~0.2）；半视场 8°（≈ 135 mm 等效）；雾 / 线宽 / 字号都按「离最近一层多深」算（长焦下绝对深度几乎一样）"""
+    global STEMS, Z_SENSE, Z_EXP, Z_VOICE, FOCAL
+    sp = V5["spacing"]
+    Z_SENSE, Z_EXP, Z_VOICE = -3 * sp, -2 * sp, -sp
+    STEMS = [("drums", 0.0), ("other", sp), ("bass", 2 * sp), ("vocals", 3 * sp)]
+    FOCAL = (W / 2) / math.tan(math.radians(V5["half_fov"]))
+    FOG.update(z0=0.0, L=V5["fogL"])
+    VER.update(v=5, mode="B" if points else "A")
+    V5["points"] = points
+
+
+def dscale(z):
+    """线宽 / 点重 / 字号的深度系数。v5：相对最近一层（FOG z0）的深度 → 1 … 0.45；其余版本：旧的绝对深度规则"""
+    if VER["v"] == 5:
+        return 0.45 + 0.55 * np.exp(-np.maximum(np.asarray(z, float) - FOG["z0"], 0) / FOG["L"])
+    return None
+
+
+def camera_v5(seg, T, sense, tgs, points=False):
+    """正面（yaw = pitch = roll = 0），只有 lookat 的 x / y 平移 + dist 推拉。
+    节奏 = v4 A：小节首拍（downbeats）一次明确的移动（提前 LEAD 帧起步，1 − (1 − u)^3.5，D 1.2 s），目标 = 这一小节里显著度最高的目标
+    （人声优先；没有 → 下一个），画面上目标落在中线偏右（lookat x = 目标 − 0.22 × 画宽）；推拉按目标类型：人声近、起音中、空小节远。
+    拍内慢漂：x 每秒 +22 世界单位 + 小正弦，y / dist 小正弦（不归零）。points = v4 B 的「每拍一点」：非首拍的拍上推近 2.5 %、τ 0.12 s 收回，幅度 ∝ 威胁峰。
+    最后一个小节首拍之后只往后拉（不推近）。"""
+    s0, s1 = seg
+    beats = np.asarray(sense["events"]["beats"], float)
+    dbt = np.asarray(sense["events"]["downbeats"], float)
+    th = np.asarray(sense["channels"]["threat"], float); fps = sense["fps"]
+    tgs = [t for t in tgs if t["kind"] != "readout"]
+    bar = float(np.median(np.diff(dbt)))
+    starts = [float(t) for t in dbt if s0 - 1e-3 <= t < s1 - 0.5]
+    lead = LEAD / FPS
+    D = 1.2
+    tanh = math.tan(math.radians(V5["half_fov"]))
+    def dist_for(width):                                   # 画面宽（世界单位）→ 距离
+        return width / 2 / tanh
+    mv = []
+    for k, t0 in enumerate(starts):
+        win = [g for g in tgs if t0 <= g["t"] < t0 + bar]
+        nxt = [g for g in tgs if g["t"] >= t0]
+        if win:
+            g = max(win, key=lambda g: g.get("sal", 0) + (10 if g["kind"] == "voice" else 0))
+            width = 1250.0 if g["kind"] == "voice" else 1500.0
+        else:
+            g = nxt[0] if nxt else tgs[-1]
+            width = 1850.0
+        mv.append(dict(d=t0 - s0, tg=g, width=width, kind=f"bar {t0:.2f} → {g['kind']} {g['t']:.2f}"))
+    if mv:                                                 # 结尾不推近：最后一次只拉远
+        mv[-1]["width"] = max(mv[-1]["width"], 2100.0, (mv[-2]["width"] if len(mv) > 1 else 0) + 300)
+    pts = []
+    if points:
+        for b in beats:
+            if s0 <= b < s1 and np.min(np.abs(dbt - b)) > 0.05:
+                pts.append((b - s0, float(th[max(0, int(b * fps) - 1):int(b * fps) + 4].max())))
+    out = np.zeros((T, 6)); info = []
+    g0 = mv[0]["tg"] if mv else tgs[0]
+    w0 = 1900.0
+    cur = np.array([target_pos(g0, s0)[0] - 0.22 * w0 - 150, target_pos(g0, s0)[1] + 40, dist_for(w0)])
+    k = -1
+    start = cur.copy()
+    for f in range(T):
+        t = f / FPS
+        tn = s0 + t
+        while k + 1 < len(mv) and t >= mv[k + 1]["d"] - lead:
+            k += 1
+            start = cur.copy()
+        if k >= 0:
+            m_ = mv[k]
+            u = (t - (m_["d"] - lead)) / D
+            e = ease(u)
+            P = target_pos(m_["tg"], tn)
+            goal = np.array([P[0] - 0.22 * m_["width"], P[1], dist_for(m_["width"])])
+            cur = start + (goal - start) * e
+            info.append(dict(k=k, u=float(min(u, 1.0)), found=tn >= m_["tg"]["t"], since=tn - m_["tg"]["t"], tg=m_["tg"]))
+        else:
+            info.append(None)
+        x, y, dd = cur
+        x += 22 * t + 18 * math.sin(0.5 * t)
+        y += 14 * math.sin(0.37 * t + 1)
+        dd *= 1 + 0.03 * math.sin(0.3 * t)
+        for tb, s_ in pts:
+            dt_ = t - (tb - lead)
+            if 0 <= dt_ < 0.8:
+                dd *= 1 - 0.025 * s_ * min(1.0, dt_ / (2 / FPS)) * math.exp(-max(0.0, dt_ - 2 / FPS) / 0.12)
+        out[f] = [x, y, 0.0, 0.0, 0.0, dd]
+    evs = [(m_["d"], m_["kind"]) for m_ in mv] + [(tb, "beat point") for tb, _ in pts]
+    return out, sorted(evs), info
+
+
 def draw_reticle(dr, st, inf, tn, pulse=0.0):
     """搜寻准星：四角括号框住目标的实时位置；搜的时候灰、找到的 0.6 s 红、之后白；标签 = 目标的真数据"""
     if inf is None:
@@ -616,7 +713,10 @@ def render(seg, only=None):
     css = [np.vstack([np.zeros(NB), np.cumsum(10 ** (db / 10), axis=0)]) for db in dbs]
     wig, kinfo, kref = kura_tremor(sense, dbs, s1)
     nL = len(STEMS)
-    if VER["v"] == 4:
+    if VER["v"] == 5:
+        tgs = search_targets(sense, dbs, seg)
+        cams, cam_ev, cinfo = camera_v5(seg, T, sense, tgs, V5["points"])
+    elif VER["v"] == 4:
         tgs = search_targets(sense, dbs, seg)
         cams, cam_ev, cinfo = camera_v4(seg, T, sense, tgs, VER["mode"])
     elif VER["v"] == 3:
@@ -637,6 +737,8 @@ def render(seg, only=None):
         t = f / FPS
         tn = s0 + t
         st = cams[f]
+        if VER["v"] == 5:
+            FOG["z0"] = st[5] + Z_SENSE - st[2]          # 最近一层（SENSE）离相机的深度
         kf = min(int(round((tn - K_T0) * FPS)), wig.shape[1] - 1)
         # ── 分轨频谱：密纹理（48 条山脊，点溅射）+ Kuramoto 局部抖动
         acc = np.zeros((H, W)); acc_r = np.zeros((H, W))
@@ -659,7 +761,7 @@ def render(seg, only=None):
             q, zc = project(Pw, st)
             ok = zc > 60
             zmed = float(np.median(zc[ok])) if ok.any() else 3000
-            wv = (0.16 + 3.0 * vf.ravel() ** 1.3) * np.clip(1500 / np.maximum(zc, 1), 0.3, 2.0) * fog(zmed)
+            wv = (0.16 + 3.0 * vf.ravel() ** 1.3) * (1.6 * dscale(zc) if VER["v"] == 5 else np.clip(1500 / np.maximum(zc, 1), 0.3, 2.0)) * fog(zmed)
             acc += splat(q[ok, 0], q[ok, 1], wv[ok])
             hot = np.clip(np.abs(wg.ravel()) / WIG_MAX - 0.7, 0, None) / 0.3
             if hot.max() > 0.01:
@@ -683,7 +785,7 @@ def render(seg, only=None):
                 return
             a = fog(float(np.median(z)))
             c = mix(col, a)
-            ww = max(1, int(round(w * SS * np.clip(1700 / np.median(z), 0.5, 1.6))))
+            ww = max(1, int(round(w * SS * (1.5 * float(dscale(np.median(z))) if VER["v"] == 5 else np.clip(1700 / np.median(z), 0.5, 1.6)))))
             q = q * SS
             if dash is None:
                 dr.line([tuple(p) for p in q], fill=c, width=ww)
@@ -700,7 +802,7 @@ def render(seg, only=None):
             if z < 60:
                 return
             a = fog(z)
-            sz = int(round(np.clip(size * 1900 / z, size * 0.75, size * 1.3)))
+            sz = int(round(size * (0.75 + 0.45 * (float(dscale(z)) - 0.45) / 0.55) if VER["v"] == 5 else np.clip(size * 1900 / z, size * 0.75, size * 1.3)))
             text(dr, (q[0] + dx * SS, q[1] + dy * SS), s, mix(col, a), sz, cn, anchor, knock=BG if knock else None)
 
         # 分轨层：框 + 名字 + 电平 + 振子状态
@@ -710,8 +812,9 @@ def render(seg, only=None):
             lvl = 10 * np.log10(np.sum(10 ** (dbs[k][max(0, i_now - 10):i_now + 1] / 10), axis=1).mean() + 1e-12)
             Kc, R_, nlock = kinfo[kf, 0], kinfo[kf, 1 + k], kinfo[kf, 1 + nL + k]
             trem = float(np.abs(wig[k][max(0, kf - 6):kf + 1]).max())
-            label((0, HH, zk), f"{name.upper()}  {lvl:5.1f} dB", HOT if trem > 0.6 * WIG_MAX else MID, 13, dx=8, dy=-30)
-            label((0, HH, zk), f"K {Kc:.2f}  R {R_:.2f}  locked {int(nlock)}/{NR}  tremor {trem:4.1f}", DIM, 11, dx=8, dy=-14)
+            lo5 = 36 * (nL - 1 - k) if VER["v"] == 5 else 0               # 正面看各层的标签会叠在一起 → 竖着错开
+            label((0, HH, zk), f"{name.upper()}  {lvl:5.1f} dB", HOT if trem > 0.6 * WIG_MAX else MID, 13, dx=8, dy=-30 - lo5)
+            label((0, HH, zk), f"K {Kc:.2f}  R {R_:.2f}  locked {int(nlock)}/{NR}  tremor {trem:4.1f}", DIM, 11, dx=8, dy=-14 - lo5)
         for fz in (100, 1000, 5000):
             label((0, yf(fz), STEMS[0][1]), f"{fz if fz < 1000 else str(fz // 1000) + 'k'}Hz", DIM, 11, dx=6, dy=-6)
         # 播放头：跨所有层的竖平面边
@@ -807,7 +910,7 @@ def render(seg, only=None):
             ytop = Y0 + 34 * min(e_["bits"], 12) + 26
             q, z = P2((x, ytop, Z_EXP))
             if z > 60:
-                s_ = 7 * SS * np.clip(1900 / z, 0.7, 1.4)
+                s_ = 7 * SS * (1.1 if VER["v"] == 5 else np.clip(1900 / z, 0.7, 1.4))
                 col = HOT if ap["id"][0] == "A" else MID
                 if ap["id"][0] == "A":
                     dr.polygon([(q[0], q[1] + s_), (q[0] - s_, q[1] - s_), (q[0] + s_, q[1] - s_)], fill=mix(col, fog(z)))
@@ -868,8 +971,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--seg0", type=float, default=38.71)
     ap.add_argument("--seg1", type=float, default=51.51)
-    ap.add_argument("--v", type=int, default=3, choices=(2, 3, 4), help="2 = 漂移环绕 + 层距大；3 = 在里面搜寻 + 层距压缩；4 = 节奏 A/B/C 试验（--mode）")
+    ap.add_argument("--v", type=int, default=3, choices=(2, 3, 4, 5), help="2 = 漂移环绕 + 层距大；3 = 在里面搜寻 + 层距压缩；4 = 节奏 A/B/C 试验（--mode）")
     ap.add_argument("--mode", default="A", choices=("A", "B", "C"))
+    ap.add_argument("--points", action="store_true", help="v5：加 v4 B 的「每拍一点」（非首拍的拍上小推近）")
     ap.add_argument("--lowres", action="store_true", help="960×540（A/B 试听用）")
     ap.add_argument("--name", default=None)
     ap.add_argument("--still", default=None)
@@ -883,7 +987,10 @@ def main():
         global W, H, FOCAL
         W, H = 960, 540
         FOCAL = (W / 2) / math.tan(math.radians(25))
-    a.name = a.name or (f"24_感官空间_开头_v4_{a.mode}" if a.v == 4 else f"24_感官空间_开头_v{a.v}")
+    if a.v == 5:
+        set_v5(a.points)
+    a.name = a.name or (f"24_感官空间_开头_v4_{a.mode}" if a.v == 4 else f"24_感官空间_开头_v5{'_points' if a.points else ''}" if a.v == 5
+                        else f"24_感官空间_开头_v{a.v}")
     seg = (a.seg0, a.seg1)
     T = int(round((seg[1] - seg[0]) * FPS))
     if a.still:

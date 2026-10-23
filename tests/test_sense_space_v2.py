@@ -75,5 +75,33 @@ class TestSenseSpaceV3(unittest.TestCase):
         self.assertLessEqual(max(np.diff(zs)), 150)
 
 
+@unittest.skipUnless(S.SENSE.exists() and (S.MV / "分轨" / "drums.wav").exists(), "没有 感官.json / 分轨")
+class TestSenseSpaceV5(unittest.TestCase):
+    """v5 正面长焦：只有平移 + 推拉；出发都在小节首拍（提前 LEAD 帧）；结尾不推近"""
+
+    def setUp(self):
+        self._saved = (S.STEMS, S.Z_SENSE, S.Z_EXP, S.Z_VOICE, S.FOCAL, dict(S.FOG), dict(S.VER), dict(S.V5))
+        S.set_v5()
+        self.sense = json.loads(S.SENSE.read_text("utf-8"))
+
+    def tearDown(self):
+        S.STEMS, S.Z_SENSE, S.Z_EXP, S.Z_VOICE, S.FOCAL, fog, ver, v5 = self._saved
+        for d, v in ((S.FOG, fog), (S.VER, ver), (S.V5, v5)):
+            d.clear(); d.update(v)
+
+    def test_frontal_bar_moves(self):
+        seg = (38.71, 51.51)
+        T = int(round((seg[1] - seg[0]) * S.FPS))
+        dbs = [S.stem_bands(n, 52.0) for n, _ in S.STEMS]
+        cams, ev, _ = S.camera_v5(seg, T, self.sense, S.search_targets(self.sense, dbs, seg))
+        self.assertTrue(np.all(cams[:, 3:5] == 0))                    # 不环绕、不转向（project 里没有 roll）
+        self.assertTrue(np.all(cams[:, 2] == 0))                      # lookat z 不动：只有 x / y 平移 + dist 推拉
+        dbt = np.asarray(self.sense["events"]["downbeats"], float)
+        for t, k in ev:
+            self.assertLess(float(np.min(np.abs(dbt - (t + seg[0])))), 0.03, k)
+        last = int(round((49.96 - seg[0]) * S.FPS))
+        self.assertGreaterEqual(float(cams[-1, 5]), float(cams[last, 5]) * 0.99)
+
+
 if __name__ == "__main__":
     unittest.main()
