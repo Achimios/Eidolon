@@ -37,6 +37,8 @@ def args():
     ap.add_argument("--sweep", default="46,70", help="扫的起止帧 a,b（之前全是切片，之后全是高模）")
     ap.add_argument("--seam", type=float, default=5.0, help="扫描线的自发光强度")
     ap.add_argument("--cap-glow", type=float, default=2.5, help="切面（生长前沿，PLY 里的 cap 属性）自发光强度")
+    ap.add_argument("--cap-mode", default="fill", choices=["fill", "rim"],
+                    help="fill = 整块切面发光（旧）；rim = 切面内部暗（深色、近黑），只在切面边缘留一圈细的冷白发光")
     ap.add_argument("--duty", type=float, default=0.9, help="占空比：每帧渲完歇 (1/duty − 1)·耗时（👤GPU 别占满，≈ 90%）")
     ap.add_argument("--percent", type=int, default=100, help="分辨率百分比（预览档用 75 / 50；合成时 four_d 会同比例放大）")
     ap.add_argument("--backdrop", default=None, help="背景图（可选）：贴在跟着相机的背景板上；不给 = 纯黑（板仍在场景里，以后换图即可）")
@@ -240,14 +242,34 @@ def plaster_material(name, a, side):
     add = nt.nodes.new("ShaderNodeAddShader")
     nt.links.new(mix.outputs[0], add.inputs[0])
     nt.links.new(emi.outputs[0], add.inputs[1])
-    # 切面（生长前沿）自发光：顶点属性 cap（0..1）× cap_glow，冷白
+    # 切面（生长前沿）：顶点属性 cap（0..1）。fill：× cap_glow 整块冷白发光；rim：只取 4·cap·(1 − cap)（切面与皮肤交界的一圈），
+    # 切面内部用深色材质（不是一块亮的平盘）
     at = nt.nodes.new("ShaderNodeAttribute")
     at.attribute_name = "cap"
     em2 = nt.nodes.new("ShaderNodeEmission")
     em2.inputs[0].default_value = (0.82, 0.90, 1.0, 1)
     mul2 = nt.nodes.new("ShaderNodeMath"); mul2.operation = "MULTIPLY"
     mul2.inputs[1].default_value = a.cap_glow
-    nt.links.new(at.outputs["Fac"], mul2.inputs[0])
+    if a.cap_mode == "rim":
+        inv = nt.nodes.new("ShaderNodeMath"); inv.operation = "SUBTRACT"
+        inv.inputs[0].default_value = 1.0
+        nt.links.new(at.outputs["Fac"], inv.inputs[1])
+        band = nt.nodes.new("ShaderNodeMath"); band.operation = "MULTIPLY"
+        nt.links.new(at.outputs["Fac"], band.inputs[0]); nt.links.new(inv.outputs[0], band.inputs[1])
+        b4 = nt.nodes.new("ShaderNodeMath"); b4.operation = "MULTIPLY"
+        b4.inputs[1].default_value = 4.0
+        nt.links.new(band.outputs[0], b4.inputs[0])
+        nt.links.new(b4.outputs[0], mul2.inputs[0])
+        dark = nt.nodes.new("ShaderNodeBsdfPrincipled")                 # 切面内部：近黑、略有光泽（读得出是一个面，但不亮）
+        dark.inputs["Base Color"].default_value = (0.025, 0.028, 0.032, 1)
+        dark.inputs["Roughness"].default_value = 0.35
+        mcap = nt.nodes.new("ShaderNodeMixShader")
+        nt.links.new(at.outputs["Fac"], mcap.inputs[0])
+        nt.links.new(bs.outputs[0], mcap.inputs[1])
+        nt.links.new(dark.outputs[0], mcap.inputs[2])
+        nt.links.new(mcap.outputs[0], mix.inputs[2])                     # 替换「皮肤」那一路
+    else:
+        nt.links.new(at.outputs["Fac"], mul2.inputs[0])
     nt.links.new(mul2.outputs[0], em2.inputs[1])
     add2 = nt.nodes.new("ShaderNodeAddShader")
     nt.links.new(add.outputs[0], add2.inputs[0])

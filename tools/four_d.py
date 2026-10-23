@@ -2193,19 +2193,24 @@ def compose_blender(frames_dir, track_json, out, contact=None):
 
 
 # ---------- 真四维生长（--grow4，👤2026-10-24）：深度场 + 四维旋转 + w 向扭转 ----------
-def _lowfreq(p, seed=3, amp=0.08):
-    """低频平滑场（3 个随机方向的余弦，波长 ≈ 1.2–2 个身体单位），|∇| ≤ amp·Σ|k| ≈ 0.4 → 不破坏距离下界太多"""
+def _lowfreq(p, seed=3, amp=0.08, freq=3.2):
+    """低频平滑场（3 个随机方向的余弦，空间频率 freq … 1.5 freq rad / 单位），|∇| ≤ amp·1.5 freq → 不破坏距离下界太多"""
     g = torch.Generator(device="cpu").manual_seed(seed)
     out = torch.zeros(p.shape[0], device=DEV)
     for _ in range(3):
         k = torch.randn(3, generator=g)
-        k = (k / k.norm() * (3.2 + 1.6 * torch.rand(1, generator=g))).to(DEV)
+        k = (k / k.norm() * (freq + 0.5 * freq * torch.rand(1, generator=g))).to(DEV)
         ph = float(torch.rand(1, generator=g)) * 2 * math.pi
         out = out + torch.cos(p @ k + ph)
     return amp * out / 3
 
 
-def mesh_grow4(msh, heart=(0.0, 0.17, -0.04), k=0.55, w_end=0.3, amp=0.08, seed=3, prefix="mesh"):
+# 蜷缩模型（_mesh_load 归一化 + 侧向 sym）上手量的几处：(位置, 出生偏移)。偏移越小越早穿进来；手最先
+GROW4_SEEDS = [((0.06, -0.17, 0.58), 0.00), ((0.00, 0.90, 0.28), 0.06), ((0.12, 0.42, 0.52), 0.13),
+               ((0.00, -0.92, 0.24), 0.09), ((0.42, 0.50, -0.08), 0.18), ((0.00, -0.35, -0.50), 0.24)]
+
+
+def mesh_grow4(msh, heart=(0.0, 0.17, -0.04), k=0.55, w_end=0.3, amp=0.08, seed=3, prefix="mesh", seeds=None, freq=3.2):
     """>v<🧊四维切片-真4D生长-4D 物体：身体只存在于 w ≥ W(p) 的那一侧，W(p) = −|p − 心口| + 低频场（四肢 / 头离心口远 → 最浅 → 先穿进来），
     同时随 w 绕 y 扭转（Rot_y(k (w − w_end))，w_end = 结尾的切片位置 → 结尾正好是原样的她）：
         f4(p, w) = max( f3( Rot_y(k (w − w_end)) p ),  W(p) − w )
@@ -2213,14 +2218,21 @@ def mesh_grow4(msh, heart=(0.0, 0.17, -0.04), k=0.55, w_end=0.3, amp=0.08, seed=
     再合拢成一个人。W − w 那一项占上风的地方 = 真切面（生长前沿），cap > 0 → 自发光。
     Lipschitz：|∇W| ≤ 1 + 0.4，扭转 ≤ sqrt(1 + (k r)²) → 球追踪步长用 0.6"""
     hz = torch.tensor(heart, dtype=torch.float32, device=DEV)
+    if seeds:                     # 多中心：W = min_i(|p − s_i| + 偏移_i) + 噪声 → 前沿沿肢体从几处各自推进，不是一个球面
+        S = torch.tensor([s_ for s_, _ in seeds], dtype=torch.float32, device=DEV)
+        O = torch.tensor([o for _, o in seeds], dtype=torch.float32, device=DEV)
+
+    def depth(q):
+        if seeds:
+            return (torch.cdist(q, S) + O[None]).min(1).values + _lowfreq(q, seed, amp, freq)
+        return -(q - hz).norm(dim=1) + _lowfreq(q, seed, amp, freq)
 
     def parts(p):
         x, y, z, w = _cols(p)
         a = k * (w - w_end)
         ca, sa = torch.cos(a), torch.sin(a)
         m = msh(ca * x + sa * z, y, -sa * x + ca * z)
-        W = -(p[:, :3] - hz).norm(dim=1) + _lowfreq(p[:, :3], seed, amp)
-        return m, W - w
+        return m, depth(p[:, :3]) - w
 
     def f(p):
         m, e = parts(p)
@@ -2229,12 +2241,23 @@ def mesh_grow4(msh, heart=(0.0, 0.17, -0.04), k=0.55, w_end=0.3, amp=0.08, seed=
     def cap(p):
         m, e = parts(p)
         return e - m
-    return Obj(f"{prefix}_grow4", "depth field + twist",
-               f"max( f3(Rot_y({k:g} (w - {w_end:g})) p),  W(p) - w ),  W = -|p - heart| + lowfreq({amp:g})   ({msh.label})",
-               f, 1.0, step=0.6, bound=1.6, cam=4.3, vbox=1.2, cap=cap, plane="xw")
+    eqW = f"W = min_i(|p - s_i| + o_i) [{len(seeds)} seeds] + noise({amp:g})" if seeds else f"W = -|p - heart| + lowfreq({amp:g})"
+    ob = Obj(f"{prefix}_grow4", "depth field + twist", f"max( f3(Rot_y({k:g} (w - {w_end:g})) p),  W(p) - w ),  {eqW}   ({msh.label})",
+             f, 1.0, step=0.6, bound=1.6, cam=4.3, vbox=1.2, cap=cap, plane="xw")
+    ob.depth = depth
+    return ob
 
 
-def grow4_track(sp, obj, empty=0.4, grow=4.4, th0=24.0, w_end=0.3, a0=0.25, a1=0.08):
+def grow4_w_end(msh, seeds, amp, freq, seed=3, margin=0.05):
+    """结尾切片位置 = 身体上深度场的最大值 + 余量（c 推到这里身体就全进来了，扭转在这里归零）"""
+    tmp = mesh_grow4(msh, seeds=seeds, amp=amp, freq=freq, seed=seed)
+    ax = torch.linspace(-1.12, 1.12, 96, device=DEV)
+    X = torch.stack(torch.meshgrid(ax, ax, ax, indexing="ij"), -1).reshape(-1, 3)
+    occ = X[msh(X[:, 0], X[:, 1], X[:, 2]) < 0]
+    return float(tmp.depth(occ).max()) + margin
+
+
+def grow4_track(sp, obj, empty=0.4, grow=4.4, th0=24.0, w_end=0.3, a0=0.25, a1=0.08, th_full=False):
     """>v<🧊四维切片-真4D生长-每帧真参数：c 从「碰不到物体」开始，empty 秒后第一块截面出现（数值上找 W 的最小值），
     Hermite 慢起慢收在 grow 秒推到 w_end，之后极慢漂（不过 w_end 太多）；切片在 xw 里的角度 θ 从 th0 慢慢转到 0（同一条 Hermite）。
     相机、roll、身体自转沿用 InsertSpec（yaw_rate / dolly / roll / body_rate）"""
@@ -2267,11 +2290,16 @@ def grow4_track(sp, obj, empty=0.4, grow=4.4, th0=24.0, w_end=0.3, a0=0.25, a1=0
             if t - empty > grow:
                 S, dS = 1.0 + a1 * ((t - empty - grow) / grow), a1
             c, cv = Wmin + (w_end - Wmin) * S, (w_end - Wmin) * dS / grow
-        th = th0 * (1 - min(S, 1.0))
+        if th_full:                                   # θ 一直转到镜头结束（Hermite 慢起慢收），截面全程在拉伸 / 流动
+            Su, _ = hermite01(min(t / sp.dur, 1.0), 0.6, 0.15)
+            th = th0 * (1 - Su)
+        else:
+            th = th0 * (1 - min(S, 1.0))
         dist = obj.cam * sp.cam_scale * (1 - sp.dolly * t)
         k = dict(i=i, t=t, c=c, cv=cv, th=th, v=th0 * 0, yaw=sp.yaw0 + sp.yaw_rate * t, dist=dist)
-        k["hud2"] = (f"p' = R_xw(theta) R_body p    theta = {th:+6.1f} deg (slice turning in the xw-plane, {th0:g} -> 0)"
-                     f"    body spin R_yz {sp.body_rate * t:+.1f} deg ({sp.body_rate:+g} deg/s)")
+        k["hud2"] = (f"p' = R_xw(theta) p    theta = {th:+6.1f} deg (slice turning in the xw-plane, {th0:g} -> 0"
+                     + (", whole shot)" if th_full else ")")
+                     + (f"    body spin R_yz {sp.body_rate * t:+.1f} deg ({sp.body_rate:+g} deg/s)" if sp.body_rate else "    camera roll only"))
         k["hud3"] = (f"slice w' = c = {c:+.3f}   dc/dt = {cv:+.3f}/s   (first contact c = {Wmin:+.3f} at t = {empty:g} s;"
                      f" Hermite to {w_end:g} in {grow:g} s)     t = {t:.3f} / {sp.dur:g} s")
         out.append(k)
@@ -2459,6 +2487,11 @@ def main():
     g.add_argument("--mesh-grid", type=int, default=320, help="--export-mesh 的网格分辨率 N（N³，盒 = 物体的包围半径）")
     g.add_argument("--grow4", action="store_true", help="真四维生长：物体换成 mesh_grow4（深度场 + w 扭转），轨迹换成 grow4_track（先空白再多处冒出、xw 慢转）")
     g.add_argument("--grow4-empty", type=float, default=0.4, help="第一块截面出现前的空白秒数")
+    g.add_argument("--grow4-seeds", action="store_true", help="多中心深度场（GROW4_SEEDS：手、头、膝、脚、肩、臀，各自偏移）代替心口径向场")
+    g.add_argument("--grow4-th0", type=float, default=24.0, help="切片在 xw 平面里的起始角（度）")
+    g.add_argument("--grow4-th-full", action="store_true", help="xw 转角一直转到结尾（不是只在生长期间）")
+    g.add_argument("--grow4-a0", type=float, default=0.25, help="c 推进的起始斜率（大 = 开头推得快，第一块早点看得见）")
+    g.add_argument("--grow4-noise", default="0.08,3.2", help="噪声 '幅度,空间频率'")
     g.add_argument("--duty", type=float, default=1.0, help="导出占空比（< 1：每帧后歇一会儿，GPU 别占满）")
     g.add_argument("--b0-plot", default=None, help="--export-mesh 之后画「连通块数随时间」的图（png 路径）")
     g.add_argument("--export-hires", default=None, help="高模 GLB → 对齐到当前 --mesh 的 SDF → --out 的三角形 PLY（Blender 坐标）")
@@ -2587,9 +2620,13 @@ def main():
                       + ("   (|c| > cmax: slice may be empty)" if abs(k["c"]) > obj.cmax else ""))
             return
         if a.grow4:
-            OBJS["mesh_grow4"] = mesh_grow4(MESH)
+            amp, freq = (float(x) for x in a.grow4_noise.split(","))
+            seeds = GROW4_SEEDS if a.grow4_seeds else None
+            w_end = grow4_w_end(MESH, seeds, amp, freq) if seeds else 0.3
+            OBJS["mesh_grow4"] = mesh_grow4(MESH, seeds=seeds, amp=amp, freq=freq, w_end=w_end)
             a.obj = "mesh_grow4"
-            track, cfirst = grow4_track(sp, OBJS[a.obj], a.grow4_empty)
+            track, cfirst = grow4_track(sp, OBJS[a.obj], a.grow4_empty, th0=a.grow4_th0, w_end=w_end, a0=a.grow4_a0, th_full=a.grow4_th_full)
+            print(f"  grow4: w_end = {w_end:+.3f}")
             print(f"  grow4: first contact c = {cfirst:+.4f} at t = {a.grow4_empty:g} s, {len(track)} frames")
         else:
             track = None
