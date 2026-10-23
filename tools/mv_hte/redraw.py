@@ -95,9 +95,11 @@ class Song:
         if t < 147.4:
             return 0.3 + 0.4 * (t - 133.0) / 14.4
         h = np.mean([self.ch(self.heart, t - k * 0.1) for k in range(8)])
-        base = 0.35 + 0.45 * h
+        base = 0.22 + 0.25 * h                      # 6 → 16 px：画面还读得出，方块只在起音时翻倍
         if 236.0 <= t < 242.24:
-            base = min(1.0, base + (t - 236.0) / 6.24 * 0.5)
+            base = max(base, 0.45 + (t - 236.0) / 6.24 * 0.55)   # 最后一句：冲到满幅
+        if 242.49 <= t < 256.0:                      # E05：从满幅方块里吐出空房间
+            base = max(0.22, 1.0 - (t - 242.49) / 13.5 * 0.78)
         return float(min(1.0, base))
 
     def palette(self, t):
@@ -115,7 +117,9 @@ class Plates:
 
     def get(self, pid):
         if pid not in self.cache:
-            p = GEN / f"{pid}.jpg"
+            # 取最高版本：Pxx_v3.jpg > Pxx_v2.jpg > Pxx.jpg（重出不覆盖，按版本另起名）
+            cands = sorted(GEN.glob(f"{pid}_v*.jpg"), key=lambda q: int(q.stem.rsplit("_v", 1)[1]))
+            p = cands[-1] if cands else GEN / f"{pid}.jpg"
             if not p.exists():
                 p = GEN / "_missing.jpg"
                 if not p.exists():
@@ -278,7 +282,7 @@ class Scene:
 
         # 颗粒
         rng = np.random.default_rng(frame)
-        g = rng.normal(0, 4.5, (H, W, 1))
+        g = rng.normal(0, 3.0, (H, W, 1))
         im = Image.fromarray(np.clip(np.asarray(im).astype(np.float32) + g, 0, 255).astype(np.uint8))
         return im
 
@@ -307,26 +311,35 @@ class Scene:
             if (t % BEAT) < BEAT / 2:
                 d.rectangle([x, y + 4, x + 14, y + 30], fill=(*cream, 200))
         else:
-            # 后半：大字；"alone" 全片最大；"fucking" 只在方块最大的那一帧（起音）出现大字
-            words = [w["w"] for w in ws]
+            # 后半：当前词大字（最多两个词：上一个词退成一半大小），整行小字在底部；
+            # "alone" 全片最大（橙）；"fucking" 只在方块最大时（p > 0.75）才是大字
             last = ws[-1]
             u = (t - last["t0"]) / (BEAT / 8)
             a = int(255 * min(1.0, max(0.0, u)))
-            txt = " ".join(words).upper()
-            size = int(H * 0.11 + H * 0.12 * p)
-            if last["w"].lower().strip(".,!") == "alone":
-                size = int(H * 0.5); txt = "ALONE"
-            elif "fucking" in last["w"].lower():
-                size = int(H * 0.3) if p > 0.75 else int(H * 0.16)
+            cur = last["w"].upper().strip(".,!?")
+            size = int(H * 0.12 + H * 0.14 * p)
+            if cur == "ALONE":
+                size = int(H * 0.5)
+            elif "FUCKING" in cur:
+                size = int(H * 0.3) if p > 0.75 else int(H * 0.10)
             f = self.font(FONT_SERIF_B, size)
-            # 自动换行：超宽就只显示最后几个词
-            while d.textlength(txt, font=f) > W * 0.9 and " " in txt:
-                txt = txt.split(" ", 1)[1]
-            tw = d.textlength(txt, font=f)
-            x = (W - tw) / 2; y = H * 0.5 - size * 0.6
-            col = ORANGE if txt == "ALONE" else cream
-            d.text((x + 3, y + 3), txt, font=f, fill=(0, 0, 0, 160))
-            d.text((x, y), txt, font=f, fill=(*col, a))
+            tw = d.textlength(cur, font=f)
+            # 位置：按词序左右交替（不总在正中），y 随压力微升
+            k = len(ws)
+            x = W * (0.5 + (0.12 if k % 2 else -0.12)) - tw / 2
+            x = min(max(x, W * 0.04), W - tw - W * 0.04)
+            y = H * 0.5 - size * 0.6 - H * 0.08 * p
+            col = ORANGE if cur == "ALONE" else cream
+            d.text((x + 3, y + 3), cur, font=f, fill=(0, 0, 0, 170))
+            d.text((x, y), cur, font=f, fill=(*col, a))
+            if len(ws) >= 2 and cur != "ALONE":
+                prev = ws[-2]["w"].upper().strip(".,!?")
+                f2 = self.font(FONT_SERIF_B, int(size * 0.45))
+                d.text((x - d.textlength(prev, font=f2) - 24, y + size * 0.55), prev, font=f2, fill=(*cream, 120))
+            # 整行小字
+            fs = self.font(FONT_MONO, 26)
+            full = " ".join(w["w"] for w in ws)
+            d.text((W * 0.08, H * 0.88), full, font=fs, fill=(*cream, 150))
 
 
 def contact_sheet(frames, out, cols=4):
@@ -368,7 +381,7 @@ def main():
     n = int(round((a.t1 - a.t0) * a.fps))
     cmd = [ff, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W0}x{H0}", "-r", str(a.fps), "-i", "-",
            "-ss", f"{a.t0:.3f}", "-t", f"{a.t1 - a.t0:.3f}", "-i", str(MUSIC),
-           "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
+           "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-shortest", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     sheet_idx = set(np.linspace(0, n - 1, 12).round().astype(int).tolist()); sheet = []; t_start = time.time()
