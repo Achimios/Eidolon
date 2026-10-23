@@ -280,6 +280,15 @@ class TestMemoryV5(unittest.TestCase):
         self.assertLessEqual(sp[:c].mean(), G.V6["cap1"])
         self.assertGreater(sp[c:].mean(), sp[:c].mean())
 
+    def test_camera_v7(self):
+        """v7：v1 式目标 + 前馈；速度峰值离事件 ≤ 1 帧；锁定后不冲进（变焦不超过锁定时的 1.05 倍）"""
+        T = int(round(self.sch["end"] * G.FPS))
+        cam, zs, ev = G.camera_ff_v7(self.mem, self.sch, self.seg, T)
+        for t, k, d in G.camera_alignment(cam, zs, ev, T, lead=G.V7["lead_frames"]):
+            self.assertIn(d, (-1, 0, 1), (t + self.seg[0], k, d))
+        fl = int(self.sch["hops"][3] * G.FPS)
+        self.assertLess(zs[-1], zs[fl] * 1.05)
+
     def test_ease_shape(self):
         """快起慢收：E(0)=0、E(1)=1、速度单调减（起步那一刻最快）"""
         u = np.linspace(0, 1, 201)
