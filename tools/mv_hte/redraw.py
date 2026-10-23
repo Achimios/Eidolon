@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""">v<🎬HTE-渲染-「代码重绘」引擎（MV_Happier_Than_Ever，2026-10-24，Fable）。
-两层：底层 = Seedream 静帧（生成/Pxx.jpg）；表层 = 代码整个重绘 —— 观众只看到代码层。
-重绘 = 三件事，全部是歌曲时间 t 的纯函数（无状态，噪声按帧号播种）：
-  ① 方块（像素溶解，学 _参考_Short #1：方块尺寸 = 溶解进度，不是透明度）：底图按 s×s 的格子取均值 → 调色板量化
-     （琥珀 / 青两套单色阶，只有橙辫子保留原色 = 唯一饱和色）。s 由「压力」p(t) 决定：前半 s=4 且只有少数格子 1–2 帧闪成 16 px；
-     后半 s 随 p 长大（8 → 64 → 1/4 画幅），长满即硬切。
-  ② 排线 / 等高线：底图亮度的 Sobel 边缘 → 细线（奶白），呼吸（线宽随拍点相位微变）；暗部加 45° 排线，密度 = 暗度。
-  ③ 歌词字形：按 歌词_v4.json 的词时间出现（不吸附拍），入场 ≤ 1/8 拍（81 BPM → 0.093 s），只用 score ≥ 0.5 且不在人声段外的词；
-     前半小字（打字机，画面下 1/5，左对齐，逐词累积成一行）；后半大字（占画高 1/4–1/3）；"alone" 全片最大（画高 1/2）。
-  相机：每镜在底图上的裁切窗（缩放 + 平移 + 视差：若有 layer PNG 则前后层位移不同），镜内永远在动。
-  分镜 = Synapsis 时间轴（node cli.js timeline --json），镜头节点的 src=plate:Pxx|裁法。
-用法：
-  python tools/mv_hte/redraw.py still --t 12.0 --out x.jpg
-  python tools/mv_hte/redraw.py clip --t0 4.195 --t1 50 --out 样片/01_压着_0-50_v1.mp4
-  python tools/mv_hte/redraw.py clip --t0 220 --t1 250 --out 样片/02_爆发_220-250_v1.mp4
+""">v<🎬HTE-渲染-「代码重绘」引擎 v2（MV_Happier_Than_Ever，2026-10-24，Fable；ReadScreen 第 1 轮后重做）。
+v1 的问题：代码层看不见（= AI 插画 + 滤镜，Ken Burns）；每个词都放大 = 模板；小字太淡。
+v2（观众只看代码层，底图只透 ~30%）：
+  ① 刻版排线（scratchboard）：黑底上用亮线画亮部 —— 四档线密度 = 亮度（交叉密 / 45° / 疏 / 零星）+ 边缘线；线相位随拍慢漂（呼吸）。
+  ② 真压缩：她身上的区域做 8×8 DCT，只保留前 k 个系数（JPEG 的机理）。前半 k = 2（一张被压缩的脸）；每个歌词词落下的瞬间 k → 64
+     （局部解压 0.5 s 再压回）；后半 k = 64 常驻；最后一句（236 s 起）换成方块越长越大吃掉画面。「礼貌是压缩，真话是解压」直接上画面。
+  ③ 2.5D 视差：Seedream layer_decomposition 的图层（背景 / 她 / 前景）按 z 做不同位移，背景放大补缝；没有图层的底图退回裁切窗。
+  ④ 字：全片同一种打字机字（Courier）。前半逐字打出（字符在词的真实时长里依次出现）、色带压痕、偶尔打错退格；
+     后半同样的小字在底部打，只有每行**一个**承载意义的词（KEY_WORDS，按语义手选）放大 —— 同一封信、同一种字，只是尺寸解压了；"ALONE" 最大、橙色。
+  一切都是 t 的纯函数；噪声按帧号播种。
+用法同 v1：still / sheet / clip --t0 --t1 --out
 """
 import argparse
 import json
@@ -24,7 +20,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[2]
 PROJ = ROOT.parents[1] / "Projekt_Visual"
@@ -34,25 +30,53 @@ MUSIC = MV / "音乐_HTE_2883-3178.wav"
 CLI = "C:/Users/Administrator/Desktop/Obsidian_V_Synapsis/core/cli.js"
 
 W0, H0 = 1920, 1080
-FONT_SERIF = "C:/Windows/Fonts/georgia.ttf"
-FONT_SERIF_B = "C:/Windows/Fonts/georgiab.ttf"
 FONT_MONO = "C:/Windows/Fonts/cour.ttf"
 FONT_MONO_B = "C:/Windows/Fonts/courbd.ttf"
 
-# 调色板：单色阶（黑 → 中 → 亮），橙保留
 PAL = {
-    "A": [(14, 11, 9), (92, 62, 34), (190, 140, 82), (240, 222, 190)],      # 琥珀
-    "G": [(12, 12, 12), (70, 70, 68), (150, 148, 142), (226, 224, 218)],    # 灰（过门）
-    "B": [(6, 12, 14), (18, 62, 70), (62, 140, 150), (200, 230, 232)],      # 深青
+    "A": [(12, 9, 7), (96, 64, 34), (196, 146, 86), (244, 226, 196)],      # 琥珀
+    "G": [(10, 10, 10), (72, 72, 70), (156, 154, 148), (228, 226, 220)],    # 灰
+    "B": [(5, 11, 13), (20, 66, 74), (70, 150, 160), (206, 234, 236)],      # 深青
 }
-ORANGE = (255, 120, 20)
+ORANGE = (255, 122, 24)
 BEAT = 60 / 81.2
+# 每行一个承载意义的词（后半才放大；前半全是小字）
+KEY_WORDS = {25: "again", 26: "influence", 27: "death", 28: "friends", 29: "relate", 30: "relate", 31: "shitty", 32: "hate",
+             33: "internet", 34: "anything", 35: "everything", 36: "sad", 37: "waste", 38: "bad", 39: "time", 40: "empty",
+             41: "mother", 42: "kid", 43: "ruined", 44: "misunderstood", 45: "moments", 46: "alone"}
 
 
 def ease2(u, a=0.6, t1=3 / 24, t2=9 / 24):
     if u <= 0:
         return 0.0
     return a * (1 - math.exp(-u / t1)) + (1 - a) * (1 - math.exp(-u / t2))
+
+
+# ---------------------------------------------------------------- DCT（8×8，JPEG 机理）
+def dct_matrix(n=8):
+    D = np.zeros((n, n), np.float32)
+    for k in range(n):
+        for i in range(n):
+            D[k, i] = math.sqrt((1 if k == 0 else 2) / n) * math.cos(math.pi * (2 * i + 1) * k / (2 * n))
+    return D
+
+
+DCT = dct_matrix()
+ZIG = np.array([0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28,
+                35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63])
+
+
+def jpeg_keep(img, k):
+    """每个 8×8 块只保留 zigzag 前 k 个 DCT 系数（k=64 = 无损）。img (H,W)，H、W 为 8 的倍数。"""
+    if k >= 64:
+        return img
+    H, W = img.shape
+    b = img.reshape(H // 8, 8, W // 8, 8).transpose(0, 2, 1, 3)        # (bh, bw, 8, 8)
+    coef = DCT @ b @ DCT.T
+    mask = np.zeros(64, np.float32); mask[ZIG[:k]] = 1
+    coef = coef * mask.reshape(8, 8)
+    rec = DCT.T @ coef @ DCT
+    return rec.transpose(0, 2, 1, 3).reshape(H, W)
 
 
 # ---------------------------------------------------------------- 数据
@@ -65,17 +89,15 @@ class Song:
         self.fps = sense["fps"]
         self.beats = np.array(sense["events"]["beats"])[::2]
         ch = sense["channels"]
-        self.heart = np.array(ch["heartbeat"]); self.threat = np.array(ch["threat"]); self.tension = np.array(ch["tension"])
+        self.heart = np.array(ch["heartbeat"]); self.threat = np.array(ch["threat"])
         self.onsets = np.array(sense["events"]["onsets"])
-        # 分镜
         tl = json.loads(subprocess.run(["node", CLI, "timeline", "--json", "--ws", str(MV)], capture_output=True, text=True, encoding="utf-8").stdout)
         self.shots = []
         for pg in tl:
             if pg["page"] == "剪辑":
                 continue
             items = json.loads(subprocess.run(["node", CLI, "timeline", pg["page"], "--json", "--ws", str(MV)], capture_output=True, text=True, encoding="utf-8").stdout)["items"]
-            for it in items:
-                self.shots.append(it)
+            self.shots += items
         self.shots.sort(key=lambda s: s["t0"])
 
     def ch(self, arr, t):
@@ -88,19 +110,32 @@ class Song:
                 return s
         return None
 
+    def line_index(self, t):
+        for i, L in enumerate(self.lines):
+            if L["t0"] - 0.1 <= t <= L["t1"] + 1.2:
+                return i + 1, L
+        return None, None
+
     def pressure(self, t):
-        """压力 p(t) 0~1：方块尺寸的来源。前半 ≈ 0.05–0.15（只闪）；过门 0.3 → 0.6；后半 = 0.4 + 0.6·heartbeat 平滑；最后一句到 1。"""
-        if t < 133.0:
-            return 0.06 + 0.08 * self.ch(self.threat, t)
-        if t < 147.4:
-            return 0.3 + 0.4 * (t - 133.0) / 14.4
-        h = np.mean([self.ch(self.heart, t - k * 0.1) for k in range(8)])
-        base = 0.22 + 0.25 * h                      # 6 → 16 px：画面还读得出，方块只在起音时翻倍
+        """最后一句 / 余韵的方块压力（0 = 不用方块）"""
         if 236.0 <= t < 242.24:
-            base = max(base, 0.45 + (t - 236.0) / 6.24 * 0.55)   # 最后一句：冲到满幅
-        if 242.49 <= t < 256.0:                      # E05：从满幅方块里吐出空房间
-            base = max(0.22, 1.0 - (t - 242.49) / 13.5 * 0.78)
-        return float(min(1.0, base))
+            return 0.45 + (t - 236.0) / 6.24 * 0.55
+        if 242.49 <= t < 256.0:
+            return max(0.0, 1.0 - (t - 242.49) / 13.5)
+        return 0.0
+
+    def keep_k(self, t):
+        """DCT 保留系数数 k(t)：前半 2，词落下瞬间解压；过门 2 → 64；后半 64"""
+        if t >= 147.4:
+            return 64
+        if t >= 133.0:
+            return int(2 + 62 * (t - 133.0) / 14.4)
+        k = 2
+        for w in self.words:
+            if 0 <= t - w["t0"] < 0.5:
+                u = t - w["t0"]
+                k = max(k, int(2 + 62 * (1 - u / 0.5) ** 2))
+        return k
 
     def palette(self, t):
         if t < 124.0:
@@ -110,27 +145,53 @@ class Song:
         return "B"
 
 
-# ---------------------------------------------------------------- 底图
 class Plates:
     def __init__(self):
         self.cache = {}
 
+    def path(self, pid):
+        cands = sorted(GEN.glob(f"{pid}_v*.jpg"), key=lambda q: int(q.stem.rsplit("_v", 1)[1]))
+        return cands[-1] if cands else GEN / f"{pid}.jpg"
+
     def get(self, pid):
-        if pid not in self.cache:
-            # 取最高版本：Pxx_v3.jpg > Pxx_v2.jpg > Pxx.jpg（重出不覆盖，按版本另起名）
-            cands = sorted(GEN.glob(f"{pid}_v*.jpg"), key=lambda q: int(q.stem.rsplit("_v", 1)[1]))
-            p = cands[-1] if cands else GEN / f"{pid}.jpg"
-            if not p.exists():
-                p = GEN / "_missing.jpg"
-                if not p.exists():
-                    Image.new("RGB", (2048, 1152), (40, 40, 40)).save(p)
-            im = Image.open(p).convert("RGB")
-            self.cache[pid] = np.asarray(im).astype(np.float32) / 255
+        """→ {'base': (H,W,3) float, 'layers': [(rgba, z, name)] 按 z 升序, 'person': 索引或 None}"""
+        if pid in self.cache:
+            return self.cache[pid]
+        p = self.path(pid)
+        if not p.exists():
+            base = np.full((1152, 2048, 3), 0.15, np.float32)
+            self.cache[pid] = {"base": base, "layers": [], "person": None}; return self.cache[pid]
+        base = np.asarray(Image.open(p).convert("RGB")).astype(np.float32) / 255
+        layers = []; person = None
+        side = p.with_name(p.stem + "_layers.png.json")
+        if side.exists():
+            meta = json.loads(side.read_text("utf-8"))
+            Hb, Wb = base.shape[:2]
+            for L in meta.get("layers", []):
+                lp = p.with_name(L["file"])
+                if not lp.exists():
+                    continue
+                # 图层 PNG 是按包围盒裁过、再放大的：缩回包围盒大小，贴到整幅透明画布上
+                x0, y0, x1, y1 = L["bounding_box"]["absolute"]
+                im = Image.open(lp).convert("RGBA").resize((max(1, x1 - x0), max(1, y1 - y0)), Image.BILINEAR)
+                canvas = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0)); canvas.paste(im, (x0, y0))
+                arr = np.asarray(canvas).astype(np.float32) / 255
+                layers.append((arr, L.get("z_index", 0), (L.get("name") or "") + " " + (L.get("description") or "")))
+            layers.sort(key=lambda x: x[1])
+            # 最远层 = 整幅底图（含她）+ 背景层盖上去（背景层是补好的、只覆盖它的包围盒）
+            if layers:
+                bg = layers[0][0]
+                full = np.concatenate([base, np.ones(base.shape[:2] + (1,), np.float32)], -1)
+                full[..., :3] = full[..., :3] * (1 - bg[..., 3:4]) + bg[..., :3] * bg[..., 3:4]
+                layers[0] = (full, layers[0][1], layers[0][2])
+            for i, (_, _, nm) in enumerate(layers):
+                if any(w in nm.lower() for w in ("person", "woman", "girl", "character", "figure", "she ")):
+                    person = i; break
+        self.cache[pid] = {"base": base, "layers": layers, "person": person}
         return self.cache[pid]
 
 
 def parse_src(src):
-    """'plate:P01|裁法' → ('P01', 裁法)；多张时取第一张（快切镜头由 t 选）"""
     if not src or not src.startswith("plate:"):
         return None, ""
     body = src[6:]
@@ -138,51 +199,13 @@ def parse_src(src):
     return pid.split(" "), how
 
 
-# ---------------------------------------------------------------- 重绘
-def quantize(img, pal, levels=None):
-    """单色阶量化：亮度 → 4 级调色板插值（连续，不是硬阶）；橙辫子保留"""
-    lum = img[..., 0] * 0.3 + img[..., 1] * 0.59 + img[..., 2] * 0.11
-    p = np.array(pal, np.float32) / 255
-    # 5 级硬阶（海报化）+ 轻微抖动（按亮度的小数部分做有序抖动，像版画）
-    x = np.clip(lum, 0, 1) * 3
-    i = np.clip(np.floor(x).astype(int), 0, 2); f = (x - i)
-    H_, W_ = lum.shape
-    yy, xx = np.mgrid[0:H_, 0:W_]
-    bayer = ((xx % 2) * 2 + (yy % 2)) / 4.0 + 0.125
-    step = (f > bayer).astype(int)
-    i2 = np.clip(i + step, 0, 3)
-    out = p[i2]
-    # 橙：色相在橙区且饱和
-    r, g, b = img[..., 0], img[..., 1], img[..., 2]
-    mx = img.max(-1); mn = img.min(-1); sat = (mx - mn) / (mx + 1e-6)
-    orange = (r > g * 1.25) & (g > b * 1.3) & (sat > 0.45) & (mx > 0.35)
-    out[orange] = img[orange] * np.array([1.0, 0.92, 0.6])
-    return out, lum
-
-
-def blocks(img, s):
-    """s×s 均值方块（s 像素）"""
-    if s <= 1:
-        return img
-    H, W = img.shape[:2]
-    h2, w2 = H // s, W // s
-    small = img[:h2 * s, :w2 * s].reshape(h2, s, w2, s, 3).mean((1, 3))
-    big = np.repeat(np.repeat(small, s, 0), s, 1)
-    return np.pad(big, ((0, H - big.shape[0]), (0, W - big.shape[1]), (0, 0)), mode="edge")
-
-
-def edges(lum):
-    gx = np.zeros_like(lum); gy = np.zeros_like(lum)
-    gx[:, 1:-1] = lum[:, 2:] - lum[:, :-2]
-    gy[1:-1, :] = lum[2:, :] - lum[:-2, :]
-    return np.sqrt(gx * gx + gy * gy)
-
-
+# ---------------------------------------------------------------- 场景
 class Scene:
     def __init__(self, song: Song, w=W0, h=H0):
         self.s = song; self.W, self.H = w, h
-        self.plates = Plates()
-        self.fonts = {}
+        self.plates = Plates(); self.fonts = {}
+        yy, xx = np.mgrid[0:h, 0:w]
+        self.xx, self.yy = xx, yy
 
     def font(self, path, size):
         k = (path, size)
@@ -190,156 +213,180 @@ class Scene:
             self.fonts[k] = ImageFont.truetype(path, max(6, int(size)))
         return self.fonts[k]
 
-    def camera_crop(self, img, t, shot):
-        """镜内缓慢缩放 + 平移（裁切窗），返回 (H, W, 3) 的帧大小底图"""
-        H, W = img.shape[:2]
+    # 相机参数（镜内永远在动）：缩放 z、平移 (px, py) ∈ 0..1
+    def cam(self, t, shot):
         u = (t - shot["t0"]) / max(shot["t1"] - shot["t0"], 1e-6)
         seed = abs(hash(shot["id"])) % 1000
-        z0 = 1.06 + 0.04 * ((seed % 3) / 2)
-        z1 = z0 + (0.06 if seed % 2 == 0 else -0.05)
+        z0 = 1.08 + 0.04 * ((seed % 3) / 2); z1 = z0 + (0.07 if seed % 2 == 0 else -0.06)
         z = z0 + (z1 - z0) * u
-        cw, ch_ = W / z, H / z
-        px = 0.5 + 0.08 * math.sin(2 * math.pi * (t / 37.0 + seed / 7)) + (0.06 if seed % 2 else -0.06) * u
-        py = 0.5 + 0.05 * math.cos(2 * math.pi * (t / 23.0 + seed / 5))
-        x0 = int(min(max(px * W - cw / 2, 0), W - cw)); y0 = int(min(max(py * H - ch_ / 2, 0), H - ch_))
-        crop = img[y0:y0 + int(ch_), x0:x0 + int(cw)]
-        im = Image.fromarray((crop * 255).astype(np.uint8)).resize((self.W, self.H), Image.BILINEAR)
+        px = 0.5 + 0.07 * math.sin(2 * math.pi * (t / 37.0 + seed / 7)) + (0.07 if seed % 2 else -0.07) * u
+        py = 0.5 + 0.04 * math.cos(2 * math.pi * (t / 23.0 + seed / 5))
+        return z, px, py
+
+    def crop(self, img, z, px, py, extra=1.0):
+        H, W = img.shape[:2]
+        cw, ch_ = W / (z * extra), H / (z * extra)
+        x0 = min(max(px * W - cw / 2, 0), W - cw); y0 = min(max(py * H - ch_ / 2, 0), H - ch_)
+        mode = "RGBA" if img.shape[2] == 4 else "RGB"
+        im = Image.fromarray((np.clip(img, 0, 1) * 255).astype(np.uint8), mode).crop((int(x0), int(y0), int(x0 + cw), int(y0 + ch_))).resize((self.W, self.H), Image.BILINEAR)
         return np.asarray(im).astype(np.float32) / 255
 
+    def compose(self, pl, t, shot):
+        """底图 + 视差 → 帧大小的 RGB 和「她」的遮罩（0~1）"""
+        z, px, py = self.cam(t, shot)
+        ell = np.exp(-(((self.xx - self.W * 0.55) / (self.W * 0.22)) ** 2 + ((self.yy - self.H * 0.5) / (self.H * 0.4)) ** 2)).astype(np.float32)
+        if not pl["layers"]:
+            return self.crop(pl["base"], z, px, py), ell
+        zs = [L[1] for L in pl["layers"]]
+        zmin, zmax = min(zs), max(zs)
+        out = None; mask = None
+        for i, (arr, zi, _) in enumerate(pl["layers"]):
+            depth = 0.0 if zmax == zmin else (zi - zmin) / (zmax - zmin)        # 0 = 最远
+            shift = (depth - 0.35) * 0.05                                         # 视差：远层随镜头平移少、近层多
+            dx = shift * (px - 0.5) * 2 + shift * 0.3
+            rgba = self.crop(arr, z, px + dx, py + shift * 0.2, extra=(0.93 if i == 0 else 1.0))   # 背景多放大补缝
+            rgb, a = rgba[..., :3], rgba[..., 3]
+            if i == 0:
+                out = rgb; continue
+            out = out * (1 - a[..., None]) + rgb * a[..., None]
+            if pl["person"] is not None and i == pl["person"]:
+                mask = a
+        return out, (mask if mask is not None else ell)
+
+    # 刻版排线：黑底亮线，密度 = 亮度
+    def scratch(self, lum, t):
+        ph = (t % (BEAT * 4)) / (BEAT * 4)
+        sh = int(ph * 12)                                   # 线相位慢漂（4 拍一周期）
+        xx, yy = self.xx, self.yy
+        d1 = (xx + yy + sh); d2 = (xx - yy + sh)
+        ink = np.zeros_like(lum)
+        for thr, sp, dd, gain in ((0.18, 11, d1, 0.55), (0.34, 7, d1, 0.7), (0.52, 4, d1, 0.85), (0.72, 4, d2, 0.9)):
+            band = np.clip((lum - thr) / 0.12, 0, 1)
+            ink = np.maximum(ink, ((dd % sp) == 0).astype(np.float32) * band * gain)
+        gx = np.zeros_like(lum); gy = np.zeros_like(lum)
+        gx[:, 1:-1] = lum[:, 2:] - lum[:, :-2]; gy[1:-1, :] = lum[2:, :] - lum[:-2, :]
+        e = np.sqrt(gx * gx + gy * gy)
+        return np.maximum(ink, np.clip((e - 0.10) / 0.10, 0, 1))
+
     def draw(self, t):
-        s = self.s
-        W, H = self.W, self.H
+        s = self.s; W, H = self.W, self.H
         shot = s.shot(t)
         pal_key = s.palette(t); pal = PAL[pal_key]
-        p = s.pressure(t)
+        ground = np.array(pal[0], np.float32) / 255
         if shot is None or shot["label"].startswith("E04"):
             return Image.new("RGB", (W, H), tuple(pal[0]))
         pids, how = parse_src(shot.get("src") or "")
-        if pids is None:
-            pids = ["P01"]
-        # 快切镜头：按拍选底图
-        if len(pids) > 1:
-            k = int((t - shot["t0"]) / BEAT) % len(pids)
-            pid = pids[k]
-        else:
-            pid = pids[0]
-        base = self.plates.get(pid)
-        img = self.camera_crop(base, t, shot)
-        # 入场：从黑长出（E01 / 从黑帧回来）
+        pids = pids or ["P01"]
+        pid = pids[int((t - shot["t0"]) / BEAT) % len(pids)] if len(pids) > 1 else pids[0]
+        pl = self.plates.get(pid)
+        img, mask = self.compose(pl, t, shot)
         fade = 1.0
         if shot["label"].startswith("E01"):
             fade = ease2(t - shot["t0"], t1=0.6, t2=1.8)
         elif shot["label"].startswith("E05"):
             fade = ease2(t - shot["t0"], t1=0.4, t2=1.2)
-        q, lum = quantize(img, pal)
 
-        # ① 方块：尺寸 = 压力
-        if p < 0.2:
-            sz = 6
+        lum = img[..., 0] * 0.3 + img[..., 1] * 0.59 + img[..., 2] * 0.11
+        # ② 压缩：她身上的区域 DCT 只留 k 个系数
+        k = s.keep_k(t)
+        if k < 64:
+            comp = jpeg_keep(lum, k)
+            m = np.clip(mask, 0, 1)
+            lum = lum * (1 - m) + comp * m
+        # 最后一句：方块越长越大（整幅）
+        p = s.pressure(t)
+        if p > 0:
+            sz = int(min(270, 8 * 2 ** (p * 5)))
+            if np.any(np.abs(s.onsets - t) < 0.05):
+                sz = min(270, sz * 2)
+            h2, w2 = H // sz, W // sz
+            small = lum[:h2 * sz, :w2 * sz].reshape(h2, sz, w2, sz).mean((1, 3))
+            big = np.repeat(np.repeat(small, sz, 0), sz, 1)
+            lum = np.pad(big, ((0, H - big.shape[0]), (0, W - big.shape[1])), mode="edge")
+
+        # ① 刻版：黑底 + 底图透 30%（海报化）+ 亮线；方块阶段只有块
+        if p > 0.0:
+            ink = np.zeros_like(lum); under = 0.9
         else:
-            sz = int(4 * 2 ** ((p - 0.2) / 0.8 * 6))     # 0.2 → 4px, 1.0 → 256px
-            sz = min(sz, 270)
-        bl = blocks(q, sz)
-        # 前半：少数格子 1–2 帧闪成 16 px（信号 = 起音）
-        frame = int(t * 24)
-        near_onset = np.any(np.abs(s.onsets - t) < 0.05)
-        if p < 0.2 and near_onset:
-            rng = np.random.default_rng(frame // 2)
-            big = blocks(q, 24)
-            n = 3 + int(12 * s.ch(s.threat, t))
-            ys = rng.integers(0, H // 24, n); xs = rng.integers(0, W // 24, n)
-            for y, x in zip(ys, xs):
-                bl[y * 24:(y + 1) * 24, x * 24:(x + 1) * 24] = big[y * 24:(y + 1) * 24, x * 24:(x + 1) * 24]
-        # 后半：方块按起音「长一级又缩回」
-        if p >= 0.2 and near_onset:
-            bl = blocks(q, min(270, sz * 2))
-        out = bl.copy()
-
-        # ② 边缘线 + 暗部排线（只在方块 ≤ 16 px 时画；方块大了就只剩方块）
-        if sz <= 16:
-            e = edges(lum)
-            ph = (t % BEAT) / BEAT
-            thr = 0.18 + 0.04 * math.sin(2 * math.pi * ph)
-            line = np.clip((e - thr) / 0.10, 0, 1)[..., None]
-            cream = np.array(pal[3], np.float32) / 255
-            out = out * (1 - 0.95 * line) + cream * 0.95 * line
-            # 排线：两组 —— 暗部密（间隔 5）、中间调疏（间隔 10），45°，随拍呼吸
-            yy, xx = np.mgrid[0:H, 0:W]
-            sh_ = int(ph * 5)
-            h1 = (((xx + yy) + sh_) % 5 == 0).astype(np.float32)
-            h2 = (((xx + yy) + sh_) % 10 == 0).astype(np.float32)
-            dark = np.clip((0.28 - lum) / 0.28, 0, 1)
-            mid = np.clip(1 - np.abs(lum - 0.42) / 0.18, 0, 1)
-            hm = (h1 * dark * 0.6 + h2 * mid * 0.45)[..., None]
-            out = out * (1 - hm) + (np.array(pal[1], np.float32) / 255) * hm
-
+            ink = self.scratch(lum, t); under = 0.30
+        lv = np.clip(lum * 3, 0, 3); i = np.clip(np.floor(lv).astype(int), 0, 2); f = (lv - i)[..., None]
+        P_ = np.array(pal, np.float32) / 255
+        poster = P_[i] * (1 - f) + P_[i + 1] * f
+        out = ground * (1 - under) + poster * under
+        ink_col = np.array(pal[3], np.float32) / 255
+        out = out * (1 - ink[..., None] * 0.92) + ink_col * ink[..., None] * 0.92
+        # 橙辫子：唯一的饱和色
+        r, g, b = img[..., 0], img[..., 1], img[..., 2]
+        mx = img.max(-1); sat = (mx - img.min(-1)) / (mx + 1e-6)
+        orange = ((r > g * 1.55) & (g > b * 1.9) & (sat > 0.62) & (mx > 0.45)).astype(np.float32)[..., None]   # 只认信号橙，不认暖光皮肤
+        out = out * (1 - orange) + img * np.array([1.0, 0.9, 0.55]) * orange
         out = np.clip(out * fade, 0, 1)
         im = Image.fromarray((out * 255).astype(np.uint8))
         d = ImageDraw.Draw(im, "RGBA")
+        self.lyrics(d, t, pal)
+        rng = np.random.default_rng(int(t * 24))
+        g_ = rng.normal(0, 2.5, (H, W, 1))
+        return Image.fromarray(np.clip(np.asarray(im).astype(np.float32) + g_, 0, 255).astype(np.uint8))
 
-        # ③ 歌词
-        self.lyrics(d, t, pal_key, pal, p)
+    # 打字机：字符在词的真实时长里依次出现；色带压痕；偶尔打错退格
+    def typed(self, d, x, y, w, t, font, col, alpha, seed):
+        txt = w["w"]; n = len(txt)
+        dur = max(w["t1"] - w["t0"], 0.12)
+        typo = (seed % 6 == 0) and n > 3
+        shown = ""
+        for i, ch_ in enumerate(txt):
+            tc = w["t0"] + dur * i / n * 0.8
+            if t < tc:
+                break
+            c = ch_
+            if typo and i == 1 and t - tc < 0.18 and ch_.isalpha():
+                c = chr(((ord(ch_.lower()) - 97 + 1) % 26) + 97)
+            shown += c
+        rng = np.random.default_rng(seed)
+        cx = x
+        for c in shown:
+            a = int(alpha * (0.75 + 0.25 * rng.random()))
+            dx, dy = rng.uniform(-0.6, 0.6), rng.uniform(-0.8, 0.8)
+            d.text((cx + dx, y + dy), c, font=font, fill=(*col, a))
+            d.text((cx + dx + 0.7, y + dy + 0.5), c, font=font, fill=(*col, int(a * 0.35)))
+            cx += d.textlength(c, font=font)
+        return x + d.textlength(txt, font=font)
 
-        # 颗粒
-        rng = np.random.default_rng(frame)
-        g = rng.normal(0, 3.0, (H, W, 1))
-        im = Image.fromarray(np.clip(np.asarray(im).astype(np.float32) + g, 0, 255).astype(np.uint8))
-        return im
-
-    def lyrics(self, d, t, pal_key, pal, p):
-        s = self.s
-        W, H = self.W, self.H
+    def lyrics(self, d, t, pal):
+        s = self.s; W, H = self.W, self.H
         cream = tuple(pal[3])
-        # 当前行
-        line = next((L for L in s.lines if L["t0"] - 0.1 <= t <= L["t1"] + 1.2), None)
+        li, line = s.line_index(t)
         if line is None:
             return
         ws = [w for w in s.words if line["t0"] - 0.05 <= w["t0"] <= line["t1"] + 0.05 and w["t0"] <= t]
         if not ws:
             return
-        big = t >= 147.4
-        if not big:
-            # 前半：打字机小字，画面下 1/5，左对齐，逐词累积
-            f = self.font(FONT_MONO, 30)
-            x = int(W * 0.08); y = int(H * 0.84)
-            for w in ws:
-                u = (t - w["t0"]) / (BEAT / 8)
+        f = self.font(FONT_MONO, 38)
+        x = W * 0.08; y = H * 0.83
+        for w in ws:
+            x = self.typed(d, x, y, w, t, f, cream, 235, abs(hash(w["w"] + str(w["t0"]))) % 1000)
+            x += d.textlength(" ", font=f)
+        if (t % BEAT) < BEAT / 2:
+            d.rectangle([x, y + 6, x + 16, y + 36], fill=(*cream, 190))
+        if t >= 147.4 and li in KEY_WORDS:
+            key = KEY_WORDS[li]
+            kw = next((w for w in ws if w["w"].lower().strip(".,!?'") == key), None)
+            if kw is not None:
+                u = (t - kw["t0"]) / (BEAT / 8)
                 a = int(255 * min(1.0, max(0.0, u)))
-                d.text((x, y), w["w"], font=f, fill=(*cream, a))
-                x += d.textlength(w["w"] + " ", font=f)
-            # 光标：拍点闪
-            if (t % BEAT) < BEAT / 2:
-                d.rectangle([x, y + 4, x + 14, y + 30], fill=(*cream, 200))
-        else:
-            # 后半：当前词大字（最多两个词：上一个词退成一半大小），整行小字在底部；
-            # "alone" 全片最大（橙）；"fucking" 只在方块最大时（p > 0.75）才是大字
-            last = ws[-1]
-            u = (t - last["t0"]) / (BEAT / 8)
-            a = int(255 * min(1.0, max(0.0, u)))
-            cur = last["w"].upper().strip(".,!?")
-            size = int(H * 0.12 + H * 0.14 * p)
-            if cur == "ALONE":
-                size = int(H * 0.5)
-            elif "FUCKING" in cur:
-                size = int(H * 0.3) if p > 0.75 else int(H * 0.10)
-            f = self.font(FONT_SERIF_B, size)
-            tw = d.textlength(cur, font=f)
-            # 位置：按词序左右交替（不总在正中），y 随压力微升
-            k = len(ws)
-            x = W * (0.5 + (0.12 if k % 2 else -0.12)) - tw / 2
-            x = min(max(x, W * 0.04), W - tw - W * 0.04)
-            y = H * 0.5 - size * 0.6 - H * 0.08 * p
-            col = ORANGE if cur == "ALONE" else cream
-            d.text((x + 3, y + 3), cur, font=f, fill=(0, 0, 0, 170))
-            d.text((x, y), cur, font=f, fill=(*col, a))
-            if len(ws) >= 2 and cur != "ALONE":
-                prev = ws[-2]["w"].upper().strip(".,!?")
-                f2 = self.font(FONT_SERIF_B, int(size * 0.45))
-                d.text((x - d.textlength(prev, font=f2) - 24, y + size * 0.55), prev, font=f2, fill=(*cream, 120))
-            # 整行小字
-            fs = self.font(FONT_MONO, 26)
-            full = " ".join(w["w"] for w in ws)
-            d.text((W * 0.08, H * 0.88), full, font=fs, fill=(*cream, 150))
+                big = key == "alone"
+                size = int(H * 0.5) if big else int(H * 0.22)
+                fb = self.font(FONT_MONO_B, size)
+                txt = key.upper(); tw = d.textlength(txt, font=fb)
+                xk = min(max(W * (0.5 + (0.1 if li % 2 else -0.1)) - tw / 2, W * 0.04), W - tw - W * 0.04)
+                yk = H * 0.42 - size * 0.55
+                col = ORANGE if big else cream
+                d.text((xk + 4, yk + 4), txt, font=fb, fill=(0, 0, 0, 170))
+                d.text((xk, yk), txt, font=fb, fill=(*col, a))
+            fk = next((w for w in ws if "fucking" in w["w"].lower()), None)
+            if fk is not None and s.pressure(t) > 0.75 and t - fk["t0"] < 0.6:
+                fb = self.font(FONT_MONO_B, int(H * 0.3))
+                d.text((W * 0.08, H * 0.1), "FUCKING", font=fb, fill=(*cream, 230))
 
 
 def contact_sheet(frames, out, cols=4):

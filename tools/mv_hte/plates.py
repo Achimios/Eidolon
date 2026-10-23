@@ -67,7 +67,7 @@ PLATES = {
  "P33": ("B", "SCENE: an empty chair beside a kitchen table at night, cold light, no person, teal.", "L39"),
  "P35": ("B", "SCENE: three empty chairs in a row against a bare wall, cold light, no person, teal.", "L41"),
  "P36": ("B", "SCENE: ultra-wide shot of a huge empty dark room, she is tiny in the far corner sitting on the floor, one cold light, teal.", "L42"),
- "P37": ("B", "SCENE: a wall covered edge to edge with cut-out stylized magazine faces, cold light, teal, no person.", "L44 L45"),
+ "P37": ("B", "SCENE: a wall covered edge to edge with magazine pages whose faces have been cut out, leaving empty face-shaped holes showing the dark wall behind; no faces visible anywhere, no person, cold light, teal.", "L44 L45"),
  "P38": ("B", "SCENE: an empty room at night, bare floor, one window with cold light, no person, teal.", "E05 E06"),
  "P39": ("B", "SCENE: close-up of a single orange braid lying on a bare floor, cold teal light, nothing else.", "E07 E08"),
 }
@@ -110,7 +110,7 @@ def prompt_for(pid):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["list", "gen", "assign"])
+    ap.add_argument("mode", choices=["list", "gen", "assign", "layers"])
     ap.add_argument("--ids", default=None)
     ap.add_argument("--refs", default=None, help="参考图（逗号分隔），用于角色一致性")
     ap.add_argument("--suffix", default="")
@@ -140,6 +140,22 @@ def main():
         r = subprocess.run(["node", CLI, "batch", str(tmp), "--ws", str(MV)], capture_output=True, text=True, encoding="utf-8")
         print(r.stdout[-300:], r.stderr[-300:]); print("assigned", len(batch)); return
     import ark
+    if a.mode == "layers":   # 图层拆分（2.5D 视差）：对已有底图做图生图 + layer_decomposition，每张 1 额度
+        ids = a.ids.split(",")
+        if used() + len(ids) > CAP:
+            sys.exit(f"额度：已用 {used()}/{CAP}，这次要 {len(ids)}，停。")
+        files = []
+        for pid in ids:
+            cands = sorted(GEN.glob(f"{pid}_v*.jpg"), key=lambda q: int(q.stem.rsplit("_v", 1)[1]))
+            src = cands[-1] if cands else GEN / f"{pid}.jpg"
+            out = GEN / f"{src.stem}_layers.png"
+            if out.exists():
+                print("已存在，跳过：", out); continue
+            p_ = ark.image("Decompose this image into depth layers: background (walls, furniture, fully inpainted behind the person), "
+                           "the person as one layer, and foreground objects. Keep the image unchanged.",
+                           out, mdl="seedream_flash", size="1.5K", refs=[src], layer_decomposition=True, output_format="png")
+            files.append(p_); print(p_, flush=True)
+        log(len(files), f"layers {','.join(ids)}", files); return
     ids = a.ids.split(",") if a.ids else V1_IDS
     if used() + len(ids) > CAP:
         sys.exit(f"额度：已用 {used()}/{CAP}，这次要 {len(ids)}，停。")
