@@ -49,10 +49,10 @@ def L(*a):
     return torch.sqrt(sum(x * x for x in a) + 1e-12)
 
 
-def rot4(xw=0.0, yw=0.0, zw=0.0, xy=0.0):
+def rot4(xw=0.0, yw=0.0, zw=0.0, xy=0.0, yz=0.0):
     """>v<🧊四维切片-旋转-平面旋转的乘积 R = R_xw R_yw R_zw R_xy（角度：弧度）"""
     R = torch.eye(4, dtype=torch.float32)
-    for (i, j), a in (((0, 3), xw), ((1, 3), yw), ((2, 3), zw), ((0, 1), xy)):
+    for (i, j), a in (((0, 3), xw), ((1, 3), yw), ((2, 3), zw), ((0, 1), xy), ((1, 2), yz)):
         G = torch.eye(4, dtype=torch.float32)
         c, s = math.cos(a), math.sin(a)
         G[i, i], G[i, j], G[j, i], G[j, j] = c, -s, s, c
@@ -1160,7 +1160,7 @@ class InsertSpec:
     def __init__(self, dur, fps=24, size=(1280, 720), plane=None, plane2=None, ratio2=0.0, theta0=0.0, v0=240.0, v_end=25.0,
                  tau=0.35, c_start=None, cv0=0.0, cv_end=0.0, tilt="", yaw0=0.6, yaw_rate=0.10, pitch=0.42, dolly=0.04,
                  red_gain=1.0, look="line", cam_scale=1.0, hud_band=0, hud_scale=1.0, cut_glow=0.55,
-                 fov=34.0, target=(0.0, 0.0, 0.0), key_az=-95.0, key_el=38.0, red_point=False, cold=0.0):
+                 fov=34.0, target=(0.0, 0.0, 0.0), key_az=-95.0, key_el=38.0, red_point=False, cold=0.0, roll0=0.0, roll_rate=0.0, body_rate=0.0):
         self.dur, self.fps, self.size = dur, fps, size
         self.plane, self.plane2, self.ratio2 = plane, plane2, ratio2
         self.theta0, self.v0, self.v_end, self.tau = theta0, v0, v_end, tau
@@ -1171,6 +1171,7 @@ class InsertSpec:
         self.cut_glow = cut_glow
         self.fov, self.target = fov, tuple(float(x) for x in target)
         self.key_az, self.key_el, self.red_point, self.cold = key_az, key_el, red_point, cold
+        self.roll0, self.roll_rate, self.body_rate = roll0, roll_rate, body_rate   # 度、度/秒：相机绕视线 roll；身体绕侧向轴 x（yz 平面）匀速转
         self.hud_band, self.hud_scale = hud_band, hud_scale      # hud_band > 0：物体只渲染在上面 H − band 像素里，HUD 独占底部条带（不重叠）
         if not 0 <= hud_band < size[1] // 2:
             raise ValueError("hud_band 必须在 [0, H/2)")
@@ -1199,7 +1200,7 @@ def insert_track(obj, sp):
     return out
 
 
-def insert_R(obj, sp, th_deg):
+def insert_R(obj, sp, th_deg, t=0.0):
     """R = R_plane(θ) · R_plane2(ratio2·θ) · R_tilt（R_tilt 在最靠物体的一侧 = 物体自己的倾斜摆放）"""
     plane = sp.plane or obj.plane
     ang = {plane: math.radians(th_deg)}
@@ -1207,7 +1208,10 @@ def insert_R(obj, sp, th_deg):
         if sp.plane2 == plane:
             raise ValueError("plane2 必须和 plane 不同")
         ang[sp.plane2] = math.radians(th_deg * sp.ratio2)
-    return rot4(**ang) @ rot4(**sp.tilt_r)
+    R = rot4(**ang) @ rot4(**sp.tilt_r)
+    if sp.body_rate:                 # 最靠切片坐标的一侧 = 整个三维截面刚体转（4D 过程不变，光固定 → 明暗在身上滑）
+        R = rot4(yz=math.radians(sp.body_rate * t)) @ R
+    return R
 
 
 class RedPoint:
@@ -1251,10 +1255,10 @@ def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     plane = sp.plane or obj.plane
     rot_s = f"R_{plane}(theta)" + (f" R_{sp.plane2}({sp.ratio2:g} theta)" if sp.plane2 else "")
     tilt_s = " ".join(f"{a}={math.degrees(v):+.0f}" for a, v in sp.tilt_r.items()) or "none"
-    R = insert_R(obj, sp, k["th"])
+    R = insert_R(obj, sp, k["th"], k["t"])
     key = key_dir(sp.yaw0, sp.pitch, sp.key_az, sp.key_el) if sp.look == "sculpt" else None
     v, red = render(obj, R, k["c"], Wd, Hd - sp.hud_band, sp.look, yaw=k["yaw"], pitch=sp.pitch, red_gain=sp.red_gain, dist=k["dist"],
-                    cut_glow=sp.cut_glow, fov=sp.fov, target=sp.target, key=key)
+                    cut_glow=sp.cut_glow, fov=sp.fov, target=sp.target, key=key, roll=math.radians(sp.roll0 + sp.roll_rate * k["t"]))
     if sp.red_point:
         rp = rp or RedPoint(*red.shape)
         red = rp(red)
@@ -1265,6 +1269,10 @@ def _insert_frame(obj, name, sp, k, prev_b, tag, rp=None):
     changed = prev_b is not None and b != prev_b
     cam_s = (f"cam: orbit {math.degrees(sp.yaw_rate):+.1f} deg/s about ({sp.target[0]:+.2f},{sp.target[1]:+.2f},{sp.target[2]:+.2f})"
              f"  yaw {math.degrees(k['yaw']):6.1f}  pitch {math.degrees(sp.pitch):+.1f}  fov {sp.fov:g}  d {k['dist']:.2f}")
+    if sp.roll_rate or sp.roll0:
+        cam_s += f"  roll {sp.roll0 + sp.roll_rate * k['t']:+.1f} ({sp.roll_rate:+g} deg/s)"
+    if sp.body_rate:
+        cam_s += f"  body R_yz {sp.body_rate * k['t']:+.1f} deg ({sp.body_rate:+g} deg/s)"
     if sp.look == "sculpt":
         cam_s += f"   key light az {sp.key_az:+.0f} el {sp.key_el:+.0f} (fixed in world)"
     lines = [f"{name} ({obj.op}): {obj.eq}",
@@ -2030,6 +2038,8 @@ def main():
     g.add_argument("--key", default="-95,38", help="sculpt 主光 'az,el'（度；负数要写成 --key=-95,38）：az 相对起始相机，0 = 从相机打，±90 = 侧光，±180 = 逆光")
     g.add_argument("--red-point", action="store_true", help="全片只留一个红点（最强的相切处，跨帧跟踪）")
     g.add_argument("--cold", type=float, default=0.0, help="暗部冷偏强度（0 = 关；0.5 ≈ 很淡）")
+    g.add_argument("--roll", default="0,0", help="相机 roll：起始角（度）, 匀速（度/秒）；负数写成 --roll=-4,2")
+    g.add_argument("--body-rate", type=float, default=0.0, help="身体绕侧向轴 x 匀速转（度/秒；光固定，跟相机 roll 不同）")
     g.add_argument("--plot", default=None, help="运动速度图 png 路径（理论角速度 + 实测法向光流 / 帧间差分）")
     g.add_argument("--song-t0", type=float, default=None, help="这个镜头在歌里的起点（秒，播放时间）：速度图上标重拍")
     e = ap.add_argument_group("浮现镜头（--emerge 槽长秒数）：4D 测地锥，超平面扫过 → 她从手指尖沿身体长进三维；相机从手对数匀速拉远")
@@ -2133,7 +2143,8 @@ def main():
         w, h = (int(x) for x in a.size.lower().split("x"))
         sp = InsertSpec(a.insert, a.fps, (w, h), a.plane, a.plane2, a.ratio2, a.theta0, a.v0, a.v_end, a.tau, a.c_start, a.cv0, a.cv_end,
                         a.tilt, a.yaw0, a.yaw_rate, a.pitch, a.dolly, a.red_gain, a.look, a.cam_scale, a.hud_band, a.hud_scale, a.cut_glow,
-                        a.fov, tuple(float(x) for x in a.target.split(",")), *(float(x) for x in a.key.split(",")), a.red_point, a.cold)
+                        a.fov, tuple(float(x) for x in a.target.split(",")), *(float(x) for x in a.key.split(",")), a.red_point, a.cold,
+                        *(float(x) for x in a.roll.split(",")), a.body_rate)
         if a.plan:
             obj = OBJS[a.obj]
             for k in insert_track(obj, sp):

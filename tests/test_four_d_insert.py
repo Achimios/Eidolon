@@ -292,6 +292,18 @@ class TestGoldenAge(unittest.TestCase):
         self.assertAlmostEqual(float(a[2] @ b[2]), math.cos(math.radians(25)), places=6)
         self.assertTrue(torch.allclose(F.camera(8, 6, 1.2, -0.1, 3.0)[1], F.camera(8, 6, 1.2, -0.1, 3.0, roll=0.0)[1]))
 
+    def test_body_rotation(self):
+        """body_rate = 0 时 R 与旧的一样；≠ 0 时 = 左乘 yz 平面旋转（只动 y、z，不碰 x 与 w），R 仍正交"""
+        import torch
+        sp0 = F.InsertSpec(1.0, theta0=10)
+        sp1 = F.InsertSpec(1.0, theta0=10, body_rate=-8.0)
+        R0, R1 = F.insert_R(_Obj, sp0, 30.0, 1.5), F.insert_R(_Obj, sp1, 30.0, 1.5)
+        self.assertTrue(torch.allclose(R0, F.insert_R(_Obj, sp0, 30.0)))
+        B = F.rot4(yz=math.radians(-12.0))
+        self.assertTrue(torch.allclose(R1, B @ R0, atol=1e-6))
+        self.assertTrue(torch.allclose(B[[0, 3]][:, [0, 3]], torch.eye(2, device=F.DEV)))
+        self.assertTrue(torch.allclose(R1 @ R1.T, torch.eye(4, device=F.DEV), atol=1e-6))
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)
