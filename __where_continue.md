@@ -43,6 +43,14 @@ Dune 预告片 → Billie MV；Ash Thorp 式纯 2D motion design（PCB 素材，
 - 👤手动：网页端 Seedream / Seedance（走廊 C、S3、离子晶体、骨架重出）。Seedance 批次 1 的 S3 👤不满意 → 重出；骨架视频运动怪 → 先重出静帧。
 - 节奏规则：`拆镜头/节奏对比_早期vs_v4.6.md`。复现：`-给人类的解释/换电脑怎么复现.md`（两个仓库都没有远端，等👤定）。⚠️Tripo key 建议换。
 
+## 🌙 2026-10-24 晚（停在这）
+- ⭐**剪辑真源 = Synapsis 节点**（👤选 A）：`MV_Cant_Kill_Us/__synapsis/剪辑/`（6 段落 → 35 镜头，段落时间自动算）；预览 `tools/edl.py preview --synapsis 剪辑`。素材库 = 画面类型卡（每卡留「👤要求 / AI 回报」）。截帧 `cli.js frame`。
+- 👤已剪：四维生长插在 2:08 第 8 帧（作「成形」镜头，接记忆图谱）。⚠️粒子海原槽 2:08.36 冲突，待👤定（往后挪 / 别处 / 给 Between Two Points）。
+- 记忆图谱最新 v9（1:55.51–2:08.31）；结尾四声处理待 John 视频（建议：分辨率逐声翻倍 + 第四声视频开始播）。
+- 四维：真4D blender v2（多中心生长 + xw 旋转 + 只留亮边）；Seedance 已用 Blender 参考出了好的 curled girl 视频（`素材/curled girl/`）。
+- 感官空间：新子代理重做 `25_感官空间_正面_v1`（照审计图 / 人声条带配色）待👤看。
+- 👤明天：多生成视频素材（`生成/_待生成清单.md`）；走廊 C 多出几张 Seedream（图 2 用 A/D 关键帧或走廊背影截帧）；**拍一张自己的背影**当 John 剪影参考（无标志、通用装甲或普通男人二选一）。⚠️**S1 升正式版 10-29 前**。
+
 ## ☀ 2026-10-23 早：给👤看的（夜里三个子代理自迭代 + 主会话筛过一轮）
 - 远端：GitHub 私有 `Achimios/Eidolon`、`Achimios/Projekt_Visual`（push 走代理 7897）。图片瘦身：参考库截图 / 接触表不进 git，>2 MB 图 pre-commit 拦。
 - 剪辑表 v4：57.94 = Golden Age spin（twist 不用）；51.52 碎裂换 `19_碎裂_v5c_连续_B长推`（我选 B）。
