@@ -250,5 +250,44 @@ class TestMemoryV4(unittest.TestCase):
         self.assertLessEqual(np.abs(P3).max(), 1.0 + 1e-12)
 
 
+class TestMemoryV5(unittest.TestCase):
+    """v5：前馈镜头 —— 每个排程事件的镜头速度峰值离事件 ≤ 1 帧；John 在四声第一声弹出；弦两端固定"""
+    @classmethod
+    def setUpClass(cls):
+        if not G.SENSE.exists():
+            raise unittest.SkipTest("没有 感官.json")
+        cls.seg = (115.51, G.V4["end_t"])
+        cls.mem = G.build_memory(seg=cls.seg)
+        cls.sch = G.schedule_v4(cls.mem, cls.seg, john_hop=0)
+
+    def test_camera_peak_on_event(self):
+        T = int(round(self.sch["end"] * G.FPS))
+        cam, zs, ev = G.camera_ff(self.mem, self.sch, self.seg, T)
+        al = G.camera_alignment(cam, zs, ev, T)
+        self.assertGreater(len(al), 25)
+        for t, k, d in al:
+            self.assertLessEqual(abs(d), 1, (t + self.seg[0], k, d))
+
+    def test_ease_shape(self):
+        """快起慢收：E(0)=0、E(1)=1、速度单调减（起步那一刻最快）"""
+        u = np.linspace(0, 1, 201)
+        E = np.array([G.ease_ff(x) for x in u])
+        self.assertAlmostEqual(E[0], 0.0); self.assertAlmostEqual(E[-1], 1.0)
+        v = np.diff(E)
+        self.assertTrue((np.diff(v) <= 1e-12).all())
+
+    def test_john_on_first_sound(self):
+        self.assertAlmostEqual(self.sch["pop"][self.mem.john][0] + self.seg[0], G.V4["hops"][0], places=3)
+        order = [u for u, _, _ in self.mem.order]
+        pops = sorted(self.sch["pop"].items(), key=lambda kv: kv[1][0])
+        self.assertEqual([u for u, _ in pops], order[:self.sch["jk"] + 1])
+
+    def test_string_fixed_ends(self):
+        for dt in (0.0, 0.07, 0.3):
+            y = G.string_offset(49, dt, 5.0)
+            self.assertAlmostEqual(y[0], 0.0, places=9); self.assertAlmostEqual(y[-1], 0.0, places=9)
+        self.assertLessEqual(np.abs(G.string_offset(49, 0.0, 5.0)).max(), 5.0 * 1.6)
+
+
 if __name__ == "__main__":
     unittest.main()
