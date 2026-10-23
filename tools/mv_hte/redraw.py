@@ -251,6 +251,7 @@ class Scene:
         z, px, py = self.cam(t, shot)
         ell = np.exp(-(((self.xx - self.W * 0.55) / (self.W * 0.22)) ** 2 + ((self.yy - self.H * 0.5) / (self.H * 0.4)) ** 2)).astype(np.float32)
         if not pl["layers"]:
+            self.has_person = False
             return self.crop(pl["base"], z, px, py), ell
         zs = [L[1] for L in pl["layers"]]
         zmin, zmax = min(zs), max(zs)
@@ -266,6 +267,7 @@ class Scene:
             out = out * (1 - a[..., None]) + rgb * a[..., None]
             if pl["person"] is not None and i == pl["person"]:
                 mask = a
+        self.has_person = mask is not None
         return out, (mask if mask is not None else ell)   # 没有「她」图层时用椭圆（压缩用）；橙色检测另见 draw
 
     # 刻版排线：黑底亮线，密度 = 亮度
@@ -321,6 +323,11 @@ class Scene:
             small = padded[:h2 * sz, :w2 * sz].reshape(h2, sz, w2, sz).mean((1, 3))
             big = np.repeat(np.repeat(small, sz, 0), sz, 1)
             lum = big[oy:oy + H, ox:ox + W] * (1.0 + 0.05 * math.sin(2 * math.pi * t * 1.3))   # 块亮度缓慢呼吸（不是闪）
+            # 连续缓慢变焦（巨块阶段块边界几乎不动，靠这个保证没有静止帧）
+            zz = 1.0 + 0.06 * (0.5 + 0.5 * math.sin(2 * math.pi * t / 7.0))
+            cw, chh = int(W / zz), int(H / zz)
+            x0 = (W - cw) // 2; y0 = (H - chh) // 2
+            lum = np.asarray(Image.fromarray((np.clip(lum[y0:y0 + chh, x0:x0 + cw], 0, 1) * 255).astype(np.uint8)).resize((W, H), Image.BILINEAR)).astype(np.float32) / 255
 
         # ① 刻版：黑底 + 底图透 30%（海报化）+ 亮线；方块阶段只有块
         if p > 0.0:
@@ -336,7 +343,10 @@ class Scene:
         # 橙辫子：唯一的饱和色
         r, g, b = img[..., 0], img[..., 1], img[..., 2]
         mx = img.max(-1); sat = (mx - img.min(-1)) / (mx + 1e-6)
-        orange = (((r > g * 1.35) & (g > b * 1.5) & (sat > 0.52) & (mx > 0.4)).astype(np.float32) * (mask > 0.3))[..., None]   # 只认「她」图层里的辫子（ReadScreen 定：灯、奖杯压成单色）
+        if self.has_person:   # 有「她」图层：只认 alpha 很实的像素里的橙（图层边缘会带进墙和灯光）
+            orange = (((r > g * 1.5) & (g > b * 1.6) & (sat > 0.55) & (mx > 0.4)) & (mask > 0.9)).astype(np.float32)[..., None]   # 灯罩 r/g≈1.4 过不了，辫子 ≈2
+        else:                 # 没拆层：严格阈值（灯、奖杯的暖色过不了）
+            orange = ((r > g * 1.7) & (g > b * 2.0) & (sat > 0.68) & (mx > 0.5)).astype(np.float32)[..., None]
         out = out * (1 - orange) + img * np.array([1.0, 0.9, 0.55]) * orange
         out = np.clip(out * fade, 0, 1)
         im = Image.fromarray((out * 255).astype(np.uint8))
