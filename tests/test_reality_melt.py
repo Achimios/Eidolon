@@ -152,6 +152,29 @@ class TestPipeline(unittest.TestCase):
         back = cv.inv(cv.fwd(img))
         self.assertLess(float(np.abs(back - img)[8:-8, 8:-8].max()), 0.01)
 
+    def test_depth_near_never_breaks(self):
+        """深度门：far < 1 − reach1 − soft 的近处逐像素不变（近处不碎）；远处确实在碎"""
+        img = rand_img(72, 96, seed=8)
+        far = np.zeros((72, 96), np.float32)
+        far[:, :48] = 1.0                        # 左半远、右半近
+        p = R.Params(melt0=1.0, length=0.6, depth_reach0=0.5, depth_reach1=0.5, depth_soft=0.1, sort_amt=0.0, burst_amp=0.0)
+        out, inf = R.Melter(72, 96, p, 5.0).step(img, None, 2.0, far=far)
+        np.testing.assert_array_equal(out[:, 48:], img[:, 48:])
+        self.assertGreater(float(inf["alpha"][:, :48].mean()), 0.01)
+
+    def test_depth_reach_advances(self):
+        """前沿从远往近推进：中等深度的区域开场不碎、结尾碎（reach 0.3 → 0.9，far = 0.5）"""
+        img = rand_img(72, 96, seed=9)
+        far = np.full((72, 96), 0.5, np.float32)
+        p = R.Params(melt0=1.0, length=0.6, depth_reach0=0.3, depth_reach1=0.9, depth_soft=0.05, zone_ema=1.0, b_ema=1.0,
+                     sort_amt=0.0, burst_amp=0.0)
+        m = R.Melter(72, 96, p, 4.0)
+        a0 = float(m.step(img, None, 0.0, far=far)[1]["alpha"].mean())
+        m2 = R.Melter(72, 96, p, 4.0)
+        a1 = float(m2.step(img, None, 4.0, far=far)[1]["alpha"].mean())
+        self.assertEqual(a0, 0.0)
+        self.assertGreater(a1, 0.01)
+
     def test_temporal_flicker_lower_than_naive(self):
         """⭐时间相干：静止画面上，相邻帧输出变化 << 每帧换场的对照（naive）"""
         rng = np.random.default_rng(9)

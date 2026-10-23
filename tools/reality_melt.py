@@ -29,6 +29,9 @@
   · time：没有音乐（实拍）→ drive = 0.55 + 0.45·慢场；下坠按泊松过程（burst_rate 次/秒，固定种子）。
   · melt(t)：开场已经碎了 melt0，整段慢慢涨到 1（「一直在发生」，不是爆炸）。
 配色：cold（实拍偏冷蓝）/ rwb（红白黑：灰阶高反差；红 = 原图里本来就红的 + 鼓点刚坠下那一截，1.2 s 褪掉）/ none。
+深度（--depth）：Depth Anything V2 Small（HF，Apache-2.0）逐帧视差 → 按首帧分位表直方图均衡成 far ∈ [0,1]（1 = 最远，整段固定）
+  → 时间 EMA；可碎区 × smoothstep((far − (1 − reach(t)))/depth_soft)，reach 从 depth_reach0 推到 depth_reach1（从远往近蔓延），
+  长度 × lerp(1, 0.35 + 1.3·断点处 far, depth_len)。静帧的深度只算一次，跟着慢推裁切。
 静帧：先给慢推镜头（push 1.0 → 1.10，对数匀速 + 轻微横漂），不做锁死的静止。
 
 用法（4_Eidolon 根目录，.venv）：
@@ -269,6 +272,12 @@ class Params:
     burst_tau: float = 4.0      # 坠下去之后慢慢缩回的时间常数（s）
     seed: int = 7
     naive: bool = False         # A/B 用：每帧换场 + 不做 EMA（= 逐帧乱跳的对照）
+    # 深度（--depth；far ∈ [0,1]，1 = 最远）：「远处先碎、碎得更长」，碎的前沿随时间从远往近推进
+    depth_reach0: float = 0.30  # 开场：最远的这一段深度范围可碎（0 = 都不碎，1 = 全都可碎）
+    depth_reach1: float = 0.85  # 结尾推进到这里（< 1 → 最近处始终不碎）
+    depth_soft: float = 0.12    # 前沿软边（深度单位）
+    depth_len: float = 0.8      # 长度按断点处深度调制的程度：L × lerp(1, 0.35 + 1.3·far_b, depth_len)
+    depth_ema: float = 0.25     # 逐帧深度的时间 EMA 新帧权重（静帧只算一次，不需要）
 
 
 def parse_set(s):
@@ -388,12 +397,16 @@ class Melter:
             fresh = np.maximum(fresh, (a > 1) * np.exp(-tau / 1.2))
         return add, fresh
 
-    def step(self, img, protect, t, drive=1.0, gate=1.0, hand=None):
+    def step(self, img, protect, t, drive=1.0, gate=1.0, hand=None, far=None):
         """img 屏幕帧；protect 主体 alpha（None = 不保护）；t 秒（本段内时间）；drive ∈ [0,1] 总体拉伸；gate 效果强度（0 ⇒ 恒等）"""
         p, cv = self.p, self.cv
         tt = t + (1000.0 * (hash((t, 1)) % 97) if p.naive else 0.0)
         pr = grow(protect, int(round(p.protect_grow * self.u))) if protect is not None else None
         zr = zone_raw(img, pr, p, hand)
+        reach = None
+        if far is not None:      # 深度门：far ≥ 1 − reach(t) 的才可碎；reach 随时间从 reach0 推到 reach1（从远往近蔓延）
+            reach = p.depth_reach0 + (p.depth_reach1 - p.depth_reach0) * smoothstep(t / self.dur)
+            zr = zr * smoothstep((far - (1 - reach)) / p.depth_soft + 0.5)
         lm = lum(img)
         a = 1.0 if p.naive else p.zone_ema
         self.zone_s = zr if self.zone_s is None else (1 - a) * self.zone_s + a * zr
@@ -426,6 +439,11 @@ class Melter:
         b = self.b_s
         mw = smoothstep(mass / (0.06 * Hc))
         Lb = self.H * p.length * melt * drive * (0.15 + 0.85 * self.F_len(tt) ** 1.5) * self.col_len * mw
+        far_b = None
+        if far is not None:      # 远处碎得更长：按断点所在处的深度调制
+            Fc = cv.fwd(far.astype(np.float32))
+            far_b = Fc[np.clip(np.round(b).astype(int), 0, Hc - 1), np.arange(Wc)]
+            Lb = Lb * ((1 - p.depth_len) + p.depth_len * (0.35 + 1.3 * far_b))
         add, fresh = self.burst_len(t)
         L = (Lb + add * mw) * gate
         sh = p.flow * self.u * t                      # 亚像素下流（整数步进会一帧动一帧不动 = 抖）
@@ -452,7 +470,9 @@ class Melter:
             fresh_s = fresh_s * (1 - protect)
         info = {"melt": float(melt), "drive": float(drive), "L_mean_px": float(L[mw > 0.5].mean()) if (mw > 0.5).any() else 0.0,
                 "L_max_px": float(L.max()), "drip_cover": float(alpha_s.mean()), "sort_cover": float(sortm.mean()),
-                "b_mean": float(b[mw > 0.5].mean()) if (mw > 0.5).any() else 0.0}
+                "b_mean": float(b[mw > 0.5].mean()) if (mw > 0.5).any() else 0.0,
+                **({"depth_reach": float(reach), "far_b_mean": float(far_b[mw > 0.5].mean()) if (mw > 0.5).any() else 0.0}
+                   if reach is not None else {})}
         return np.clip(out, 0, 1).astype(np.float32), {"alpha": alpha_s, "fresh": fresh_s, "sort": sortm, "mass": mass,
                                                        "b": b, "L": L, "info": info}
 
@@ -566,6 +586,85 @@ def protect_masks(src, frames_fn, n, key, kind):
     return m
 
 
+DEPTH_REPO = "depth-anything/Depth-Anything-V2-Small-hf"   # Apache-2.0，~99 MB，HF 默认缓存；第一次运行下载（要代理）
+
+
+class Depther:
+    """>v<🖼现实瓦解-深度-Depth Anything V2 Small（单目相对深度，输出视差：大 = 近）"""
+
+    def __init__(self, repo=DEPTH_REPO):
+        import torch
+        from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+        self.torch = torch
+        self.dev = "cuda" if torch.cuda.is_available() else "cpu"
+        self.proc = AutoImageProcessor.from_pretrained(repo)
+        self.model = AutoModelForDepthEstimation.from_pretrained(repo).to(self.dev).eval()
+
+    def __call__(self, img):
+        """RGB float HxWx3 → 视差 HxW（float32，相对量）"""
+        torch = self.torch
+        H, W = img.shape[:2]
+        x = self.proc(images=to_im(img), return_tensors="pt").to(self.dev)
+        with torch.no_grad():
+            d = self.model(**x).predicted_depth[:, None]
+        d = torch.nn.functional.interpolate(d, size=(H, W), mode="bicubic", align_corners=False)[0, 0]
+        return d.float().cpu().numpy()
+
+
+def disp_to_far(d, qs):
+    """视差 → far ∈ [0,1]（1 = 最远）。按首帧的分位表做直方图均衡（v5 起；v4 是 2/98 分位线性 → 白走廊整条走廊都挤在「远」，
+    前沿推进看不出来）：far = 1 − 这个视差在首帧里的排名 → reach = 「画面里最远的那几成」。qs = 首帧 0..100 分位（整段固定，逐帧重算会闪）"""
+    return (1 - np.interp(d, qs, np.linspace(0, 1, len(qs)))).astype(np.float32)
+
+
+def push_float(arr, u, out_wh, z=(1.0, 1.10), drift=(0.015, -0.008)):
+    """push_frame 的单通道浮点版（深度图跟着静帧慢推走）"""
+    im = Image.fromarray(arr.astype(np.float32), "F")
+    W0, H0 = im.size
+    ow, oh = out_wh
+    ar = ow / oh
+    cw, ch = (W0, W0 / ar) if W0 / H0 < ar else (H0 * ar, H0)
+    zz = z[0] * (z[1] / z[0]) ** u
+    w, h = cw / zz, ch / zz
+    cx = W0 / 2 + drift[0] * W0 * (u - 0.5)
+    cy = H0 / 2 + drift[1] * H0 * (u - 0.5)
+    return np.asarray(im.transform((ow, oh), Image.EXTENT, (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2), Image.BILINEAR),
+                      np.float32)
+
+
+def depth_maps(src, frames_fn, n, key, p: Params, out_wh, push):
+    """逐帧 far 图（uint8 缓存）。视频：逐帧推理 → 用第一帧的 2 / 98 分位固定归一化 → 时间 EMA（depth_ema）+ 轻微模糊；
+    静帧：原图只算一次，跟着慢推裁切（天然时间一致）。"""
+    from scipy.ndimage import gaussian_filter
+    CACHE.mkdir(parents=True, exist_ok=True)
+    f = CACHE / f"{key}_fareq_e{p.depth_ema}.npy"
+    if f.exists():
+        m = np.load(f)
+        if len(m) >= n:
+            return m[:n]
+    dp = Depther()
+    out = []
+    if is_image(src):
+        im = np.asarray(Image.open(src).convert("RGB"), np.float32) / 255
+        d = dp(im)
+        far = gaussian_filter(disp_to_far(d, np.percentile(d, np.arange(101))), 2)
+        for i in range(n):
+            out.append((np.clip(push_float(far, i / max(n - 1, 1), out_wh, push), 0, 1) * 255 + 0.5).astype(np.uint8))
+    else:
+        qs = None
+        ema = None
+        for fr in frames_fn():
+            d = dp(fr)
+            if qs is None:
+                qs = np.maximum.accumulate(np.percentile(d, np.arange(101)))
+            far = gaussian_filter(disp_to_far(d, qs), 1.5)
+            ema = far if ema is None else (1 - p.depth_ema) * ema + p.depth_ema * far
+            out.append((ema * 255 + 0.5).astype(np.uint8))
+    m = np.stack(out)
+    np.save(f, m)
+    return m
+
+
 # ---------------------------------------------------------------- 驱动
 def load_sense():
     return json.loads((S.MV / "感官.json").read_text("utf-8"))
@@ -674,6 +773,7 @@ def cmd_clip(a):
     H, W = first.shape[:2]
     key = f"{src.stem}_{a.t0:.2f}_{n}_{W}x{H}" + (f"_push{push[0]}-{push[1]}" if is_image(src) else "")
     masks = protect_masks(src, frames_fn, n, key, a.protect)
+    fars = depth_maps(src, frames_fn, n, key, p, (W, H), push) if a.depth else None
     hand = None
     if a.hand:
         hand = np.asarray(Image.open(a.hand).convert("L").resize((W, H), Image.BILINEAR), np.float32) / 255
@@ -708,7 +808,8 @@ def cmd_clip(a):
             fired.append([events[ev_i][0], events[ev_i][1], x0])
             ev_i += 1
         pm = protect_mask_at(masks, i)
-        out, inf = m.step(fr, pm, t, float(drive[i]), 1.0, hand)
+        far = None if fars is None else fars[min(i, len(fars) - 1)].astype(np.float32) / 255
+        out, inf = m.step(fr, pm, t, float(drive[i]), 1.0, hand, far)
         region = (inf["alpha"] > 0.5) | (inf["sort"] > 0.5)
         row = {"i": i, "t": round(t, 3), **{k: round(v, 3) for k, v in inf["info"].items()}}
         if pm is not None:
@@ -742,13 +843,15 @@ def cmd_clip(a):
     fr_ratio = [r["flicker_ratio"] for r in rows if "flicker_ratio" in r]
     side = {"tool": "tools/reality_melt.py clip", "source": str(src), "t0": a.t0, "frames_n": n, "dur": round(dur, 3),
             "size": [W, H], "drive": a.drive, "play_start": a.start if a.drive == "sense" else None,
-            "protect": a.protect, "hand": a.hand, "push": push if is_image(src) else None, "params": asdict(p),
+            "protect": a.protect, "hand": a.hand, "depth": (DEPTH_REPO if a.depth else None), "push": push if is_image(src) else None, "params": asdict(p),
             "bursts_fired": fired,
             "flicker_ratio_median": round(float(np.median(fr_ratio)), 3) if fr_ratio else None,
             "flicker_ratio_total": round(jerk_sum[0] / max(jerk_sum[1], 1e-9), 3),
             "flicker_def": "time 2nd difference |o_t - 2o_(t-1) + o_(t-2)| averaged in melt region (not protected); ratio out/src; 1 = as steady as the source",
             "flicker_ratio_p90": round(float(np.percentile(fr_ratio, 90)), 3) if fr_ratio else None,
             "law": {"stretch": "y in [b, b+L): sample s = b + (y-b)/S (linear), tip 1px AA",
+                    "depth": "far = 1 - rank of disp in frame-0 quantile table (histogram-equalised, fixed), EMA depth_ema; zone *= smoothstep((far-(1-reach))/soft+0.5), "
+                             "reach = reach0 -> reach1 (smoothstep over the clip); L *= (1-depth_len) + depth_len*(0.35+1.3*far at breakpoint)",
                     "breakpoint": "b = q-quantile of cumulative zone mass per column; q = q_lo + (q_hi-q_lo)*F_q(x,t) + q_fine*(col-0.5)",
                     "length": "L = H*length*melt(t)*drive*(0.15+0.85*F_len^1.5)*col_len*mass_w + bursts",
                     "drive": "sense: 0.55+0.45*EMA(tension, 1 s); time: 0.55+0.45*slow field",
@@ -769,8 +872,20 @@ def cmd_clip(a):
         th = sorted(thumbs[pl], key=lambda x: x[0])
         if len(th) > 16:
             th = [th[int(round(k))] for k in np.linspace(0, len(th) - 1, 16)]
+        if fars is not None:     # 最后一格：首 / 末帧深度（白 = 远）+ 末帧的可碎前沿
+            th = th[:15] + [(n, "depth far (white) | first frame / reach0 / reach1", depth_tile(fars, p))]
         contact([(lab, im) for _, lab, im in th], plot, out.with_name(out.stem + "_接触表.jpg"))
         print("->", out)
+
+
+def depth_tile(fars, p: Params):
+    """首帧深度灰图 + 两条前沿等值线（reach0 红、reach1 白）"""
+    f = fars[0].astype(np.float32) / 255
+    rgb = np.repeat(f[..., None], 3, -1) * 0.8
+    for r, col in ((p.depth_reach0, (1.0, 0.16, 0.2)), (p.depth_reach1, (1.0, 1.0, 1.0))):
+        edge = np.abs(f - (1 - r)) < 0.012
+        rgb[edge] = col
+    return to_im(rgb)
 
 
 def protect_mask_at(masks, i):
@@ -819,6 +934,7 @@ def main():
     c.add_argument("--hand", default=None)
     c.add_argument("--protect", choices=["birefnet", "none"], default="birefnet")
     c.add_argument("--push", default="1.0,1.10")
+    c.add_argument("--depth", action="store_true", help="深度调制：远处先碎、碎得更长，前沿随时间从远往近（Depth Anything V2 Small）")
     c.add_argument("--label", default=None)
     c.add_argument("--seed", type=int, default=7)
     c.add_argument("--set", default=None)
