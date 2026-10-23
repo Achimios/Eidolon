@@ -105,6 +105,13 @@ def main():
         lines_out.append({"text": s["text"].strip(), "t0": round(s["start"], 3), "t1": round(s["end"], 3)})
     out = {"source": src, "audio": "分轨/vocals.wav", "unit": "s（作品时间 = 播放时间）", "low_threshold": LOW,
            "lines": lines_out, "words": words}
+    if a.text and sum(len(l.split()) for l in lines) == len(words):   # 按原文分行（NLTK 只按句号分，没标点的歌词会粘成几大段）
+        lines_out, i = [], 0
+        for l in lines:
+            ws = words[i:i + len(l.split())]; i += len(ws)
+            ts = [w for w in ws if w["t0"] is not None]
+            lines_out.append({"text": l, "t0": ts[0]["t0"] if ts else None, "t1": ts[-1]["t1"] if ts else None})
+        out["lines"] = lines_out
     gate_by_voice(out, mv)
     p = save(out, mv)
     n_low = sum(w["low"] for w in words)
