@@ -148,7 +148,7 @@ class Scene:
     def _schedule(self):
         s = self.s
         order = stroke_order()
-        cand = sorted([h for h in s.holes if T_ON + 0.4 <= h["t"] <= 26.0], key=lambda h: -h["strength"])
+        cand = sorted([h for h in s.holes if 10.6 <= h["t"] <= 26.0], key=lambda h: -h["strength"])   # 分镜：第一笔在 S04（10.516 后）从画右进
         picked = []
         for h in cand:
             if all(abs(h["t"] - p["t"]) >= 0.4 for p in picked):
@@ -447,6 +447,20 @@ class Scene:
             self.text(d, P, (X(tb) + 4, fy(fb) - 15 * (1 - sh) - 13 * sh), f"[{tb:.1f}s {fb:.0f}Hz]", (*GREY, max(0, a_)), 11)
         if not on:
             self.text(d, P, (HEAD_X + 16, yc_big + span_big / 2 + 0.5 * G), "melody · other stem · f0", (*DIM, 220), 11)
+
+        # 8.0 s 大字：115.28 由字符拼出（两段式），停 2 拍，再对数缩回（S03 里，纸卷带右下）
+        if on and u_on < 2.6:
+            if u_on < 2 * s.beat:
+                sc_ = 1.0; alpha = 255; pr = ease2(u_on, t1=0.06, t2=0.25)
+            else:
+                uu = (u_on - 2 * s.beat) / (2.6 - 2 * s.beat)
+                sc_ = math.exp(-2.6 * uu); alpha = int(255 * (1 - uu)); pr = 1.0
+            cx_, cy_ = W0 * 0.5 + 2.5 * G, ROW_Y1 + 2.6 * G
+            font = ImageFont.truetype(FONT_MONO_B, max(8, int(130 * sc_ * k * ss)))
+            txt = f"{s.bpm:.2f}"
+            nchar = max(1, int(round(pr * len(txt) + 0.49)))
+            d.text(P(cx_, cy_), txt[:nchar], font=font, fill=(*WHITE, alpha), anchor="lm")
+            self.text(d, P, (cx_ + 2, cy_ + 75 * sc_), "BPM · MACHINE ON", (*GREY, alpha), 11)
 
         # 他：先算 bob
         n_done = sum(1 for h in self.births.values() if t - h["t"] > 0.5)
