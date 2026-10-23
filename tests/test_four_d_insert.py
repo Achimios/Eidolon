@@ -340,6 +340,36 @@ class TestGoldenAge(unittest.TestCase):
             self.assertTrue(np.array_equal(vert[:, :3], V.astype(np.float32)))
         self.assertAlmostEqual(float(np.linalg.det(F.to_blender(np.eye(3)))), 1.0)
 
+    def test_rigid_fit_recovers_motion(self):
+        """必须相等的量：椭球表面点被转 6° + 平移后，对齐到原椭球 SDF → 中位残差回到 ≈ 0（椭球不对称，旋转可辨）"""
+        import numpy as np
+
+        class _Ell:
+            def __call__(self, x, y, z):
+                return (F.L(x / 0.6, y / 0.4, z / 0.3) - 1) * 0.3          # 椭球的近似距离（零面准确即可）
+        rng = np.random.default_rng(1)
+        u = rng.normal(size=(3000, 3)); u /= np.linalg.norm(u, axis=1, keepdims=True)
+        P = u * np.array([0.6, 0.4, 0.3])
+        a = math.radians(6)
+        Rz = np.array([[math.cos(a), -math.sin(a), 0], [math.sin(a), math.cos(a), 0], [0, 0, 1]])
+        Pm = P @ Rz.T + np.array([0.03, -0.02, 0.01])
+        R, t, m0, m1 = F.rigid_fit_to_sdf(Pm, _Ell(), clip=0.2)
+        self.assertGreater(m0, 0.005)
+        self.assertLess(m1, 0.1 * m0)
+
+    def test_seam_normals_fallback(self):
+        """|x| 镜像接缝（g = 球(|x| + 0.2 …) 的 V 形折痕）上中心差分把法线抵消 → 退回网格法线：法线与网格法线夹角都 < 45°"""
+        import numpy as np
+        g = lambda p: F.L(p[:, 0].abs() + 0.15, p[:, 1], p[:, 2]) - 0.5  # noqa: E731
+        V, Q, N = F.surface_nets(g, 1.0, 64)
+        self.assertLess(F.surface_nets.last_bad, 0.05)                 # 只在折痕附近退回
+        P = V[Q]
+        fn = np.cross(P[:, 2] - P[:, 0], P[:, 3] - P[:, 1])
+        Nm = np.zeros_like(V)
+        np.add.at(Nm, Q.reshape(-1), np.repeat(fn, 4, 0))
+        Nm /= np.linalg.norm(Nm, axis=1, keepdims=True)
+        self.assertGreater(float((N * Nm).sum(1).min()), math.cos(math.radians(45)))
+
     def test_spec_guards(self):
         with self.assertRaises(ValueError):
             F.InsertSpec(1.0, fov=2.0)

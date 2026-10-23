@@ -1990,12 +1990,23 @@ def surface_nets(g, B=1.15, n=256, chunk=1 << 21, project=2):
     for _ in range(project):
         gr = grad(V)
         V = V - (g(V) / (gr * gr).sum(1).clamp(min=1e-8))[:, None] * gr
-    N = grad(V)
-    N = N / N.norm(dim=1, keepdim=True).clamp(min=1e-9)
+    G = grad(V)
+    gn = G.norm(dim=1, keepdim=True)
+    N = G / gn.clamp(min=1e-9)
     # 面的朝向：对角线叉积 vs 四个顶点法线的均值，反了就翻（比按轴奇偶推导稳）
     P4 = V[Q]
     fn = torch.linalg.cross(P4[:, 2] - P4[:, 0], P4[:, 3] - P4[:, 1])
     Q = torch.where(((fn * N[Q].sum(1)).sum(1) < 0)[:, None], Q.flip(1), Q)
+    # 梯度不可信的地方（与网格法线差 > 40° = 折痕 / 镜像接缝，中心差分把两侧法线抵消掉；或 |∇g| < 0.1）→ 改用网格面积加权法线。
+    # 注意切片里 |∇g| < 1 本来就正常（= 4D 法向的 xyz 分量，越靠近相切越小），不能拿「≈ 1」当判据。
+    # 👤v1 的黑矩形 / 脚踝白斑就是 spin 的 |x| 镜像接缝上法线翻了
+    P4 = V[Q]
+    fn = torch.linalg.cross(P4[:, 2] - P4[:, 0], P4[:, 3] - P4[:, 1])
+    Nm = torch.zeros_like(V).index_add_(0, Q.reshape(-1), fn.repeat_interleave(4, 0))
+    Nm = Nm / Nm.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    bad = (gn[:, 0] < 0.1) | ((N * Nm).sum(1) < math.cos(math.radians(40)))
+    N = torch.where(bad[:, None], Nm, N)
+    surface_nets.last_bad = float(bad.float().mean())
     return V.cpu().numpy(), Q.cpu().numpy(), N.cpu().numpy()
 
 
@@ -2010,14 +2021,64 @@ def write_ply(path, V, Q, N):
     vert = np.empty(len(V), dtype=[("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")])
     vert["x"], vert["y"], vert["z"] = V[:, 0], V[:, 1], V[:, 2]
     vert["nx"], vert["ny"], vert["nz"] = N[:, 0], N[:, 1], N[:, 2]
-    face = np.empty(len(Q), dtype=[("n", "u1"), ("v", "<i4", (4,))])
-    face["n"], face["v"] = 4, Q
+    k = Q.shape[1]                                     # 4 = 四边形（切片），3 = 三角形（高模）
+    face = np.empty(len(Q), dtype=[("n", "u1"), ("v", "<i4", (k,))])
+    face["n"], face["v"] = k, Q
     hdr = (f"ply\nformat binary_little_endian 1.0\nelement vertex {len(V)}\nproperty float x\nproperty float y\nproperty float z\n"
            f"property float nx\nproperty float ny\nproperty float nz\nelement face {len(Q)}\nproperty list uchar int vertex_indices\nend_header\n")
     with open(path, "wb") as fh:
         fh.write(hdr.encode("ascii"))
         fh.write(vert.tobytes())
         fh.write(face.tobytes())
+
+
+def rigid_fit_to_sdf(P, msh, iters=30, clip=0.06, h=2e-3):
+    """>v<🧊四维切片-导出-把点集 P 刚体对齐到 SDF 的零面：最小化 Σ w·f3(R p + t)²，Gauss–Newton（小旋转 ω×p 线性化），
+    |f3| > clip 的点权重 0（离群 / 两个模型姿势不一样的部位）。返回 (R 3×3, t, 对齐前 / 后的中位 |f3|)"""
+    P = torch.tensor(P, dtype=torch.float32, device=DEV)
+    R = torch.eye(3, device=DEV)
+    t = torch.zeros(3, device=DEV)
+    f = lambda Q: msh(Q[:, 0], Q[:, 1], Q[:, 2])  # noqa: E731
+    med0 = float(f(P).abs().median())
+    for _ in range(iters):
+        Q = P @ R.T + t
+        d = f(Q)
+        gr = torch.stack([(f(Q + e) - f(Q - e)) / (2 * h) for e in torch.eye(3, device=DEV) * h], 1)
+        w = (d.abs() < clip).float()
+        J = torch.cat([torch.linalg.cross(Q, gr), gr], 1)              # d(f)/d(ω) = (q × ∇f)，d(f)/d(t) = ∇f
+        A = (J * w[:, None]).T @ J + 1e-6 * torch.eye(6, device=DEV)
+        x = -torch.linalg.solve(A, (J * (w * d)[:, None]).sum(0))
+        om, dt = x[:3], x[3:]
+        th = float(om.norm())
+        if th > 1e-12:
+            k = om / th
+            K = torch.tensor([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], device=DEV)
+            dR = torch.eye(3, device=DEV) + math.sin(th) * K + (1 - math.cos(th)) * K @ K
+        else:
+            dR = torch.eye(3, device=DEV)
+        R, t = dR @ R, dR @ t + dt
+        if float(x.norm()) < 1e-6:
+            break
+    med1 = float(f(P @ R.T + t).abs().median())
+    return R.cpu().numpy(), t.cpu().numpy(), med0, med1
+
+
+def export_hires(glb, ref, out_ply, lateral="sym", n_fit=40000):
+    """>v<🧊四维切片-导出-高模（例：N4D 100 万面）→ 与切片同一套归一化（_mesh_load：侧向轴、居中、最长边 2）→ 刚体对齐到参考 SDF（切片用的模型）
+    → Blender 坐标三角形 PLY + 顶点法线。给 blender_four_d.py --hires 做结尾的「扫一遍换成高模」"""
+    import trimesh
+    V, Fc = _mesh_load(glb, max_faces=10 ** 9, lateral=lateral)
+    if ref.vol is None:
+        ref.load()
+    rng = np.random.default_rng(0)
+    idx = rng.choice(len(V), min(n_fit, len(V)), replace=False)
+    R, t, m0, m1 = rigid_fit_to_sdf(V[idx], ref)
+    V = V @ R.T + t
+    N = trimesh.Trimesh(V, Fc, process=False).vertex_normals
+    Path(out_ply).parent.mkdir(parents=True, exist_ok=True)
+    write_ply(out_ply, to_blender(V), Fc.astype(np.int32), to_blender(N))
+    ang = math.degrees(math.acos(max(-1.0, min(1.0, (np.trace(R) - 1) / 2))))
+    print(f"{out_ply}: {len(V)} verts, {len(Fc)} tris; fit to {ref.path.name}: median |sdf| {m0:.4f} -> {m1:.4f}, rot {ang:.2f} deg, t {np.round(t, 4)}")
 
 
 def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None):
@@ -2060,7 +2121,8 @@ def export_insert_meshes(name, sp, outdir, n=320, tag=None, box=None):
                            up=to_blender(up.cpu().numpy()).tolist(), focus=float(k["dist"]),
                            rim=None if rim is None else to_blender(rim[0].cpu().numpy()).tolist(),
                            red=to_blender(Vt[j].cpu().numpy()).tolist(), red_strength=strength, betti=list(b), hud=lines))
-        print(f"  frame {k['i']}/{len(track)}: {len(V)} verts, {len(Q)} quads, red r = {float(r[j]):.3f}  {time.time() - t1:.2f}s", flush=True)
+        print(f"  frame {k['i']}/{len(track)}: {len(V)} verts, {len(Q)} quads, mesh-normal fallback {surface_nets.last_bad * 100:.1f}%,"
+              f" red r = {float(r[j]):.3f}  {time.time() - t1:.2f}s", flush=True)
     meta = dict(tag=tag, fps=sp.fps, size=list(sp.size), hud_band=sp.hud_band, hud_scale=sp.hud_scale, fov=sp.fov,
                 key=to_blender(key.cpu().numpy()).tolist(), key_az=sp.key_az, key_el=sp.key_el, rim=sp.rim, grid=n, box=box,
                 coords="Blender (x, -z, y) of model coords", frames=frames)
@@ -2251,6 +2313,7 @@ def main():
     g.add_argument("--ambient", type=float, default=0.035, help="sculpt 环境底光（小 = 暗部更深）")
     g.add_argument("--export-mesh", default=None, help="不渲染：每帧切片 → Surface Nets 网格 → <目录>/fNNNN.ply + track.json（给 tools/blender_four_d.py）")
     g.add_argument("--mesh-grid", type=int, default=320, help="--export-mesh 的网格分辨率 N（N³，盒 = 物体的包围半径）")
+    g.add_argument("--export-hires", default=None, help="高模 GLB → 对齐到当前 --mesh 的 SDF → --out 的三角形 PLY（Blender 坐标）")
     g.add_argument("--compose-blender", default=None, help="Blender 渲好的帧目录（fNNNN.png）→ 加 HUD 条带出 mp4（--out / --contact，需 --track）")
     g.add_argument("--track", default=None, help="--compose-blender 用的 track.json")
     g.add_argument("--body-rate", type=float, default=0.0, help="身体绕侧向轴 x 匀速转（度/秒；光固定，跟相机 roll 不同）")
@@ -2352,6 +2415,9 @@ def main():
         if out.exists() or any(x and Path(x).exists() for x in (a.contact, a.plot)):
             sys.exit(f"已存在，不覆盖：{out} / {a.contact} / {a.plot}（换版本号）")
         emerge(obj, sp, str(out), a.tag, a.contact, a.plot, a.song_t0, a.still)
+        return
+    if a.export_hires:
+        export_hires(a.export_hires, MESH, a.out, a.mesh_lateral)
         return
     if a.compose_blender:
         out = Path(a.out)
