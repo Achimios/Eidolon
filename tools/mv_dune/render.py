@@ -57,19 +57,30 @@ def value_noise(x, y, seed=1):
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy
 
 
-def terrain(x, y):
-    """高程（米）。x, y 米。沙丘：主波长 ~180 m 的脊（翻折噪声），叠小波纹（~2 m）和沙粒尺度（~0.01 m）—— 所以任何尺度都有结构。"""
+def terrain(x, y, px=0.0):
+    """高程（米）。x, y 米；px = 每像素多少米 → 带限：波长 < 3 px 的倍频淡出（否则大尺度下亚像素采样混叠成噪声）。
+    沙丘：主波长 ~180 m 的脊（翻折噪声），叠小波纹（~2 m）和沙粒尺度（~0.01 m）—— 所以任何尺度都有结构。"""
+    def gain(lam):
+        if px <= 0:
+            return 1.0
+        return float(np.clip((lam / px - 12.0) / 12.0, 0.0, 1.0))   # 波长 < 12 px 全去，< 24 px 淡出（等高线在近奈奎斯特的波纹上会抖）
     h = np.zeros_like(x, dtype=np.float64)
-    # 大尺度沙丘：翻折噪声 → 脊
     for i, (lam, amp) in enumerate(((180.0, 14.0), (70.0, 5.0), (28.0, 1.6))):
+        g = gain(lam)
+        if g <= 0:
+            continue
         n = value_noise(x / lam + 7.3 * i, y / lam * 1.7 + 2.1 * i, seed=11 + i)
-        h += amp * (1 - np.abs(2 * n - 1)) ** 1.6
-    # 风纹
+        h += g * amp * (1 - np.abs(2 * n - 1)) ** 1.6
     for i, (lam, amp) in enumerate(((2.2, 0.05), (0.9, 0.02))):
-        h += amp * np.sin(2 * np.pi * (x / lam + 0.3 * value_noise(x / 30, y / 30, seed=40 + i)) + y / (lam * 6))
-    # 沙粒
+        g = gain(lam)
+        if g <= 0:
+            continue
+        h += g * amp * np.sin(2 * np.pi * (x / lam + 0.3 * value_noise(x / 30, y / 30, seed=40 + i)) + y / (lam * 6))
     for i, (lam, amp) in enumerate(((0.012, 0.004), (0.004, 0.0015))):
-        h += amp * value_noise(x / lam, y / lam, seed=70 + i)
+        g = gain(lam)
+        if g <= 0:
+            continue
+        h += g * amp * value_noise(x / lam, y / lam, seed=70 + i)
     return h
 
 
@@ -139,7 +150,7 @@ class Scene:
     def terrain_view(self, cx, cy, span, step=2):
         xs = cx + (self.xx[::step, ::step] / W0 - 0.5) * span
         ys = cy + (self.yy[::step, ::step] / H0 - 0.5) * span * H0 / W0
-        return terrain(xs, ys), xs, ys
+        return terrain(xs, ys, px=span / (W0 / step)), xs, ys
 
     def shade_contours(self, h, span, t, pal, light_dir=(0.8, 0.3), contour_gain=1.0):
         """浮雕 + 等高线 → (H/2, W/2, 3) float"""
@@ -168,19 +179,23 @@ class Scene:
         return np.asarray(im).astype(np.float32) / 255
 
     # ------------------------------------------------------------ 浪：粒子
-    def wave_particles(self, n=90000, seed=3):
+    def wave_particles(self, n=400000, seed=3):
         if self.wave is None:
             rng = np.random.default_rng(seed)
             # 起点：屏幕坐标里下 2/3 的沙面（P08 的沙地），按行密度
             sx = rng.uniform(0, W0, n); sy = H0 * (0.42 + 0.58 * rng.random(n) ** 0.7)
-            # 目标：一道浪的剖面（从左到右掠起的卷浪），横跨画面，波峰在 x≈0.62W
-            u = rng.random(n)
-            cx = 0.62 * W0; crest_h = 0.55 * H0
-            theta = u * math.pi * 1.35
-            r = (0.30 + 0.25 * rng.random(n) ** 2) * H0
-            tx = cx - 0.18 * W0 + r * np.cos(theta) * 0.9 + (sx - W0 / 2) * 0.35
-            ty = H0 * 0.78 - r * np.sin(theta) * 1.1 + (sy - H0 * 0.7) * 0.25
-            ty = np.maximum(ty, H0 * 0.78 - crest_h)
+            # 目标：一道浪的侧剖面 —— 70% 粒子在浪面（厚 ~25 px 的曲线带），30% 填在浪面以下（密度向下衰减）
+            tx = 0.08 * W0 + rng.random(n) * 0.84 * W0
+            crest_x = 0.60 * W0; base_y = H0 * 0.78
+            prof = np.exp(-((tx - crest_x) / (0.17 * W0)) ** 2)           # 浪高剖面
+            # 卷：过了浪顶的一侧往回勾
+            curl = np.where(tx > crest_x, np.clip((tx - crest_x) / (0.12 * W0), 0, 1), 0.0)
+            surf_y = base_y - H0 * 0.52 * prof * (1 - 0.35 * curl ** 2)
+            tx = tx - 0.10 * W0 * curl ** 2 * prof                       # 浪顶向前（左）探出
+            on_surface = rng.random(n) < 0.7
+            ty = np.where(on_surface, surf_y + rng.normal(0, 12, n),
+                          surf_y + (base_y - surf_y) * rng.random(n) ** 0.5)
+            ty = np.minimum(ty, base_y + 10)
             delay = (sx / W0) * 1.6 + rng.random(n) * 0.4           # 从左往右掠
             w = 2 * math.pi / (1.6 + 0.6 * rng.random(n))
             self.wave = dict(sx=sx, sy=sy, tx=tx, ty=ty, delay=delay, w=w, b=rng.random(n))
@@ -205,10 +220,16 @@ class Scene:
             y = y * (1 - 0.5 * k) + wv["sy"][active] * 0.5 * k
         xi = np.clip(x.astype(int), 0, W0 - 1); yi = np.clip(y.astype(int), 0, H0 - 1)
         img = np.zeros((H0, W0), np.float32)
-        np.add.at(img, (yi, xi), 0.35 + 0.65 * wv["b"][active])
-        img = np.clip(img / 2.2, 0, 1)
+        wgt = 0.35 + 0.65 * wv["b"][active]
+        for dx_, dy_ in ((0, 0), (1, 0), (0, 1), (1, 1)):          # 2×2 溅射
+            np.add.at(img, (np.clip(yi + dy_, 0, H0 - 1), np.clip(xi + dx_, 0, W0 - 1)), wgt)
+        img = np.clip(img / 3.0, 0, 1)
+        # 起飞的沙离开沙面：底图下 2/3 的沙面随起飞比例变暗（沙走了）
+        lift = float(active.mean())
+        fade = np.clip((self.yy - H0 * 0.42) / (H0 * 0.58), 0, 1)[..., None] * 0.6 * lift
+        out = out * (1 - fade)
         col = np.array(pal[3], np.float32) / 255
-        return out * (1 - img[..., None] * 0.9) + col * img[..., None] * 0.9
+        return out * (1 - img[..., None] * 0.95) + col * img[..., None] * 0.95
 
     # ------------------------------------------------------------ 字卡
     def cards(self, d, t, flash_white):
@@ -227,10 +248,10 @@ class Scene:
         wx = cx + (x_frac - 0.5) * span; wy = cy + (y_frac - 0.5) * span * H0 / W0
         h = float(terrain(np.array([wx]), np.array([wy]))[0])
         dist = math.hypot(wx - cx, wy - cy)
-        f = self.font(FONT_MONO, 26)
-        d.text((W0 * x_frac + 14, H0 * y_frac - 30), f"h {h:8.3f} m", font=f, fill=(*RED, 230))
-        d.text((W0 * x_frac + 14, H0 * y_frac - 4), f"d {dist:8.2f} m", font=f, fill=(*RED, 230))
-        d.rectangle([W0 * x_frac - 6, H0 * y_frac - 6, W0 * x_frac + 6, H0 * y_frac + 6], outline=(*RED, 230), width=2)
+        f = self.font(FONT_MONO, 40)
+        d.text((W0 * x_frac + 22, H0 * y_frac - 48), f"h {h:8.3f} m", font=f, fill=(*RED, 240))
+        d.text((W0 * x_frac + 22, H0 * y_frac - 4), f"d {dist:8.2f} m", font=f, fill=(*RED, 240))
+        d.rectangle([W0 * x_frac - 10, H0 * y_frac - 10, W0 * x_frac + 10, H0 * y_frac + 10], outline=(*RED, 240), width=3)
 
     # ------------------------------------------------------------ 画
     def draw(self, t):
@@ -257,7 +278,7 @@ class Scene:
             out = self.upscale(small)
             # 最后 3 s：极小人影（P01 底图淡入叠在远景上）
             if t > 15.0:
-                pl = self.plate("P01")
+                pl = self.plate("P16")
                 if pl is not None:
                     k2 = (t - 15.0) / 3.0
                     lum = pl.mean(-1, keepdims=True)
@@ -265,7 +286,7 @@ class Scene:
                     tinted = P_[0] * (1 - lum) + P_[2] * lum
                     out = out * (1 - 0.85 * k2) + tinted * 0.85 * k2
         elif label.startswith(("D0",)):
-            pl = self.plate("P08")
+            pl = self.plate("P14")
             base = pl if pl is not None else np.zeros((H0, W0, 3), np.float32)
             lum = base.mean(-1)
             # 底图的等值线（亮度）+ 暗化
