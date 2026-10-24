@@ -63,7 +63,7 @@ def terrain(x, y, px=0.0):
     def gain(lam):
         if px <= 0:
             return 1.0
-        return float(np.clip((lam / px - 12.0) / 12.0, 0.0, 1.0))   # 波长 < 12 px 全去，< 24 px 淡出（等高线在近奈奎斯特的波纹上会抖）
+        return float(np.clip((lam / px - 40.0) / 40.0, 0.0, 1.0))   # 波长 < 40 px 全去，< 80 px 淡出：小于这个的波纹让等高线看起来像摩尔纹
     h = np.zeros_like(x, dtype=np.float64)
     for i, (lam, amp) in enumerate(((180.0, 14.0), (70.0, 5.0), (28.0, 1.6))):
         g = gain(lam)
@@ -165,10 +165,13 @@ class Scene:
             spacing *= 2
         drift = 0.08 * spacing * math.sin(2 * math.pi * t / 11.0)      # 线随「风」慢漂
         frac = ((h + drift) / spacing) % 1.0
-        line = np.clip(1 - np.abs(frac - 0.5) * 2 * 14, 0, 1) * contour_gain
-        # 每第 5 条粗
+        # 线宽随梯度：等高线密处（每像素跨越多少条）线变细变淡，不出摩尔纹
+        dens = np.sqrt(gx * gx + gy * gy) / spacing              # 条 / 像素
+        k = 14.0 * np.clip(dens * 6, 1.0, 6.0)                   # 密 → 线更窄
+        att = np.clip(1.0 - dens * 2.5, 0.0, 1.0)                # 密 → 更淡
+        line = np.clip(1 - np.abs(frac - 0.5) * 2 * k, 0, 1) * contour_gain * att
         idx = np.floor((h + drift) / spacing)
-        line = np.maximum(line, np.where(idx % 5 == 0, np.clip(1 - np.abs(frac - 0.5) * 2 * 7, 0, 1) * 0.9 * contour_gain, 0))
+        line = np.maximum(line, np.where(idx % 5 == 0, np.clip(1 - np.abs(frac - 0.5) * 2 * k * 0.5, 0, 1) * 0.9 * contour_gain * att, 0))
         P_ = np.array(pal, np.float32) / 255
         base = P_[0] * (1 - lam[..., None]) + P_[1] * lam[..., None] * 0.9 + P_[2] * (lam[..., None] ** 3) * 0.5
         out = base * (1 - line[..., None] * 0.85) + P_[3] * line[..., None] * 0.85
@@ -179,30 +182,48 @@ class Scene:
         return np.asarray(im).astype(np.float32) / 255
 
     # ------------------------------------------------------------ 浪：粒子
+    def wave_profile(self, n, rng):
+        """非对称卷浪的外轮廓（屏幕坐标）：迎风面（左）缓、背风面（右）陡、浪顶向前（右）探出卷曲。
+        返回轮廓上的目标点 (tx, ty) 和「浪唇」标记。"""
+        base_y = H0 * 0.78; x0 = 0.06 * W0; xc = 0.56 * W0; H = 0.50 * H0
+        s_ = rng.random(n)
+        tx = np.empty(n); ty = np.empty(n); lip = np.zeros(n, bool)
+        m1 = s_ < 0.55
+        u1 = s_[m1] / 0.55
+        tx[m1] = x0 + (xc - x0) * u1
+        ty[m1] = base_y - H * (u1 ** 2.2)                         # 迎风面：凸起、越到顶越陡
+        m2 = (s_ >= 0.55) & (s_ < 0.80)
+        u2 = (s_[m2] - 0.55) / 0.25
+        r = 0.16 * H0
+        ang = math.pi * 0.5 - u2 * math.pi * 1.15                 # 卷：从顶向前、再卷下去
+        tx[m2] = xc + r * np.cos(ang) + r * 0.3
+        ty[m2] = (base_y - H + r) - r * np.sin(ang)
+        lip[m2] = u2 > 0.45
+        m3 = s_ >= 0.80
+        u3 = (s_[m3] - 0.80) / 0.20
+        tipx = xc + r * math.cos(math.pi * 0.5 - math.pi * 1.15) + r * 0.3
+        tipy = (base_y - H + r) - r * math.sin(math.pi * 0.5 - math.pi * 1.15)
+        tx[m3] = tipx + (0.76 * W0 - tipx) * u3 + 0.05 * W0 * np.sin(u3 * math.pi)
+        ty[m3] = tipy + (base_y - tipy) * (u3 ** 0.7)             # 背风面：陡落
+        return tx, ty, lip
+
     def wave_particles(self, n=400000, seed=3):
         if self.wave is None:
             rng = np.random.default_rng(seed)
-            # 起点：屏幕坐标里下 2/3 的沙面（P08 的沙地），按行密度
             sx = rng.uniform(0, W0, n); sy = H0 * (0.42 + 0.58 * rng.random(n) ** 0.7)
-            # 目标：一道浪的侧剖面 —— 70% 粒子在浪面（厚 ~25 px 的曲线带），30% 填在浪面以下（密度向下衰减）
-            tx = 0.08 * W0 + rng.random(n) * 0.84 * W0
-            crest_x = 0.60 * W0; base_y = H0 * 0.78
-            prof = np.exp(-((tx - crest_x) / (0.17 * W0)) ** 2)           # 浪高剖面
-            # 卷：过了浪顶的一侧往回勾
-            curl = np.where(tx > crest_x, np.clip((tx - crest_x) / (0.12 * W0), 0, 1), 0.0)
-            surf_y = base_y - H0 * 0.52 * prof * (1 - 0.35 * curl ** 2)
-            tx = tx - 0.10 * W0 * curl ** 2 * prof                       # 浪顶向前（左）探出
-            on_surface = rng.random(n) < 0.7
-            ty = np.where(on_surface, surf_y + rng.normal(0, 12, n),
-                          surf_y + (base_y - surf_y) * rng.random(n) ** 0.5)
-            ty = np.minimum(ty, base_y + 10)
-            delay = (sx / W0) * 1.6 + rng.random(n) * 0.4           # 从左往右掠
+            tx, ty, lip = self.wave_profile(n, rng)
+            base_y = H0 * 0.78
+            on = rng.random(n) < 0.7                                # 70% 在轮廓带，30% 填浪体
+            ty = np.where(on, ty + rng.normal(0, 7, n), ty + (base_y - ty) * rng.random(n) ** 0.5)
+            spray = lip & (rng.random(n) < 0.35)                    # 浪唇被风撕下的沙沫
+            delay = (sx / W0) * 1.6 + rng.random(n) * 0.4
             w = 2 * math.pi / (1.6 + 0.6 * rng.random(n))
-            self.wave = dict(sx=sx, sy=sy, tx=tx, ty=ty, delay=delay, w=w, b=rng.random(n))
+            self.wave = dict(sx=sx, sy=sy, tx=tx, ty=ty, delay=delay, w=w, b=rng.random(n), lip=lip, spray=spray,
+                             crest=(0.56 * W0 + 0.05 * H0, base_y - 0.50 * H0 + 0.16 * H0))
         return self.wave
 
     def draw_wave(self, out, t, t_hit, pal, settle_from=None):
-        """t_hit = 68.0 最大一击；之后粒子飞向目标；settle_from 之后落回"""
+        """t_hit = 68.0 最大一击；粒子沿弹簧飞向浪轮廓，飞行中绕浪顶有涡旋（卷）；浪唇沙沫顺风撕出"""
         wv = self.wave_particles()
         u = t - t_hit - wv["delay"]
         active = u > 0
@@ -211,24 +232,35 @@ class Scene:
         uu = np.clip(u[active], 0, 60)
         e0x = wv["sx"][active] - wv["tx"][active]; e0y = wv["sy"][active] - wv["ty"][active]
         w = wv["w"][active]
-        ex = (e0x + (0 + w * e0x) * uu) * np.exp(-w * uu); ey = (e0y + (-180 + w * e0y) * uu) * np.exp(-w * uu)
+        ex = (e0x + (60 + w * e0x) * uu) * np.exp(-w * uu); ey = (e0y + (-220 + w * e0y) * uu) * np.exp(-w * uu)
         x = wv["tx"][active] + ex; y = wv["ty"][active] + ey
+        cx, cy = wv["crest"]
+        dx = x - cx; dy = y - cy
+        rr = np.sqrt(dx * dx + dy * dy) + 1e-6
+        ang = 1.6 * np.exp(-rr / (0.22 * H0)) * np.exp(-uu / 1.4) * (1 - np.exp(-uu / 0.3))   # 涡旋：近浪顶、飞行早期转得多
+        ca, sa = np.cos(ang), np.sin(ang)
+        x = cx + dx * ca - dy * sa; y = cy + dx * sa + dy * ca
+        sp = wv["spray"][active]
+        drift = np.clip(uu - 0.8, 0, 6)
+        x = x + sp * drift * 140.0; y = y + sp * (drift ** 2) * 18.0   # 沙沫：到位后顺风飘、下落
         if settle_from is not None and t > settle_from:
             k = min(1.0, (t - settle_from) / 4.0) ** 1.5
-            # 落回：往原沙面回一半（溶解只到一半）
             x = x * (1 - 0.5 * k) + wv["sx"][active] * 0.5 * k
             y = y * (1 - 0.5 * k) + wv["sy"][active] * 0.5 * k
         xi = np.clip(x.astype(int), 0, W0 - 1); yi = np.clip(y.astype(int), 0, H0 - 1)
-        img = np.zeros((H0, W0), np.float32)
-        wgt = 0.35 + 0.65 * wv["b"][active]
-        for dx_, dy_ in ((0, 0), (1, 0), (0, 1), (1, 1)):          # 2×2 溅射
+        wgt = (0.35 + 0.65 * wv["b"][active]) * np.where(sp, np.clip(1 - drift / 5, 0, 1), 1.0)
+        img = np.zeros((H0, W0), np.float32); lipimg = np.zeros((H0, W0), np.float32)
+        lipw = wgt * wv["lip"][active]
+        for dx_, dy_ in ((0, 0), (1, 0), (0, 1), (1, 1)):
             np.add.at(img, (np.clip(yi + dy_, 0, H0 - 1), np.clip(xi + dx_, 0, W0 - 1)), wgt)
-        img = np.clip(img / 3.0, 0, 1)
-        # 起飞的沙离开沙面：底图下 2/3 的沙面随起飞比例变暗（沙走了）
+            np.add.at(lipimg, (np.clip(yi + dy_, 0, H0 - 1), np.clip(xi + dx_, 0, W0 - 1)), lipw)
+        img = np.clip(img / 3.0, 0, 1); lipimg = np.clip(lipimg / 3.0, 0, 1)
         lift = float(active.mean())
         fade = np.clip((self.yy - H0 * 0.42) / (H0 * 0.58), 0, 1)[..., None] * 0.6 * lift
         out = out * (1 - fade)
-        col = np.array(pal[3], np.float32) / 255
+        sand = np.array((158, 138, 108), np.float32) / 255          # 月光下的沙：暖灰
+        cool = np.array((196, 210, 222), np.float32) / 255          # 只有浪唇吃到冷光
+        col = sand[None, None, :] * (1 - lipimg[..., None]) + cool[None, None, :] * lipimg[..., None]
         return out * (1 - img[..., None] * 0.95) + col * img[..., None] * 0.95
 
     # ------------------------------------------------------------ 字卡
@@ -267,10 +299,10 @@ class Scene:
         if label.startswith("A01"):
             # 对数拉远：span 从 0.08 m（一粒沙）到 2400 m（整片沙丘），18 s；速度跟 drone 包络（前 12 s 慢起）
             u = t / 18.0
-            ue = u ** 1.35
-            span = 0.08 * (2400 / 0.08) ** ue
+            ue = u * u * (3 - 2 * u)                       # 慢入慢出（对数尺度上）
+            span = 0.3 * (600 / 0.3) ** ue                 # 0.3 m → 600 m（3.3 个数量级；v2 是 4.5）
             cx = 1200 + 40 * math.sin(2 * math.pi * t / 23); cy = 800 + 25 * math.cos(2 * math.pi * t / 17)
-            h, xs, ys = self.terrain_view(cx, cy, span)
+            h, xs, ys = self.terrain_view(cx, cy, span, step=1)
             # 天光：开头稍亮，最后 4 s 转夜
             k = min(1.0, max(0.0, (t - 14) / 4))
             p = [tuple(int(a * (1 - k) + b * k) for a, b in zip(ca, cb)) for ca, cb in zip(PAL_DUSK, PAL_NIGHT)]

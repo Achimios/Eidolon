@@ -44,6 +44,11 @@ PLATES = {
  "P15": ("SCENE: noon, white harsh overhead light, no shadows, bleached pale sand, a tiny figure with a hat and staff in the far distance occupying 1% of the frame, empty sky.", "B 正午"),
  "P16": ("SCENE: vast dunes at dusk, the figure is a single dark dot on a ridge far away occupying about 1% of the frame, enormous empty foreground of rippled sand.", "A 尾 / C"),
  "P17": ("SCENE: the whole frame is one gloved hand holding a graduated leveling staff, black-and-white measurement marks sharp, sand grains blowing past, dusk, nothing else.", "B02 读数"),
+ # v3（ReadScreen：纯场景不带角色参考；每张先问「和已有的有什么不同」）
+ "P19": ("SCENE: straight-down aerial view (nadir, map view) of a field of sand dunes, the crests forming flowing curved lines like contour lines on a map, long shadows from a low sun, no person, no horizon.", "B01 正俯视"),
+ "P20": ("SCENE: extreme macro photograph of sand grains, each grain a different translucent mineral (quartz, garnet, black magnetite), filling the whole frame, shallow focus, no person, warm side light.", "A 开头 微距"),
+ "P21": ("SCENE: a night so dark the dunes are only barely-visible ridges against a slightly less dark sky, no stars, no light source, no person; the frame is 95% black.", "C 全黑夜"),
+ "P22": ("SCENE: extreme close-up: one gloved hand gripping a graduated surveying staff with black-and-white centimeter marks, the hand and staff fill the whole frame, blowing sand grains frozen in the air, dusk; no face, no body, no horizon.", "B02 读数特写"),
  "P18": ("SCENE: medium shot from behind: the surveyor with a wide flat-brimmed hat, long canvas coat, rolled map tube on her back, planting a graduated staff taller than herself into the sand on a ridge, dusk horizon glow.", "新轮廓参考"),
 }
 V1_IDS = ["P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10"]
@@ -66,7 +71,7 @@ def log(n, note, files):
 def prompt_for(pid):
     scene, _ = PLATES[pid]
     # 「no person」或只给手 / 微距的场景不带角色描述（否则角色会占满画面）
-    solo = ("no person" in scene) or ("the whole frame is one gloved hand" in scene) or ("extreme macro" in scene) or ("out of focus" in scene)
+    solo = ("no person" in scene) or ("no face, no body" in scene) or ("the whole frame is one gloved hand" in scene) or ("extreme macro" in scene) or ("out of focus" in scene)
     return f"{scene} {'' if solo else CHARACTER} {STYLE}"
 
 
