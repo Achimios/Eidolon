@@ -51,6 +51,11 @@ Dune 预告片 → Billie MV；Ash Thorp 式纯 2D motion design（PCB 素材，
 - 感官空间：新子代理重做 `25_感官空间_正面_v1`（照审计图 / 人声条带配色）待👤看。
 - 👤明天：多生成视频素材（`生成/_待生成清单.md`）；走廊 C 多出几张 Seedream（图 2 用 A/D 关键帧或走廊背影截帧）；**拍一张自己的背影**当 John 剪影参考（无标志、通用装甲或普通男人二选一）。⚠️**S1 升正式版 10-29 前**。
 
+## 🌙 2026-10-24 深夜：Fable 三条 MV（另一个会话「Music video project」做，我交叉审）
+- ⭐先看 `Projekt_Visual/_Fable_今晚汇总.md`。Piccolo（`MV_Piccolo/样片/03_…v3b`）、Happier Than Ever（`MV_Happier_Than_Ever/样片/0{1,2}_…v5`）、Dune 原创预告《静海》（`MV_Dune/样片/A_…v3` + `D_…v4`，音床是自合成的 `音床_v2.wav`，没下载任何东西）。
+- 感受器给两首歌跑了；新工具 `tools/sense_lyrics.py`（whisperX，独立 `.venv_whisperx`；HTE 用👤给的歌词强制对齐 → `歌词_v4.json`）。ffmpeg 已加进用户 PATH。
+- 等👤：音床用耳朵判；Dune 浪是「笔画」还是「水墙」；Dune 真音频来源（`MV_Dune/音频候选来源.md`）；网页端视频 prompt 清单（HTE / Dune 各自 `生成/prompt清单_网页端_v1.md`）。
+
 ## ☀ 2026-10-23 早：给👤看的（夜里三个子代理自迭代 + 主会话筛过一轮）
 - 远端：GitHub 私有 `Achimios/Eidolon`、`Achimios/Projekt_Visual`（push 走代理 7897）。图片瘦身：参考库截图 / 接触表不进 git，>2 MB 图 pre-commit 拦。
 - 剪辑表 v4：57.94 = Golden Age spin（twist 不用）；51.52 碎裂换 `19_碎裂_v5c_连续_B长推`（我选 B）。
