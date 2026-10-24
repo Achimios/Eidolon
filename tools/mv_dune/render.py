@@ -205,15 +205,15 @@ class Scene:
         tipy = (base_y - H + r) - r * math.sin(math.pi * 0.5 - math.pi * 1.15)
         tx[m3] = tipx + (0.76 * W0 - tipx) * u3 + 0.05 * W0 * np.sin(u3 * math.pi)
         ty[m3] = tipy + (base_y - tipy) * (u3 ** 0.7)             # 背风面：陡落
-        return tx, ty, lip
+        return tx, ty, lip, m2
 
     def wave_particles(self, n=400000, seed=3):
         if self.wave is None:
             rng = np.random.default_rng(seed)
             sx = rng.uniform(0, W0, n); sy = H0 * (0.42 + 0.58 * rng.random(n) ** 0.7)
-            tx, ty, lip = self.wave_profile(n, rng)
+            tx, ty, lip, curl = self.wave_profile(n, rng)
             base_y = H0 * 0.78
-            on = rng.random(n) < 0.7                                # 70% 在轮廓带，30% 填浪体
+            on = (rng.random(n) < 0.7) | curl                       # 70% 在轮廓带，30% 填浪体；卷段不填（卷下面是空的 —— 否则成一个直边竖块）
             ty = np.where(on, ty + rng.normal(0, 7, n), ty + (base_y - ty) * rng.random(n) ** 0.5)
             spray = lip & (rng.random(n) < 0.35)                    # 浪唇被风撕下的沙沫
             delay = (sx / W0) * 1.6 + rng.random(n) * 0.4
