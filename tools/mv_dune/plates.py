@@ -65,7 +65,9 @@ def log(n, note, files):
 
 def prompt_for(pid):
     scene, _ = PLATES[pid]
-    return f"{scene} {CHARACTER if 'no person' not in scene else ''} {STYLE}"
+    # 「no person」或只给手 / 微距的场景不带角色描述（否则角色会占满画面）
+    solo = ("no person" in scene) or ("the whole frame is one gloved hand" in scene) or ("extreme macro" in scene) or ("out of focus" in scene)
+    return f"{scene} {'' if solo else CHARACTER} {STYLE}"
 
 
 def main():
