@@ -17,9 +17,10 @@ GEN = MV / "生成"
 LEDGER = GEN / "ledger.jsonl"
 CAP = 30
 
-CHARACTER = ("CHARACTER: a surveyor seen mostly from behind or by her hands, wrapped in a long weathered dust-colored canvas coat with a high "
-             "collar and a hood pulled low so the face is almost never visible, heavy laced boots, a worn leather strap across the back, "
-             "holding a small matte-black handheld rangefinder with a blank dark display (no text, no digits). Stylized CG, not photoreal.")
+CHARACTER = ("CHARACTER: a land surveyor, identity defined by her tools, not by a cloak: a wide flat-brimmed canvas hat (NO hood, NO face mask), "
+             "a long dust-colored canvas work coat, a rolled map tube strapped across her back, and a graduated leveling staff taller than herself "
+             "with black-and-white measurement marks, planted in the sand. Face in shadow under the brim, almost never visible. Heavy laced boots. "
+             "A small matte-black handheld rangefinder with a blank dark display (no text, no digits). Stylized CG, not photoreal.")
 STYLE = ("STYLE: stylized CG illustration, matte shading, after-sunset light with a single warm horizon glow, very dark exposure, "
          "muted palette (ochre sand, slate blue night), film grain, 16:9 cinematic still, no text, no logos, no vehicles, no creatures, "
          "no symbols, nothing resembling any existing film. Enormous scale contrast: person tiny, dunes vast.")
@@ -35,8 +36,18 @@ PLATES = {
  "P08": ("SCENE: wide low-angle shot from behind: the hooded figure small in the foreground, and behind her the dunes rising into one enormous curling wave-like crest, night blue, no water, only sand.", "D 浪"),
  "P09": ("SCENE: side medium shot of the hooded figure bent over a map spread on the sand, holding it down with both hands against the wind, dusk.", "B/C 看图"),
  "P10": ("SCENE: a huge dune face seen from below at dusk, wind pouring sand off the crest like a waterfall, no person.", "A 中段"),
+ # v2（ReadScreen：拉开尺度 / 视角 / 时间；测绘员新轮廓）
+ "P11": ("SCENE: straight-down top view (map view) of dunes from very high above, the ridges reading like contour lines, one microscopic figure with a staff casting a long thin shadow, dusk.", "B01 俯视"),
+ "P12": ("SCENE: ground-level macro shot: individual sand grains in the foreground sharp, a graduated leveling staff planted in the sand rising out of frame, the figure far behind out of focus, dusk.", "B02 贴地"),
+ "P13": ("SCENE: extreme macro of a few sand grains on a dark surface, each grain a different mineral color, shallow depth of field, no person, warm side light.", "A 开头 微距"),
+ "P14": ("SCENE: almost total darkness, night dunes barely visible as faint ridges, a single tiny figure with a staff, no light source except a faint horizon glow; very dark exposure.", "C 夜 全黑"),
+ "P15": ("SCENE: noon, white harsh overhead light, no shadows, bleached pale sand, a tiny figure with a hat and staff in the far distance occupying 1% of the frame, empty sky.", "B 正午"),
+ "P16": ("SCENE: vast dunes at dusk, the figure is a single dark dot on a ridge far away occupying about 1% of the frame, enormous empty foreground of rippled sand.", "A 尾 / C"),
+ "P17": ("SCENE: the whole frame is one gloved hand holding a graduated leveling staff, black-and-white measurement marks sharp, sand grains blowing past, dusk, nothing else.", "B02 读数"),
+ "P18": ("SCENE: medium shot from behind: the surveyor with a wide flat-brimmed hat, long canvas coat, rolled map tube on her back, planting a graduated staff taller than herself into the sand on a ridge, dusk horizon glow.", "新轮廓参考"),
 }
 V1_IDS = ["P01", "P02", "P03", "P04", "P05", "P06", "P07", "P08", "P09", "P10"]
+V2_IDS = ["P18", "P11", "P12", "P13", "P14", "P15", "P16", "P17"]
 
 
 def used():
