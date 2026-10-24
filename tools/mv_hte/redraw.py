@@ -176,7 +176,7 @@ class Plates:
                 im = Image.open(lp).convert("RGBA").resize((max(1, x1 - x0), max(1, y1 - y0)), Image.BILINEAR)
                 canvas = Image.new("RGBA", (Wb, Hb), (0, 0, 0, 0)); canvas.paste(im, (x0, y0))
                 arr = np.asarray(canvas).astype(np.float32) / 255
-                layers.append((arr, L.get("z_index", 0), (L.get("name") or "") + " " + (L.get("description") or "")))
+                layers.append((arr, L.get("z_index", 0), (L.get("name") or "") + "  " + (L.get("description") or "")))   # 两个空格分隔名字和描述
             layers.sort(key=lambda x: x[1])
             # 最远层 = 整幅底图，但把所有前景层（她、道具）的区域挖掉、用模糊归一化填补（简易 inpaint），
             # 再把拆层给的背景层盖上去 —— 这样视差一动不会出现两个她 / 两把汤匙（ReadScreen 第 2 轮抓到的重影）
@@ -200,7 +200,9 @@ class Plates:
                 full = np.concatenate([np.clip(far, 0, 1), np.ones(base.shape[:2] + (1,), np.float32)], -1)
                 layers[0] = (full, layers[0][1], layers[0][2])
             for i, (_, _, nm) in enumerate(layers):
-                if any(w in nm.lower() for w in ("person", "woman", "girl", "character", "figure", "she ")):
+                if i == 0:
+                    continue                                    # 背景层的描述里常有「behind the person」，别认错
+                if any(w in nm.lower().split("  ")[0] for w in ("person", "woman", "girl", "character", "figure")):   # 只看名字
                     person = i; break
         self.cache[pid] = {"base": base, "layers": layers, "person": person}
         return self.cache[pid]
