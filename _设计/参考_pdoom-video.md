@@ -1,6 +1,6 @@
 # 参考：pdoom-video（mexicat/pdoom-video，2026-10-23 读）
 
-> 只读了源码和文档，没运行。clone 在 scratchpad `pdoom/repo/`（commit fa164b7）。
+> 只读了源码和文档，没运行。clone 在 `Vault_Automata/_外部仓库/pdoom-video`（commit fa164b7，2026-10-26 从 scratchpad 挪过来）。
 > ⚠️这不是《18 months》那支片子，是另一支 MV：**《I'm Upping My P(doom)》**（Suno 生成的歌，不是他写的）。
 > LICENSE 署名 Giacomo Magnanini（GitHub mexicat）；和 @anabology 是同一个人，这一点按用户的说法记，我没核实。
 > 👤用户的判断「更多是 Claude 生成的画面，不是 Seedance」**对，而且更彻底**：仓库里**一帧生成视频都没有**，
