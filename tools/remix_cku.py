@@ -117,6 +117,24 @@ SHAPES = {   # 名字：(alpha 图, 裁切框 (x0, y0, x1, y1) 或 None)
 }
 
 
+def cap_top(m):
+    """源图把头顶裁掉了（第 0 行有前景）→ 轮廓会沿画框闭合成一条水平直线（v3 的「平头」）。
+    补法：在上面垫一段空白，用一段半椭圆把头顶补圆。椭圆的宽 = 第 0 行前景的左右端点，
+    侧边的斜率用第 0–12 行轮廓的左右端点外推（连续、不出直角），高 = 0.42 × 半宽。"""
+    rows = np.nonzero(m[0])[0]
+    xa, xb = rows.min(), rows.max()
+    half = (xb - xa) / 2
+    pad = int(half * 0.6) + 4
+    out = np.zeros((m.shape[0] + pad, m.shape[1]), bool)
+    out[pad:] = m
+    xc = (xa + xb) / 2
+    b = 0.42 * half
+    yy, xx = np.mgrid[0:pad + 1, 0:m.shape[1]]
+    inside = ((xx - xc) / (half + 0.5)) ** 2 + ((yy - pad) / b) ** 2 <= 1.0
+    out[:pad + 1] |= inside
+    return out
+
+
 def silhouette_path(name, n=2048):
     """剪影 alpha → 外轮廓，从最高点开始顺时针，按弧长均匀取 n 点，归一到 y ∈ [−1, 1]"""
     path, box = SHAPES[name]
@@ -125,6 +143,8 @@ def silhouette_path(name, n=2048):
         im = im.crop(box)
     sc = 520 / max(im.size)
     m = np.asarray(im.resize((int(im.width * sc), int(im.height * sc)), Image.BILINEAR)) > 127
+    if box and box[1] == 0 and m[0].any():
+        m = cap_top(m)
     m = np.pad(m, 2)                                        # 底边被画面裁掉 → 补零让轮廓沿裁切线闭合
     Hm, Wm = m.shape
     ys, xs = np.nonzero(m)
@@ -208,8 +228,7 @@ def her_layer():
     burst = (t >= 51.56) & (t < 51.66)
     feed = xy * 0.5 * burst[:, None]
     g = ramp([(51.56, 1.08), (52.4, 1.08), (54.0, 0.75), (56.0, 0.4)], t)          # 极点：越过单位圆 → 拉回圆内
-    wet = np.stack([sk.feedback_delay_sat(feed[:, 0], 0.300, g, sr=RSR, damp=3500, drive=2.2),
-                    sk.feedback_delay_sat(feed[:, 1], 0.3013, g, sr=RSR, damp=3500, drive=2.2)], 1)
+    wet = sk.feedback_delay_sat_xy(feed, (0.300, 0.3013), g, sr=RSR, damp=3500, drive=2.2)   # 径向饱和：边界是圆
     # 坠落：碎片的音高一路往下滑（变速读：t' = ∫ rate）
     rate = ramp([(51.56, 1.0), (57.98, 0.55)], t)
     pos = np.clip(np.cumsum(rate) - np.argmax(t >= 51.56), 0, None) + np.argmax(t >= 51.56)
@@ -219,8 +238,8 @@ def her_layer():
     out = out + wet * 0.55 * fade[:, None]
     # 炸开的那 4 帧（51.56–51.72）：短延迟（7.1 / 11.3 ms）的反馈环，g = 1.3 → 环在零点几秒内自激、把轮廓撕成一团；环内 tanh 接住
     gf = ramp([(51.56, 1.3), (51.74, 1.3), (51.95, 0.0)], t)
-    chaos = np.stack([sk.feedback_delay_sat(feed[:, 0], 0.0071, gf, sr=RSR, damp=9000, drive=1.6),
-                      sk.feedback_delay_sat(feed[:, 1], 0.0113, gf, sr=RSR, damp=9000, drive=1.6)], 1)
+    # 径向饱和（对 (L, R) 的模长做 tanh，方向不变）：她从圆里生出来，最后炸回圆的边界（分声道 tanh 会削成正方形，v3 踩过）
+    chaos = sk.feedback_delay_sat_xy(feed, (0.0071, 0.0113), gf, sr=RSR, damp=9000, drive=1.6)
     out = out + chaos * 0.9 * ramp([(51.56, 1.0), (51.9, 1.0), (52.3, 0.0)], t)[:, None]
     # 只进混音、不进示波器文件：高八度的「身体」（E2 在外放上听不见）。同一条音高、同一条幅度包络，−12 dB
     ph2 = 2 * ph

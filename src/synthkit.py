@@ -308,3 +308,29 @@ def feedback_delay_sat(x, t, g, sr=SR, damp=5000.0, drive=1.0):
         prev = np.zeros(D)
         prev[:m] = y[k:k + m]
     return y
+
+
+def feedback_delay_sat_xy(xy, t, g, sr=SR, damp=5000.0, drive=1.0):
+    """立体声（XY）版：左右各自的延迟 t = (tL, tR)，饱和是**径向**的 —— 对向量 (L, R) 的模长做 tanh、方向不变：
+    v = g·(LP(yL[n-DL]), LP(yR[n-DR]))，v ← v · tanh(drive·|v|) / (drive·|v|)，y = x + v。
+    示波器上饱和边界是一个圆（分声道 tanh 会是正方形）。g ≥ 1 也有界（|v| ≤ 1/drive）。按 min(DL, DR) 分块向量化。"""
+    tl, tr = (t, t) if np.isscalar(t) else t
+    DL, DR = max(1, int(round(tl * sr))), max(1, int(round(tr * sr)))
+    B = min(DL, DR)
+    n = len(xy)
+    gc = as_curve(g, n)
+    a = math.exp(-2 * math.pi * damp / sr)
+    y = np.zeros((n, 2))
+    zl, zr = np.zeros(1), np.zeros(1)
+    for k in range(0, n, B):
+        m = min(B, n - k)
+        idx = np.arange(k, k + m)
+        dl = np.where(idx - DL >= 0, y[np.clip(idx - DL, 0, None), 0], 0.0)
+        dr = np.where(idx - DR >= 0, y[np.clip(idx - DR, 0, None), 1], 0.0)
+        fl, zl = lfilter([1 - a], [1, -a], dl, zi=zl)
+        fr, zr = lfilter([1 - a], [1, -a], dr, zi=zr)
+        v = gc[k:k + m, None] * np.stack([fl, fr], 1)
+        r = np.linalg.norm(v, axis=1) * drive
+        sc = np.where(r > 1e-12, np.tanh(r) / np.maximum(r, 1e-12), 1.0)
+        y[k:k + m] = xy[k:k + m] + v * sc[:, None]
+    return y
