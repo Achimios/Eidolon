@@ -93,10 +93,38 @@ def smooth_gain(g, ms=12):
     return np.convolve(g, np.ones(k) / k, "same")
 
 
+def expander(x, th_db, ratio=3.0, att=0.005, rel=0.12):
+    """向下扩展（软门限）：包络低于阈值的部分按 ratio 再往下压。用来压掉 Demucs 人声分轨里漏进来的鼓瞬态"""
+    k = int(0.01 * SR)
+    m = np.sqrt(np.convolve((x ** 2).mean(1), np.ones(k) / k, "same"))
+    e_db = 20 * np.log10(m + 1e-9)
+    g = db2a(np.minimum(0.0, (e_db - th_db) * (ratio - 1)))
+    a_a, a_r = math.exp(-1 / (att * SR)), math.exp(-1 / (rel * SR))
+    out = np.empty_like(g)
+    s_ = 1.0
+    for i, v in enumerate(g.tolist()):
+        c = a_a if v < s_ else a_r
+        s_ = c * s_ + (1 - c) * v
+        out[i] = s_
+    return x * out[:, None]
+
+
 # ====================================================================== 她的轮廓
-def silhouette_path(n=2048):
-    """她的正面剪影（生成/角色_她_正面_灰_pro_alpha.png）→ 外轮廓，从头顶开始顺时针，按弧长均匀取 n 点，归一到 y ∈ [−1, 1]"""
-    m = np.asarray(Image.open(WORK / "生成" / "角色_她_正面_灰_pro_alpha.png").convert("L").resize((640, 360), Image.BILINEAR)) > 127
+SRC = OUT / "轮廓源"
+SHAPES = {   # 名字：(alpha 图, 裁切框 (x0, y0, x1, y1) 或 None)
+    "body": (SRC / "N4D_漂浮侧坐_0_alpha.png", None),          # 3D/N4D_两个新模型_预览.jpg 左下：漂浮侧坐、手抚心（不对称）
+    "face": (SRC / "m41_侧脸_alpha.png", (430, 0, 970, 330)),   # 记忆帧 m41（BiRefNet 抠像）：侧脸 = 32.30 blink 里她自己的那张脸
+}
+
+
+def silhouette_path(name, n=2048):
+    """剪影 alpha → 外轮廓，从最高点开始顺时针，按弧长均匀取 n 点，归一到 y ∈ [−1, 1]"""
+    path, box = SHAPES[name]
+    im = Image.open(path).convert("L")
+    if box:
+        im = im.crop(box)
+    sc = 520 / max(im.size)
+    m = np.asarray(im.resize((int(im.width * sc), int(im.height * sc)), Image.BILINEAR)) > 127
     m = np.pad(m, 2)                                        # 底边被画面裁掉 → 补零让轮廓沿裁切线闭合
     Hm, Wm = m.shape
     ys, xs = np.nonzero(m)
@@ -157,14 +185,18 @@ def her_layer():
     ph = np.concatenate([[0.0], np.cumsum(f[:-1])]) / RSR
     u = ph % 1.0
     # 形：圆（从头顶开始顺时针）→ 她的轮廓，按弧长逐点插值
-    Q = silhouette_path()
-    N = len(Q)
-    idx = u * N
-    i0 = np.floor(idx).astype(int) % N; fr = idx - np.floor(idx); i1 = (i0 + 1) % N
-    sil = Q[i0] * (1 - fr[:, None]) + Q[i1] * fr[:, None]
+    def trace(Q):
+        N = len(Q)
+        idx = u * N
+        i0 = np.floor(idx).astype(int) % N; fr = idx - np.floor(idx); i1 = (i0 + 1) % N
+        return Q[i0] * (1 - fr[:, None]) + Q[i1] * fr[:, None]
+    body, face = trace(silhouette_path("body")), trace(silhouette_path("face"))
     circ = np.stack([np.sin(2 * np.pi * u), np.cos(2 * np.pi * u)], 1)
     km = ramp([(46.76, 0.0), (48.36, 0.55), (48.9, 1.0)], t)
     km = km * km * (3 - 2 * km)
+    kf = ramp([(49.48, 0.0), (49.60, 1.0), (50.30, 1.0), (50.42, 0.0)], t)      # 近景换成侧脸（切点附近 0.12 s 内变过去，切点盖住）
+    kf = kf * kf * (3 - 2 * kf)
+    sil = body * (1 - kf[:, None]) + face * kf[:, None]
     xy = circ * (1 - km[:, None]) + sil * km[:, None]
     # 幅度：43.54 光点（极小的圆）→ 45.16 起振一小节到满 → 50.36 起颤幅 → 51.16 硬切静音
     amp = ramp([(43.54, 0.0), (43.6, 0.006), (45.16, 0.010), (46.76, 0.5), (51.16, 0.5)], t)
@@ -190,13 +222,17 @@ def her_layer():
     chaos = np.stack([sk.feedback_delay_sat(feed[:, 0], 0.0071, gf, sr=RSR, damp=9000, drive=1.6),
                       sk.feedback_delay_sat(feed[:, 1], 0.0113, gf, sr=RSR, damp=9000, drive=1.6)], 1)
     out = out + chaos * 0.9 * ramp([(51.56, 1.0), (51.9, 1.0), (52.3, 0.0)], t)[:, None]
+    # 只进混音、不进示波器文件：高八度的「身体」（E2 在外放上听不见）。同一条音高、同一条幅度包络，−12 dB
+    ph2 = 2 * ph
+    octv = (0.75 * np.sin(2 * np.pi * ph2) + 0.25 * (2 / np.pi) * np.arcsin(np.sin(2 * np.pi * ph2))) * amp * db2a(-12)
+    listen = np.stack([octv, octv], 1)
     ev = dict(
         notes=[{"t": a, "dur": round(b - a, 3), "pitch": mm, "vel": 0.5, "layer": "her"} for a, b, mm in notes],
         reveals=[{"t0": 43.54, "t1": 51.72, "layer": "her", "shape": "光点 → 圆（E2）→ 她的轮廓（弧长插值）→ 光点 → 炸开"}],
         macros={"morph": {"fps": FPS, "t0": T0, "v": [round(float(v), 4) for v in ramp([(46.76, 0.0), (48.36, 0.55), (48.9, 1.0)], T0 + np.arange(int((T1 - T0) * FPS)) / FPS)]},
                 "pole_g": {"fps": FPS, "t0": T0, "v": [round(float(v), 4) if T0 + i / FPS >= 51.56 else 0.0 for i, v in enumerate(ramp([(51.56, 1.08), (52.4, 1.08), (54.0, 0.75), (56.0, 0.4)], T0 + np.arange(int((T1 - T0) * FPS)) / FPS))]}},
     )
-    return out, ev
+    return out, listen, ev
 
 
 # ====================================================================== 母带
@@ -241,8 +277,8 @@ def cmd_audio(ver):
     og = ramp([(0, 0), (43.50, 0), (43.54, -6), (45.16, -4), (51.15, -3), (51.16, MUTE), (51.55, MUTE), (51.56, 0), (99, 0)], t)
     ocut = ramp([(43.50, 18000), (43.54, 600), (45.16, 600), (51.16, 3000), (51.56, 18000), (99, 18000)], t)
     other = svf_st(st["other"], ocut) * smooth_gain(db2a(og))[:, None]
-    vg = ramp([(0, 0), (45.10, 0), (45.16, 14), (51.15, 14), (51.16, MUTE), (51.55, MUTE), (51.56, 3), (99, 3)], t)
-    vocals = st["vocals"] * smooth_gain(db2a(vg))[:, None]
+    vg = ramp([(0, 0), (45.10, 0), (45.16, 12), (51.15, 12), (51.16, MUTE), (51.55, MUTE), (51.56, 3), (99, 3)], t)
+    vocals = expander(st["vocals"], -46.0) * smooth_gain(db2a(vg))[:, None]
     # 冲击：51.56 一个 kick + 噪声爆
     imp = np.zeros((n, 2))
     hit = sk.kick(f0=180, f1=40, dur=0.9, decay=0.3) * 0.9
@@ -250,13 +286,17 @@ def cmd_audio(ver):
     sk.place(imp, sk.stereo(hit, 0.0), 51.56 - (T0 - 0.5))
     sk.place(imp, np.stack([nz, np.roll(nz, 37)], 1), 51.56 - (T0 - 0.5))
     # 我们的层
-    her96, ev = her_layer()
+    her96, oct96, ev = her_layer()
     her96_path = OUT / f"显影层_96k_{ver}.wav"
     sf.write(str(her96_path), her96.astype(np.float32), RSR, subtype="FLOAT")
-    her48 = resample_poly(her96, 1, 2, axis=0)
     her = np.zeros((n, 2))
-    sk.place(her, her48, R0 - (T0 - 0.5))
-    mix = drums + bass + other + vocals + imp * 0.8 + her * 0.42
+    sk.place(her, resample_poly(her96, 1, 2, axis=0), R0 - (T0 - 0.5))
+    octl = np.zeros((n, 2))
+    sk.place(octl, resample_poly(oct96, 1, 2, axis=0), R0 - (T0 - 0.5))
+    # 空气：显影段 other 的 8 kHz 以上单独留一层、+6 dB（不让耳朵像被塞住；目标：高频比原曲少 15–20 dB，不是 30）
+    air_g = ramp([(43.50, MUTE), (43.54, 6), (51.15, 6), (51.16, MUTE)], t)
+    air = np.stack([sk.onepole_hp(sk.onepole_hp(st["other"][:, c], 8000), 8000) for c in range(2)], 1) * smooth_gain(db2a(air_g))[:, None]
+    mix = drums + bass + other + vocals + air + imp * 0.8 + (her + octl) * 0.42
     # 裁到窗口，首尾淡
     a, b = int(0.5 * SR), int((0.5 + T1 - T0) * SR)
     mix = mix[a:b]
@@ -266,7 +306,7 @@ def cmd_audio(ver):
     sf.write(str(out_mix), y.astype(np.float32), SR, subtype="PCM_24")
     # 分轨（我们处理过的，按窗口裁）
     sd = OUT / f"分轨_{ver}"; sd.mkdir(exist_ok=True)
-    for k_, v in (("drums", drums), ("bass", bass), ("other", other), ("vocals", vocals), ("impact", imp), ("her", her)):
+    for k_, v in (("drums", drums), ("bass", bass), ("other", other), ("vocals", vocals), ("air", air), ("impact", imp), ("her", her), ("her_octave_listen", octl)):
         sf.write(str(sd / f"{k_}.wav"), v[a:b].astype(np.float32), SR, subtype="PCM_24")
     # 作曲.json（真值；t 全是歌曲播放时间）
     comp = {"_说明": "作曲器选项 A 的 demo：Remix《Can't Kill Us》25.95–57.98。t = 歌曲播放时间（和 感官.json 一致）；音频文件 t=0 ↔ 25.95。",
@@ -369,10 +409,10 @@ SHOTS = [
     (38.74, 43.54, "clip:走廊", {}, "Seedance 走廊背影", "想跟上那个背影"),
     (43.54, 46.76, "scope", dict(s=(1.35, 1.55), oy=(0, 0), rot=(0, 0)), "示波器：光点 → 圆（E2 起振）", "只剩一个点 → 第一次出声"),
     (46.76, 48.36, "scope", dict(s=(2.7, 2.9), oy=(300, 330), rot=(-2, -1)), "示波器微距：圆的上沿开始变形", "头在长出来"),
-    (48.36, 49.56, "scope", dict(s=(1.55, 1.62), oy=(0, 0), rot=(3, 2)), "示波器全景：她的轮廓成形（G2）", "看见了自己的形状"),
-    (49.56, 50.36, "scope", dict(s=(3.0, 3.25), oy=(560, 600), rot=(0, 0)), "示波器近景：头和肩（B2）", "抬头"),
-    (50.36, 51.56, "scope", dict(s=(1.58, 1.66), oy=(0, 0), rot=(0, -1)), "示波器全景：前震 → 一拍全黑缩回光点", "要坏了 → 憋住"),
-    (51.56, 51.72, "scope", dict(s=(1.66, 1.66), oy=(0, 0), rot=(0, 0)), "示波器：炸开（7 / 11 ms 短延迟反馈 g = 1.3，环内饱和）", "被炸开"),
+    (48.36, 49.56, "scope", dict(s=(1.72, 1.8), oy=(45, 50), rot=(3, 2)), "示波器全景：她的轮廓（漂浮侧坐、手抚心；G2）", "看见了自己的形状"),
+    (49.56, 50.36, "scope", dict(s=(1.95, 2.1), oy=(60, 70), rot=(0, 0)), "示波器近景：侧脸（B2；记忆帧 m41 的那张脸）", "抬头，认出自己"),
+    (50.36, 51.56, "scope", dict(s=(1.78, 1.86), oy=(45, 50), rot=(0, -1)), "示波器全景：前震 → 一拍全黑缩回光点", "要坏了 → 憋住"),
+    (51.56, 51.72, "scope", dict(s=(1.86, 1.86), oy=(50, 50), rot=(0, 0)), "示波器：炸开（7 / 11 ms 短延迟反馈 g = 1.3，环内饱和）", "被炸开"),
     (51.72, 57.98, "clip:碎裂", {}, "粒子碎裂 v5c（本片已过的样片）", "失重，往下掉"),
 ]
 CLIPS = {
@@ -401,6 +441,13 @@ class ScopeCam:
         self.sc = Scope(Audio(str(OUT / f"显影层_96k_{ver}.wav"), self.p.upsample), self.p)
         self.buf = None
         self.last = None
+        self.last_img = None
+        self.last_img_t = None
+        o, _ = sf.read(str(OUT / f"分轨_{ver}" / "other.wav"))          # 光点跟远处的声音（处理过的 other）极轻地呼吸
+        k = int(0.25 * SR)
+        e = np.sqrt(np.convolve((o ** 2).mean(1), np.ones(k) / k, "same"))
+        self.env_t = T0 + np.arange(len(e)) / SR
+        self.env = e / (np.percentile(e[(self.env_t > 43.54) & (self.env_t < 46.76)], 95) + 1e-9)
 
     def frame(self, t, prm, u):
         torch = self.torch
@@ -414,10 +461,15 @@ class ScopeCam:
         self.buf = self.sc.step(self.buf, te)
         self.last = te
         self.sc.col = torch.tensor(scope_color(t), device=self.sc.dev).view(3, 1, 1)
+        g0 = self.p.gain
+        if 43.54 <= t < 46.76:
+            self.p.gain = g0 * (0.9 + 0.2 * float(np.clip(np.interp(t, self.env_t, self.env), 0, 1)))   # 亮度 ±10%
         im = Image.fromarray(self.sc.display(self.buf, int(round(t * FPS))))
+        self.p.gain = g0
         rot = r0 + (r1 - r0) * e
         if abs(rot) > 0.01:
             im = im.rotate(rot, resample=Image.BICUBIC, fillcolor=(0, 0, 0))
+        self.last_img, self.last_img_t = im, t
         return im
 
 
@@ -459,7 +511,18 @@ def frame_at(t, cam, clips):
         return cam.frame(t, prm, (t - t0) / (t1 - t0))
     if src.startswith("still:"):
         return Image.open(WORK / src[6:]).convert("RGB").resize((W, H), Image.BICUBIC)
-    return clips.frame(src[5:], t)
+    im = clips.frame(src[5:], t)
+    if src == "clip:碎裂" and t < t0 + 0.5:
+        # 桥：炸开最后一帧的荧光余辉不随切点消失，按指数衰减（τ 0.14 s，0.4 s 后剩 6%）叠在粒子上（screen 混合）
+        tl = t0 - 1 / FPS
+        if cam.last_img is None or abs(cam.last_img_t - tl) > 1e-6:
+            prev = shot_at(tl)
+            cam.frame(tl, prev[3], (tl - prev[0]) / (prev[1] - prev[0]))
+        w = math.exp(-(t - t0) / 0.14)
+        a = np.asarray(im, np.float32) / 255
+        b = np.asarray(cam.last_img, np.float32) / 255 * w
+        im = Image.fromarray(((1 - (1 - a) * (1 - b)) * 255 + 0.5).astype(np.uint8))
+    return im
 
 
 def cmd_board(ver):
