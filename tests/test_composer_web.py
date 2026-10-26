@@ -67,6 +67,22 @@ class TestServe(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve.save_bundle(self.work, self.bundle("v3/../x"))
 
+    def test_final_pointer(self):
+        out = self.work / serve.OUT_DIR
+        self.assertIsNone(serve.read_final(self.work))
+        with self.assertRaises(FileNotFoundError):            # 还没存过的版本不能定稿
+            serve.set_final(self.work, "作曲_v1.json")
+        serve.save_bundle(self.work, self.bundle("v1"))
+        serve.save_bundle(self.work, self.bundle("v2"))
+        for bad in ["作曲_v1_会话.json", "../作曲_v1.json", "当前.txt", ""]:
+            with self.assertRaises((ValueError, FileNotFoundError), msg=bad):
+                serve.set_final(self.work, bad)
+        self.assertEqual(serve.set_final(self.work, "作曲_v1.json"), {"final": "作曲_v1.json", "prev": None})
+        self.assertEqual(serve.set_final(self.work, "作曲_v2.json")["prev"], "作曲_v1.json")
+        self.assertEqual((out / serve.FINAL).read_text(encoding="utf-8"), "作曲_v2.json\n")
+        self.assertEqual(len((out / serve.FINAL_LOG).read_text(encoding="utf-8").splitlines()), 2)
+        self.assertEqual(serve.next_version(out), 3)          # 指针 / 记录不影响版本号
+
     def test_audio_names_must_belong_to_this_version(self):
         pcm = base64.b64encode(np.zeros(80, "<f4").tobytes()).decode()
         out = self.work / serve.OUT_DIR

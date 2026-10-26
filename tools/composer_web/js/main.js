@@ -761,7 +761,7 @@ async function loadStems() {
     const aid = addAudio(buf, { file: `分轨/${nm}` });
     const L = makeLayer('stem', 'stem', '原曲·' + nm.replace(/\.wav$/i, ''), S.layers.length);
     S.layers.push(L);
-    S.clips.push({ id: uid('C'), layer: L.id, b: 0, dur: buf.duration, audio: aid, input: 'stem', active: true, src: `分轨/${nm}@${t0.toFixed(3)}-${t1.toFixed(3)}` });
+    S.clips.push({ id: uid('C'), layer: L.id, b: 0, dur: buf.duration, audio: aid, input: 'stem', active: true, fileOffset: t0, src: `分轨/${nm}@${t0.toFixed(3)}-${t1.toFixed(3)}` });
     if (/drum/i.test(nm)) msgs.push(buildGroove(buf));
   }
   msgs.push(checkGridDrift());
@@ -829,7 +829,8 @@ async function save() {
       for (const [id, fn] of Object.entries(files)) { const a = audio.get(id); if (a) a.file = fn; }
       for (const c of S.clips) if (files[c.audio]) c.file = files[c.audio];
       status(`存好了（${ver}）：${j.dir}\n${j.written.join(' · ')}`, true);
-      return;
+      lastSaved = { truth: j.truth, snap: JSON.stringify(S) };
+      return j.truth;
     }
     status('保存失败：连续三次撞上已有的版本号');
   } catch (e) { status('保存失败：' + e.message); }
@@ -850,6 +851,24 @@ function wavBlob(f, sr) {
   v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
   for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, f[i])) * 32767, true);
   return new Blob([b], { type: 'audio/wav' });
+}
+// 定稿：写 作曲/当前.txt（下游只读它）。改过还没存 → 先存一版再定
+let lastSaved = null;
+async function refreshFinal() {
+  if (!server) { $('finalInfo').textContent = ''; return; }
+  try { const j = await (await api(`/api/final?work=${encodeURIComponent(S.work)}`)).json(); $('finalInfo').textContent = j.final ? `定稿：${j.final.replace('.json', '')}` : '还没有定稿'; } catch (e) { $('finalInfo').textContent = ''; }
+}
+async function finalize() {
+  if (!server) return status('要用 serve.py 打开页面才能定稿');
+  let name = lastSaved && lastSaved.snap === JSON.stringify(S) ? lastSaved.truth : null;
+  if (!name) { name = await save(); if (!name) return; }
+  if (!confirm(`把 ${name} 定为定稿？\n感受器、剪辑、画面以后都读这一版（随时可以再定别的版本）。`)) return;
+  try {
+    const r = await api(`/api/final?work=${encodeURIComponent(S.work)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const j = await r.json();
+    status(`定稿：${j.final}（之前：${j.prev || '无'}）。写在 作曲/当前.txt`, true);
+    refreshFinal();
+  } catch (e) { status('定稿失败：' + e.message); }
 }
 async function openSessions() {
   if (!server) return status('要用 serve.py 打开页面才能读会话');
@@ -918,12 +937,12 @@ function bindHeader() {
   $('songBars').onchange = () => { snapshot(); S.songBars = Math.max(1, Math.min(256, +$('songBars').value || 16)); TL.fit('song'); syncAll(); };
   $('anchor').onchange = () => { snapshot(); S.anchor = +$('anchor').value || 0; const w = checkGridDrift(); if (w) status(w, true); syncAll(); };
   $('anchorSel').onchange = () => { const v = $('anchorSel').value; if (v === '') return; snapshot(); S.anchor = +v; if (S._sense?.bpm) S.bpm = S._sense.bpm; syncAll(); status([`起点 = ${(+v).toFixed(2)} s（第 1 小节对齐原曲这个重拍）`, checkGridDrift()].filter(Boolean).join('\n'), true); };
-  $('work').onchange = async () => { S.work = $('work').value; await loadSense(); status(`作品：${S.work}`); };
+  $('work').onchange = async () => { S.work = $('work').value; lastSaved = null; await loadSense(); refreshFinal(); status(`作品：${S.work}`); };
   $('play').onclick = togglePlay; $('rec').onclick = toggleRec;
   $('loopOn').onclick = () => { S.loop.on = !S.loop.on; syncHeader(); };
   $('metro').onclick = () => { S.settings.metro = !S.settings.metro; syncHeader(); };
   $('countIn').onclick = () => { S.settings.countIn = !S.settings.countIn; syncHeader(); };
-  $('undo').onclick = undo; $('redo').onclick = redo; $('save').onclick = save; $('load').onclick = openSessions;
+  $('undo').onclick = undo; $('redo').onclick = redo; $('save').onclick = save; $('load').onclick = openSessions; $('final').onclick = finalize;
   $('help').onclick = () => $('helpBox').classList.remove('hidden'); $('helpClose').onclick = () => $('helpBox').classList.add('hidden');
   $('sessClose').onclick = () => $('sessBox').classList.add('hidden');
   $('velMode').onchange = () => { S.settings.velMode = $('velMode').value; };
@@ -1046,6 +1065,7 @@ async function boot() {
     $('work').innerHTML = works.map(w => `<option ${w.name === S.work ? 'selected' : ''}>${w.name}</option>`).join('');
     if (!works.some(w => w.name === S.work) && works.length) S.work = works[0].name;
     await loadSense();
+    refreshFinal();
   } catch (e) {
     $('work').innerHTML = `<option>${S.work}（离线）</option>`;
     status('没连上 serve.py：能玩，保存会下载到浏览器的下载文件夹');

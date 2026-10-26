@@ -47,6 +47,10 @@ t('整体唱低 40 音分：测出跑调并在切音时扣掉', () => {
   assert.ok(Math.abs(r.tuneCents + 40) < 6, `测到 ${r.tuneCents}`);
   assert.deepEqual(pitches(r.segs), [64, 67, 71, 69, 67]);
 });
+t('整段连着哼、几乎不停（5 个音 5.2 s）：噪声门不能把整段门掉', () => {
+  const long = [{ midi: 64, dur: 0.8 }, { midi: 67, dur: 0.8 }, { midi: 71, dur: 1.2 }, { midi: 69, dur: 0.8 }, { midi: 67, dur: 1.6 }];
+  for (const o of [{}, { vib: 0.3, scoop: 1 }]) assert.deepEqual(pitches(Pi.analyzeHum(voiceLike(long, 48000, o), 48000).segs), [64, 67, 71, 69, 67], JSON.stringify(o));
+});
 t('同音重唱（中间有一点点停）切成三个音', () => {
   const r = Pi.analyzeHum(voiceLike([{ midi: 64, dur: 0.3 }, { midi: 64, dur: 0.3 }, { midi: 64, dur: 0.3 }], 48000, { gapSec: 0.05 }), 48000);
   assert.equal(r.segs.length, 3);
@@ -130,6 +134,16 @@ t('键盘时刻：getOutputTimestamp 已是「听到的时钟」，正好按在�
 });
 
 // ---- 真值导出 ----
+t('clips.offset = 从文件开头算的片内起点（分轨按窗口切片载入）', () => {
+  const s = St.makeState(); s.anchor = 25.95;
+  s.layers.push(St.makeLayer('stem', 'stem', '原曲·drums', 4, { id: 'st' }));
+  s.clips.push({ id: 'c1', layer: 'st', b: 0, dur: 25.6, audio: 'a1', input: 'stem', active: true, fileOffset: 25.95, src: '分轨/drums.wav@25.950-51.550' });
+  s.clips.push({ id: 'c2', layer: 'st', b: 4, dur: 3, audio: 'a2', input: 'stem', active: true, src: '分轨/bass.wav@10.000-20.000', offset: 0.5 });   // 旧会话：从 src 解析
+  s.clips.push({ id: 'c3', layer: 'voice', b: 0, dur: 2, audio: 'a3', input: 'hum', active: true, src: 'mic' });
+  const cs = St.exportTruth(s).clips;
+  assert.deepEqual(cs.map(c => c.offset), [25.95, 10.5, 0]);
+  assert.equal(cs[0].t, 25.95);
+});
 t('不吸附的小数音高：导出取整，小数部分并进音分曲线', () => {
   const s = St.makeState();
   s.notes.push({ id: 'h', layer: 'voice', b: 0, d: 1, pitch: 64.3, vel: 0.8, input: 'hum', bend: { dt: 0.02, cents: [0, 5] } });

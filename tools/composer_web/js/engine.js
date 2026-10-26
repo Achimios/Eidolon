@@ -263,7 +263,9 @@ export class Engine {
 
   // 每种音色离线渲一个音，测 RMS，记修正量：换音色时音量平衡不乱
   async measureTrims(target = -20) {
-    const sr = 22050;
+    // 和 Python 渲染（composer_render.py 的 trim_for）同法同采样率。两边的修正量会差约 1.45 dB：WebAudio 自带的锯齿 / 方波
+    // 按吉布斯过冲归一过（峰值 1.18 → 1），页面的单个音本来就轻一点；修正以后两边都落在 −20 dB，所以成片的平衡一致
+    const sr = 48000;
     for (const [k, pr] of Object.entries(PRESETS)) {
       const oc = new OfflineAudioContext(2, sr * 2, sr);
       const pitch = 12 * (pr.octave + 1) + 4;

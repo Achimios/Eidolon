@@ -150,6 +150,31 @@ def save_bundle(work: Path, body: dict):
     return {"dir": str(out), "written": [p.name for p in finals], "truth": truth_p.name, "session": sess_p.name}
 
 
+FINAL = "当前.txt"          # 定稿指针：一行 作曲_vN.json；下游（sense_song / 剪辑 / 画面）只读它
+FINAL_LOG = "定稿记录.txt"   # 每次定稿追加一行，可追溯
+
+
+def read_final(work: Path):
+    p = work / OUT_DIR / FINAL
+    return p.read_text(encoding="utf-8").strip() if p.is_file() else None
+
+
+def set_final(work: Path, name: str):
+    """把 作曲_vN.json 定为定稿。指针文件本来就是要改的（不是生成物）；换之前的那一行留在定稿记录里。"""
+    if not re.fullmatch(r"作曲_v\d+\.json", name or ""):
+        raise ValueError(f"只能定稿 作曲_vN.json：{name!r}")
+    out = work / OUT_DIR
+    if not (out / name).is_file():
+        raise FileNotFoundError(name)
+    prev = read_final(work)
+    tmp = out / f".tmp_{FINAL}"
+    tmp.write_text(name + "\n", encoding="utf-8")
+    tmp.replace(out / FINAL)
+    with open(out / FINAL_LOG, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now().isoformat(timespec='seconds')}\t{name}\t（之前：{prev or '无'}）\n")
+    return {"final": name, "prev": prev}
+
+
 def list_sessions(work: Path):
     out = work / OUT_DIR
     if not out.is_dir():
@@ -218,6 +243,8 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._send(200, stem_slice(work, q["name"], float(q["t0"]), float(q["t1"])), "audio/wav")
             if u.path == "/api/next":
                 return self._send(200, {"ver": f"v{next_version(work / OUT_DIR)}"})
+            if u.path == "/api/final":
+                return self._send(200, {"final": read_final(work)})
             if u.path == "/api/sessions":
                 return self._send(200, list_sessions(work))
             if u.path == "/api/file":
@@ -248,11 +275,15 @@ class Handler(SimpleHTTPRequestHandler):
             work = safe_work(self.root, q.get("work", ""))
             if u.path == "/api/save":
                 return self._send(200, save_bundle(work, body))
+            if u.path == "/api/final":
+                return self._send(200, set_final(work, str(body.get("name", ""))))
             return self._err(404, "没有这个接口")
         except FileExistsError as e:
             return self._err(409, f"已存在：{e}（不覆盖）")
         except (ValueError, KeyError) as e:
             return self._err(400, str(e))
+        except FileNotFoundError as e:
+            return self._err(404, f"没有这个文件：{e}")
 
 
 def main():

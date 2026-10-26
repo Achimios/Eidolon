@@ -66,9 +66,10 @@ const pct = (a, p) => { if (!a.length) return 0; const s = [...a].sort((u, v) =>
 // 噪声门：以这一条录音自己的响度分布定（安静的环境 / 吵的环境都能用）
 export function gateDb(frames) {
   const dbs = frames.map(f => f.db);
-  // 辅音比元音低 10–15 dB，门要开在它下面：本底 + 6 dB，最多比最响处低 35 dB
+  // 辅音比元音低 10–15 dB，门要开在它下面：本底 + 6 dB，最多比最响处低 35 dB。
+  // ⚠️整段连着哼、几乎没有停顿时「最安静的 5%」也是响的 → 门最高只到最响处往下 20 dB（不然整段都被门掉）
   const floor = pct(dbs, 0.05), top = pct(dbs, 0.95);
-  return Math.max(floor + 6, top - 35, -55);
+  return Math.min(Math.max(floor + 6, top - 35, -55), top - 20);
 }
 
 // 浊音判定 + 中值滤波 + 八度错误折回

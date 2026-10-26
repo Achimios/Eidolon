@@ -143,12 +143,14 @@ export function exportTruth(s, { audioFiles = {}, macroFps = 60, created = new D
   }
   const tensionPts = (s.curves.tension || []).map(([b, v]) => [T(b), r3(v)]);
   const scenes = s.scenes.map(sc => ({ t: T(sc.bar * s.beatsPerBar), name: sc.name, layers: [...sc.layers], ...(sc.text ? { '她此刻': sc.text } : {}) }));
+  // offset = 从 file 开头算的片内起点（秒）：分轨是按窗口切片载入的，片内 0 = 文件里的切片起点
+  const fileOffset = c => { if (c.fileOffset !== undefined) return c.fileOffset; const m = /@(-?[\d.]+)-/.exec(c.src || ''); return m ? +m[1] : 0; };
   const clips = s.clips.filter(c => L(c.layer)).map(c => ({
-    t: T(c.b), dur: r4(c.dur), layer: c.layer, input: c.input, active: !!c.active, take: c.take ?? null,
+    t: T(c.b), dur: r4(c.dur), offset: r4(fileOffset(c) + (c.offset || 0)), layer: c.layer, input: c.input, active: !!c.active, take: c.take ?? null,
     file: audioFiles[c.audio] || c.file || null, ...(c.src ? { src: c.src } : {}), ...(c.analysis ? { analysis: c.analysis } : {}),
   }));
   return {
-    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹；bend.cents 相对导出的整数 pitch；tension 为空 = 全程 0.5。macros：逐帧，第 0 帧在 t0（= grid.anchor，不是 0 秒）；存的是旋钮原值，只列动过的，没列的用 macro_defaults；生效值 = 原值 × (a + b × tension)（a、b 见 macro_rules），没列出的旋钮也照这个随张力变。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
+    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹，clips.offset = 从这个文件开头算的片内起点（秒）；layers.mute 进成片，独奏（solo）只是页面试听、不导出；bend.cents 相对导出的整数 pitch；tension 为空 = 全程 0.5。macros：逐帧，第 0 帧在 t0（= grid.anchor，不是 0 秒）；存的是旋钮原值，只列动过的，没列的用 macro_defaults；生效值 = 原值 × (a + b × tension)（a、b 见 macro_rules），没列出的旋钮也照这个随张力变。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
     generator: 'composer_web/1',
     created,
     work: s.work,
