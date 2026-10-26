@@ -105,7 +105,7 @@ def ex_adsr():
     sk.place(out, pad[:len(env)] * env, 1.3)
     st, tau = embed(out, A2)
     return dict(st=st, mode=f"延迟嵌入 τ = {tau:.2f} ms（按 110 Hz）", f0=A2,
-                frames=[(0.14, "拨弦：Attack 2 ms，刚起"), (0.3, "拨弦：Decay 往 0 落"), (2.6, "铺底：Sustain 60%"), (4.0, "铺底：Release 1.2 s")])
+                frames=[(0.14, "拨弦：Attack 2 ms，刚起"), (0.3, "衰减：图形缩成一点，因为声音在变小"), (2.6, "铺底：Sustain 60%"), (4.0, "铺底：Release 1.2 s")])
 
 
 def ex_filter():
@@ -114,9 +114,9 @@ def ex_filter():
     t = np.arange(n) / SR
     cut = 120 * (40 ** (0.5 - 0.5 * np.cos(2 * np.pi * t / 6.0)))     # 120 Hz → 4800 Hz → 120 Hz
     x = sk.osc("saw", A1, dur) * 0.6 + sk.osc("saw", A1 * 1.003, dur) * 0.4
-    q = np.where(t < 3.0, 0.8, 0.8)
-    y = sk.svf(x, cut, 0.8)
-    y2 = sk.svf(x, cut, 6.0)                                     # 后半换高共振
+    pre = sk.svf(x, cut, 0.707)                                 # 两级串联 = 24 dB/倍频程（和 Moog 梯形一样陡）
+    y = sk.svf(pre, cut, 0.8)
+    y2 = sk.svf(pre, cut, 6.0)                                   # 后半：第二级共振拉高
     y = np.where(t < 3.0, y, y2)
     y *= sk.adsr(n - int(0.3 * SR), 0.02, 0.1, 1.0, 0.3)[:n]
     st, tau = embed(y, A1)
@@ -255,24 +255,23 @@ def ex_side():
     dur = bars * 4 * BEAT + 0.6
     n = int(round(dur * SR))
     t = np.arange(n) / SR
-    chord = [A2, A2 * 2 ** (3 / 12), A2 * 2 ** (7 / 12), A2 * 2]
-    pad = sum(sk.unison("saw", f, dur, voices=5, cents=14, width=0.6, seed=i) for i, f in enumerate(chord)) / 4
-    pad = np.stack([sk.svf(pad[:, c], 1800, 0.7) for c in range(2)], 1)
+    f = A2 * 2
+    l = sk.osc("sine", f, dur) + 0.12 * sk.osc("sine", f * 2, dur)
+    r = sk.osc("sine", f * 1.0012, dur, phase0=0.25) + 0.12 * sk.osc("sine", f * 2 * 1.0012, dur, phase0=0.5)   # 差 0.26 Hz：椭圆约 4 秒转一圈
+    pad = np.stack([l, r], 1)
     duck = np.ones(n)
     kk = np.zeros(n)
     for b in range(bars * 4):
         tb = b * BEAT
-        sk.place(kk, sk.kick(), tb)
-        if b >= 4:                                              # 第二小节开侧链：kick 来时 pad 被压到 10%，150 ms 恢复
+        sk.place(kk, sk.kick(dur=0.2, decay=0.05), tb)          # 短 kick：尾巴不和圆叠成乱线
+        if b >= 4:                                              # 第二小节开侧链：kick 来时 pad 被压到 5%，150 ms 恢复
             i = int(tb * SR)
-            r = np.arange(n - i) / SR
-            duck[i:] = np.minimum(duck[i:], 1 - 0.9 * np.exp(-r / 0.15) * (r < BEAT))
+            rr = np.arange(n - i) / SR
+            duck[i:] = np.minimum(duck[i:], 1 - 0.95 * np.exp(-rr / 0.15) * (rr < BEAT))
     e = sk.adsr(n - int(0.5 * SR), 0.02, 0.1, 1.0, 0.5)[:n]
-    padm = pad * (duck * e)[:, None]
-    # 示波器：pad 的左 / 右是真立体声；kick 居中
-    st = padm * 1.0 + kk[:, None] * 0.55
-    return dict(st=st, mode="真立体声（kick 居中 = 斜线闪一下；pad 是左右铺开的一团）", f0=A2,
-                frames=[(0.95, "没侧链：kick 和 pad 叠在一起"), (2.02, "侧链：kick 打下 → pad 被压扁"), (2.2, "pad 回来 150 ms"), (2.45, "拍与拍之间：pad 满")],
+    st = pad * (duck * e)[:, None] * 0.6 + kk[:, None] * 0.7
+    return dict(st=st, mode="真立体声：pad = 左右两个微失谐的正弦（慢转的椭圆），kick 居中（斜线）", f0=f,
+                frames=[(0.02, "没侧链：kick 和圆叠加 → 缠成一团（糊）"), (0.4, "没侧链：两拍之间，圆满"), (2.03, "侧链：圆让开，只剩 kick 的斜线"), (2.4, "圆长回来（150 ms）")],
                 curve=("pad 音量（侧链）", t, duck))
 
 
@@ -305,40 +304,36 @@ def ex_arp():
     return dict(st=st, mode="真立体声：左 = 低音 A (110 Hz)，右 = 琶音", f0=A2, frames=fr)
 
 
+SEQ_STEPS = [  # (半音, 波形)；None = 空步。A 小调五声：A C D E G
+    (0, "sine"), (12, "tri"), (7, "sine"), (None, None), (3, "square"), (5, "tri"), (7, "saw"), (None, None),
+    (0, "sine"), (10, "tri"), (7, "square"), (5, "sine"), (3, "tri"), (None, None), (12, "saw"), (7, "sine")]
+SEQ_NAMES = {0: "A", 3: "C", 5: "D", 7: "E", 10: "G", 12: "A'"}
+
+
 def ex_seq():
-    # 16 步音序器，两小节循环：kick / clap / hat / 贝斯（每步一个音，空步就不弹）
-    steps = 16
-    st_dur = BEAT / 4
+    # 16 步音序器：一排格子循环两遍；每格一个音高 + 一种波形（空格 = 不弹）。单声道旋律，延迟嵌入画成闭环
+    step = BEAT / 2                                             # 八分音符一步（0.25 s），每一步的形状看得清
     loops = 2
-    dur = steps * st_dur * loops + 0.6
+    dur = len(SEQ_STEPS) * step * loops + 0.5
     n = int(round(dur * SR))
-    out = np.zeros((n, 2))
-    K = "x...x...x...x..."
-    C = "....x.......x..."
-    Hh = "..x...x...x...xx"
-    bass = [0, None, 0, 12, None, 0, 3, None, 0, None, 0, 7, None, 5, 3, None]
-    bl = np.zeros(n)
+    m = np.zeros(n)
+    gains = {"sine": 1.0, "tri": 1.0, "square": 0.5, "saw": 0.6}
     for L in range(loops):
-        for s in range(steps):
-            tt = (L * steps + s) * st_dur
-            if K[s] == "x":
-                sk.place(out, sk.stereo(sk.kick() * 0.9, 0.0), tt)
-            if C[s] == "x":
-                sk.place(out, sk.stereo(sk.clap() * 0.5, 0.0), tt)
-            if Hh[s] == "x":
-                sk.place(out, sk.stereo(sk.hat(seed=s), 0.35), tt, gain=0.35)
-            if bass[s] is not None:
-                f = A1 * 2 ** (bass[s] / 12)
-                d = st_dur * 0.9
-                x = sk.osc("saw", f, d) * 0.6 + sk.osc("square", f, d) * 0.4
-                tx = np.arange(len(x)) / SR
-                x = envmul(sk.svf(x, 300 + 1800 * np.exp(-tx / 0.05), 2.0), sk.adsr(int(d * SR) - 200, 0.003, 0.1, 0.6, 0.004))
-                sk.place(bl, x, tt)
-    bst, tau = embed(bl, A1)
-    st = out + bst * 0.9
-    return dict(st=st, mode=f"鼓居中（斜线），贝斯用延迟嵌入 τ = {tau:.2f} ms 画成闭环", f0=A1,
-                frames=[(0.0 * st_dur + 0.02, "第 1 步：kick + A"), (3 * st_dur + 0.05, "第 4 步：A 高八度"), (6 * st_dur + 0.05, "第 7 步：C"), (11 * st_dur + 0.05, "第 12 步：E")],
-                grid=(K, C, Hh, bass))
+        for k, (semi, kind) in enumerate(SEQ_STEPS):
+            if semi is None:
+                continue
+            f = A2 * 2 ** (semi / 12)
+            d = step * 0.92
+            x = sk.osc(kind, f, d)
+            x = sk.svf(x, 3000, 0.7) if kind in ("square", "saw") else x
+            x = envmul(x * gains[kind], sk.adsr(int(d * SR) - 400, 0.004, 0.08, 0.8, 0.008))
+            sk.place(m, x, (L * len(SEQ_STEPS) + k) * step)
+    st, tau = embed(m, A2 * 2 ** (7 / 12))                     # τ = E3 周期的 1/4：音域中间，A–A' 每个音的相位差都在 60°–120°，全是闭环
+    fr = []
+    for k in (0, 1, 4, 6):
+        semi, kind = SEQ_STEPS[k]
+        fr.append((k * step + step * 0.45, f"第 {k + 1} 步：{SEQ_NAMES[semi]} · {kind}"))
+    return dict(st=st, mode=f"延迟嵌入 τ = {tau:.2f} ms（按 E3 165 Hz）", f0=A2, frames=fr, grid=SEQ_STEPS)
 
 
 TERMS = [
@@ -356,7 +351,7 @@ TERMS = [
      "前面一下拨弦（快起、立刻落）；后面一个铺底（慢慢浮起、按住、松开后慢慢退）。", "形状大小跟着音量：拨弦是一闪而过的亮团，铺底是慢慢长大又慢慢缩回的环。"),
     ("05", "filter", "滤波器（截止 / 共振）", "Filter (Cutoff / Resonance)", ex_filter,
      "把一部分频率削掉。低通 = 只放低频过去；截止频率 = 从哪开始削；共振 = 在截止那里鼓起一个尖峰，会「啸」。",
-     "锯齿低音被「捂住 → 打开 → 再捂住」；后半共振拉高，开合时有一声哨音在扫。", "截止低：近乎一个光滑的环；打开：边缘出现锯齿和尖刺；共振高：环上缠了一圈高频的小波纹。"),
+     "锯齿低音被「捂住 → 打开 → 再捂住」（24 dB/倍频程低通）；后半共振拉高，开合时有一声哨音在扫。", "截止低：近乎一个光滑的环；打开：边缘出现锯齿和尖刺；共振高：环上缠了一圈高频的小波纹。频谱图里橙线（截止）以上的泛音变暗，共振时橙线附近亮一条。"),
     ("06", "lfo", "LFO", "LFO (Low-Frequency Oscillator)", ex_lfo,
      "一个慢到听不见的振荡器（一般 < 20 Hz），不发声，只用来推别的旋钮来回动。",
      "前半：音量每 2 秒呼吸一次；后半：音高每秒颤 6 次（颤音）。", "前半：同一个形状慢慢胀缩；后半：形状在原地抖。"),
@@ -380,13 +375,13 @@ TERMS = [
      "前半：一下拨弦，回声左右左右地弹走、越来越暗；后半：三个音进了一个大厅。", "干声在中间是斜线；回声只在一边时变成横线 / 竖线；混响让左右各走各的，变成一团云。"),
     ("13", "sidechain", "侧链", "Sidechain", ex_side,
      "让 A 的音量被 B 控制：kick 一打，铺底就被压下去再弹回来。舞曲的「抽吸感」就是它。",
-     "第一小节：kick 和铺底叠在一起，有点糊；第二小节：每打一下 kick，铺底就让开，整体在呼吸。", "每次 kick，铺底那一团突然缩没，只剩 kick 的一道斜线；然后那一团再胀回来。"),
+     "第一小节：kick 和一个持续的长音叠在一起；第二小节：每打一下 kick，长音就让开再回来，整体在呼吸。", "长音是一个慢慢转的圆 / 椭圆；开了侧链后，每次 kick 圆缩成一个点（只剩 kick 的一道斜线），150 ms 后再长回来。"),
     ("14", "arpeggiator", "琶音器", "Arpeggiator", ex_arp,
      "你按住一个和弦，它自动把和弦里的音按节奏一个一个弹出来（往上、往下、来回）。",
      "左耳一个持续的低音 A，右耳琶音 A–C–E–A'–E–C 按 16 分音符跑。", "左右两个音高的比例 = 音程，画出来是李萨如图：八度 1:2 是 ∞ 字，五度 2:3 是三瓣。越协和的音程图越简单。"),
     ("15", "sequencer", "音序器", "Step Sequencer", ex_seq,
      "一排格子（常见 16 步）循环播放：每一格放不放音、放哪个音。很多电子乐就是几排格子叠出来的。",
-     "两小节循环：kick 四下、第 2/4 拍拍手、反拍踩镲、一条跳动的贝斯。", "每一步换一个形状：贝斯音变 → 闭环变；kick 打下时多一道斜线闪光。"),
+     "16 格的旋律循环两遍：每一格一个音（A 小调五声），有的格换一种波形，空格就停一下。", "一步一个干净的闭环：音高变 → 环的倾斜和圈数变；波形变 → 圆 / 菱形 / 方 / 锯齿换着来；空格 = 只剩余辉。"),
 ]
 
 
@@ -456,8 +451,8 @@ def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
         mag = np.abs(np.fft.rfft(seg * win))
         spec[:, c] = mag[bins]
     db = 20 * np.log10(spec + 1e-9)
-    db = np.clip((db - (db.max() - 70)) / 70, 0, 1)
-    rgb = np.stack([db ** 2.2 * 120, db ** 1.1 * 255, db ** 1.8 * 150], -1).astype(np.uint8)
+    db = np.clip((db - db.max() + 60) / 60, 0, 1)              # 色标 = dB，0 到 −60 dB 线性，下限固定
+    rgb = np.stack([db ** 3 * 160, db ** 1.4 * 255, db ** 2.4 * 170], -1).astype(np.uint8)
     img.paste(Image.fromarray(rgb), (50, top))
     for f in (50, 100, 200, 500, 1000, 2000, 5000, 10000):
         y = top + int((1 - math.log(f / fmin) / math.log(fmax / fmin)) * (rows - 1))
@@ -479,7 +474,7 @@ def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
         ys = 34 - seg / pk * 26
         d.line(list(zip(xs, ys)), fill=GREEN, width=2)
         d.text((400, 8), f"波形：最响处的 2 个周期（{f0:.0f} Hz）", fill=(150, 200, 160), font=fc)
-    d.text((400, 30), "下：频谱图（纵轴对数频率，亮 = 能量大）", fill=(150, 200, 160), font=fc)
+    d.text((400, 30), "下：频谱图（纵轴对数频率；亮度 = dB，最亮 0 到全黑 −60）", fill=(150, 200, 160), font=fc)
     if curve is not None:
         name, t, v = curve
         v = np.asarray(v, float)
@@ -504,6 +499,9 @@ def build(term, outdir, video=True):
     if wav.exists():
         raise FileExistsError(f"{wav} 已存在 —— 换版本号")
     sf.write(str(wav), st.astype(np.float32), SR, subtype="PCM_24")
+    embedded = r["mode"].startswith("延迟嵌入")
+    lis = np.stack([st[:, 0], st[:, 0]], 1) if embedded else st      # 听的版本：延迟嵌入的只要真实声音（左声道）
+    sf.write(str(outdir / f"{num}_{slug}_listen.wav"), lis.astype(np.float32), SR, subtype="PCM_24")
     scale = scope_scale(st)
     strip(wav, r["frames"], scale, outdir / f"{num}_{slug}_scope.jpg")
     spectro_plot(st, r["f0"], outdir / f"{num}_{slug}_spec.jpg", r.get("curve"))
@@ -511,7 +509,7 @@ def build(term, outdir, video=True):
         from scope_sim import Params, render_clip
         p = Params(W=960, H=720, scale=scale)
         render_clip(str(wav), outdir / f"{num}_{slug}_scope.mp4", 0.0, len(st) / SR, p, duty=0.9, log=lambda s: None)
-    return dict(num=num, slug=slug, cn=cn, en=en, mode=r["mode"], scale=round(scale, 3),
+    return dict(num=num, slug=slug, cn=cn, en=en, mode=r["mode"], scale=round(scale, 3), embedded=embedded,
                 dur=round(len(st) / SR, 2), frames=[[t, h] for t, h in r["frames"]])
 
 
@@ -529,8 +527,13 @@ def main():
             continue
         print(f"{term[0]} {term[2]} …", flush=True)
         meta.append(build(term, outdir, video=not a.no_video))
-    if not a.only:
-        (outdir / "词表.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    jp = outdir / "词表.json"
+    if a.only and jp.exists():                                   # 只重做一个：合并进已有的索引
+        old = {m_["num"]: m_ for m_ in json.loads(jp.read_text(encoding="utf-8"))}
+        old.update({m_["num"]: m_ for m_ in meta})
+        meta = [old[k] for k in sorted(old)]
+    if not a.only or jp.exists():
+        jp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     print("done", outdir)
 
 

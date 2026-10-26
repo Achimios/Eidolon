@@ -35,6 +35,9 @@ h2{margin:0;font-size:23px}h2 span{color:var(--dim);font-weight:400;font-size:15
 .row{display:grid;grid-template-columns:420px 1fr;gap:18px;align-items:start}
 video{width:100%;border-radius:4px;background:#000;display:block}
 .cues p{margin:0 0 10px}.cues b{color:var(--g);font-weight:600;margin-right:6px}
+.listen{display:flex;align-items:center;gap:10px;margin-top:10px}.listen span{font-size:13px;color:var(--g);white-space:nowrap}
+.listen audio{width:100%;height:34px}
+.warn{font-size:12.5px;color:var(--o);margin:6px 0 0;line-height:1.55}.warn.ok{color:var(--dim)}
 .meta{font:12px Consolas,monospace;color:var(--dim);margin-top:8px}
 .meta a{color:var(--dim)}
 img{width:100%;display:block;border-radius:4px;margin-top:12px}
@@ -55,10 +58,10 @@ def main():
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>合成器词表</title><style>{CSS}</style></head><body><div class="wrap">
 <h1>合成器词表<small>15 个词 · 听 + 看 · {e(a.ver)}</small></h1>
 <p class="lead">够用来指挥的 15 个词。每个词一句人话、一段几秒的声音、它在示波器上的样子。
-<b>你听到的就是示波器画出来的</b>：同一个无损 wav，左声道推光点左右走，右声道推光点上下走。所有声音都是 numpy 现算的，没有采样，A 小调，120 BPM。</p>
+示波器画的是一个立体声 wav：左声道推光点左右走，右声道推光点上下走。真立体声的例子，听到的就是画出来的；延迟嵌入的例子，另有一个「听音色」的版本（只有真实的声音）。所有声音都是 numpy 现算的，没有采样，A 小调，120 BPM。</p>
 <div class="how">
 <div><b>左 = x，右 = y</b><br>两个声道一样 → 一条 45° 斜线；只有左 → 横线；只有右 → 竖线；左右各走各的 → 一团。</div>
-<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。听起来几乎一样。</div>
+<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。⚠️这个副本只为画图：外放时第 2、6、10… 次泛音会被抵消，所以听音色用每格的「听音色」播放器。</div>
 <div><b>亮 = 慢</b><br>光束走得慢的地方亮，快跳的地方暗。所以方波只剩四个亮点，失真的方块四个角最亮。每个例子的放大倍数单独调过（= 示波器的 V/div 旋钮）。</div>
 </div><nav>"""]
     for t in TERMS:
@@ -70,7 +73,9 @@ def main():
         parts.append(f"""<section id="t{num}"><div class="hd"><span class="num">{num}</span><h2>{e(cn)}<span>{e(en)}</span></h2></div>
 <p class="one">{e(one)}</p>
 <div class="row"><div><video controls preload="metadata" src="{f}_scope.mp4"></video>
-<div class="meta">{e(m['mode'])} · 放大 ×{m['scale']} · {m['dur']} s · <a href="{f}.wav">无损 wav</a></div></div>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="{f}_listen.wav"></audio></div>
+{'<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放会抵消一部分泛音。听音色请点上面这个。</p>' if m.get('embedded') else '<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>'}
+<div class="meta">{e(m['mode'])} · 放大 ×{m['scale']} · {m['dur']} s · <a href="{f}.wav">示波器用 wav</a> · <a href="{f}_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>{e(hear)}</p><p><b>看</b>{e(see)}</p></div></div>
 <img src="{f}_scope.jpg" alt="{e(cn)} 示波器四格"><img src="{f}_spec.jpg" alt="{e(cn)} 波形和频谱"></section>""")
     parts.append("""<div class="foot">

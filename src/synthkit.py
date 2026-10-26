@@ -235,10 +235,10 @@ def unison(kind, freq, dur, voices=7, cents=18.0, width=1.0, sr=SR, seed=1):
 
 
 # ------------------------------------------------------------------ 鼓
-def kick(sr=SR, f0=150.0, f1=45.0, dur=0.45, click=0.3):
+def kick(sr=SR, f0=150.0, f1=45.0, dur=0.45, click=0.3, decay=0.16):
     t = tgrid(dur, sr)
     f = f1 + (f0 - f1) * np.exp(-t / 0.03)
-    body = np.sin(2 * np.pi * np.cumsum(f) / sr) * np.exp(-t / 0.16)
+    body = np.sin(2 * np.pi * np.cumsum(f) / sr) * np.exp(-t / decay)
     c = noise(0.004, sr, 7)
     body[:len(c)] += click * c * np.linspace(1, 0, len(c))
     return np.tanh(1.6 * body) / np.tanh(1.6)
