@@ -61,9 +61,11 @@ def main():
 示波器画的是一个立体声 wav：左声道推光点左右走，右声道推光点上下走。真立体声的例子，听到的就是画出来的；延迟嵌入的例子，另有一个「听音色」的版本（只有真实的声音）。所有声音都是 numpy 现算的，没有采样，A 小调，120 BPM。</p>
 <div class="how">
 <div><b>左 = x，右 = y</b><br>两个声道一样 → 一条 45° 斜线；只有左 → 横线；只有右 → 竖线；左右各走各的 → 一团。</div>
-<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。⚠️这个副本只为画图：外放时第 2、6、10… 次泛音会被抵消，所以听音色用每格的「听音色」播放器。</div>
+<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。⚠️这个副本只为画图：外放（两个声道在空气里混成一个）时第 2、6、10… 次泛音会被抵消（戴耳机不会抵消，只是有点相位怪），所以听音色用每格的「听音色」播放器。</div>
 <div><b>亮 = 慢</b><br>光束走得慢的地方亮，快跳的地方暗。所以方波只剩四个亮点，失真的方块四个角最亮。每个例子的放大倍数单独调过（= 示波器的 V/div 旋钮）。</div>
-</div><nav>"""]
+</div>
+<p class="lead">每格最下面那张图：最上两条是<b>左、右声道各自的波形</b>（绿 = 左 = x，红 = 右 = y），能直接看到右声道比左声道晚了多少；下面是<b>频谱图</b>：横轴时间，纵轴频率，越亮那个频率越响，一条横的亮线就是一个泛音。频谱画的是「听到的声音」，不是给示波器的副本。</p>
+<nav>"""]
     for t in TERMS:
         parts.append(f'<a href="#t{t[0]}">{t[0]} {e(t[2])}</a>')
     parts.append("</nav>")
@@ -74,7 +76,7 @@ def main():
 <p class="one">{e(one)}</p>
 <div class="row"><div><video controls preload="metadata" src="{f}_scope.mp4"></video>
 <div class="listen"><span>听音色</span><audio controls preload="none" src="{f}_listen.wav"></audio></div>
-{'<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放会抵消一部分泛音。听音色请点上面这个。</p>' if m.get('embedded') else '<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>'}
+{'<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>' if m.get('embedded') else '<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>'}
 <div class="meta">{e(m['mode'])} · 放大 ×{m['scale']} · {m['dur']} s · <a href="{f}.wav">示波器用 wav</a> · <a href="{f}_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>{e(hear)}</p><p><b>看</b>{e(see)}</p></div></div>
 <img src="{f}_scope.jpg" alt="{e(cn)} 示波器四格"><img src="{f}_spec.jpg" alt="{e(cn)} 波形和频谱"></section>""")

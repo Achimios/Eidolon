@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-""">v<🎛合成器词表：15 个词，每个一段示例音频（无损 wav）+ 示波器四格（scope_sim）+ 波形 / 频谱小图 + 带声音的示波器短片。
+""">v<🎛合成器词表：15 个词，每个一段示例音频（无损 wav）+ 示波器四格（scope_sim）+ 左右声道波形 / 频谱小图（频谱算听的版本）+ 带声音的示波器短片。
 
 输出到 Projekt_Visual/样片_示波器/词表/<版本>/；页面 -给人类的解释/合成器词表.html 读这些文件。
 ⭐你听到的 = 示波器画出来的（同一个 wav）。两种接法，每个词写明：
@@ -423,16 +423,40 @@ def strip(wav, frames, scale, out, W=560, H=420):
     canvas.save(out, quality=92)
 
 
-def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
-    """上：两个周期的波形（左声道）；下：对数频谱图（20 Hz–12 kHz），横轴 = 时间。可选再叠一条调制曲线。"""
-    m = st.mean(1)
-    n = len(m)
+def spectro_plot(st, lis, f0, out, curve=None, W=1200, H=470):
+    """上：左 / 右声道各一条波形（同一段时间、同一个比例，最响处的 2 个周期）——示波器的 x 和 y 分开看；
+    下：对数频谱图（30 Hz–12 kHz），横轴 = 时间，算的是「听的版本」lis：
+    延迟嵌入的例子只用真实声音（左声道）；真立体声把左右两个声道的能量相加（不先混成单声道，免得相位抵消）。
+    v2 的坑：用左右平均算频谱，延迟嵌入时右 = 左晚 1/4 周期，平均后第 2、6、10… 次泛音互相抵消，图上少了这几条线。"""
+    n = len(lis)
     img = Image.new("RGB", (W, H), (8, 10, 9))
     d = ImageDraw.Draw(img)
     fs = font(FONT_MONO, 12)
     fc = font(FONT_CN, 13)
-    # 频谱图
-    top, bot = 70, H - 22
+    RED = (255, 110, 140)
+    # ---- 左右声道波形
+    mono = lis.mean(1)
+    rms = np.convolve(mono ** 2, np.ones(2048) / 2048, "same")
+    c0 = int(np.argmax(rms))
+    L = int(2 * SR / f0)
+    i0 = max(0, min(c0 - L // 2, len(st) - L))
+    seg = st[i0:i0 + L]
+    pk = np.abs(seg).max() + 1e-9                               # 左右共用一个比例：谁大谁小看得出来
+    rows_y = ((8, "左 L → 示波器 x", GREEN, 0), (58, "右 R → 示波器 y", RED, 1))
+    for y0, lab, col, ch in rows_y:
+        mid = y0 + 22
+        d.line([(50, mid), (390, mid)], fill=DIM)
+        if len(seg) > 2:
+            xs = 50 + np.arange(len(seg)) / (len(seg) - 1) * 340
+            ys = mid - seg[:, ch] / pk * 20
+            d.line(list(zip(xs, ys)), fill=col, width=2)
+        d.text((400, mid - 9), lab, fill=col, font=fc)
+    d.text((560, 14), f"上两条：同一时刻的左右声道，最响处的 2 个周期（{f0:.0f} Hz），同一个比例", fill=(150, 200, 160), font=fc)
+    d.text((560, 40), "两条一样 → 斜线；右比左晚 1/4 周期 → 圆 / 闭环；各走各的 → 一团", fill=(150, 200, 160), font=fc)
+    d.text((560, 66), "下：频谱图 = 听到的声音（横轴时间，纵轴对数频率，亮度 = dB，0 到 −60）", fill=(150, 200, 160), font=fc)
+    d.text((560, 88), "一条横亮线 = 一个泛音；亮线怎么排 = 音色", fill=(150, 200, 160), font=fc)
+    # ---- 频谱图
+    top, bot = 118, H - 22
     nfft, hop = 8192, 256
     win = np.hanning(nfft)
     nfr = max(1, (n - nfft) // hop)
@@ -443,13 +467,16 @@ def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
     rows = bot - top
     fy = fmin * (fmax / fmin) ** (1 - np.arange(rows) / (rows - 1))
     bins = np.clip(np.searchsorted(fr, fy), 1, len(fr) - 1)
+    chans = [lis[:, 0]] if np.allclose(lis[:, 0], lis[:, 1]) else [lis[:, 0], lis[:, 1]]
     spec = np.zeros((rows, cols))
     for c, k in enumerate(idx):
-        seg = m[k * hop:k * hop + nfft]
-        if len(seg) < nfft:
-            seg = np.pad(seg, (0, nfft - len(seg)))
-        mag = np.abs(np.fft.rfft(seg * win))
-        spec[:, c] = mag[bins]
+        pw = 0.0
+        for x in chans:
+            seg_ = x[k * hop:k * hop + nfft]
+            if len(seg_) < nfft:
+                seg_ = np.pad(seg_, (0, nfft - len(seg_)))
+            pw = pw + np.abs(np.fft.rfft(seg_ * win)) ** 2
+        spec[:, c] = np.sqrt(pw / len(chans))[bins]
     db = 20 * np.log10(spec + 1e-9)
     db = np.clip((db - db.max() + 60) / 60, 0, 1)              # 色标 = dB，0 到 −60 dB 线性，下限固定
     rgb = np.stack([db ** 3 * 160, db ** 1.4 * 255, db ** 2.4 * 170], -1).astype(np.uint8)
@@ -459,22 +486,10 @@ def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
         d.line([(46, y), (50, y)], fill=DIM)
         d.text((4, y - 7), f"{f if f < 1000 else str(f // 1000) + 'k'}", fill=(110, 140, 120), font=fs)
     dur = n / SR
-    for s in range(int(dur) + 1):
-        x = 50 + int(s / dur * cols)
+    for s_ in range(int(dur) + 1):
+        x = 50 + int(s_ / dur * cols)
         d.line([(x, bot), (x, bot + 4)], fill=DIM)
-        d.text((x - 3, bot + 5), f"{s}s", fill=(110, 140, 120), font=fs)
-    # 波形：取最响的那一段的两个周期
-    rms = np.convolve(m ** 2, np.ones(2048) / 2048, "same")
-    c0 = int(np.argmax(rms))
-    L = int(2 * SR / f0)
-    seg = m[max(0, c0 - L // 2):max(0, c0 - L // 2) + L]
-    if len(seg) > 2:
-        pk = np.abs(seg).max() + 1e-9
-        xs = 50 + np.arange(len(seg)) / (len(seg) - 1) * 340
-        ys = 34 - seg / pk * 26
-        d.line(list(zip(xs, ys)), fill=GREEN, width=2)
-        d.text((400, 8), f"波形：最响处的 2 个周期（{f0:.0f} Hz）", fill=(150, 200, 160), font=fc)
-    d.text((400, 30), "下：频谱图（纵轴对数频率；亮度 = dB，最亮 0 到全黑 −60）", fill=(150, 200, 160), font=fc)
+        d.text((x - 3, bot + 5), f"{s_}s", fill=(110, 140, 120), font=fs)
     if curve is not None:
         name, t, v = curve
         v = np.asarray(v, float)
@@ -486,7 +501,7 @@ def spectro_plot(st, f0, out, curve=None, W=1200, H=360):
         xs = 50 + t / dur * cols
         k = max(1, len(t) // 1500)
         d.line(list(zip(xs[::k], vy[::k])), fill=(255, 120, 60), width=2)
-        d.text((W - 260, 8), f"橙线 = {name}（真值）", fill=(255, 150, 100), font=fc)
+        d.text((W - 260, top + 6), f"橙线 = {name}（真值）", fill=(255, 150, 100), font=fc)
     img.save(out, quality=92)
 
 
@@ -504,7 +519,7 @@ def build(term, outdir, video=True):
     sf.write(str(outdir / f"{num}_{slug}_listen.wav"), lis.astype(np.float32), SR, subtype="PCM_24")
     scale = scope_scale(st)
     strip(wav, r["frames"], scale, outdir / f"{num}_{slug}_scope.jpg")
-    spectro_plot(st, r["f0"], outdir / f"{num}_{slug}_spec.jpg", r.get("curve"))
+    spectro_plot(st, lis, r["f0"], outdir / f"{num}_{slug}_spec.jpg", r.get("curve"))
     if video:
         from scope_sim import Params, render_clip
         p = Params(W=960, H=720, scale=scale)
