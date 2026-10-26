@@ -73,6 +73,8 @@ class Params:
     whiten: float = 0.07        # 核心发白：线性曝光多一项 whiten·E²（所有通道一样）
     response: float = 1.25      # 曝光 = (gain·K0·能量)^γ。⚠️经验值：原视频的亮度对能量是超线性的（分箱拟合 γ ≈ 1.2–1.3），机理没查
     warmup: float = -1.0        # 预热秒数；<0 → 6·persist
+    ox: float = 0.0             # 取景偏移（px，画面中心相对光束原点；+ = 原点往右下移）—— 相机运动用，物理不变
+    oy: float = 0.0
 
     @property
     def px(self):
@@ -129,7 +131,7 @@ class Audio:
 def to_px(xy, p):
     """幅度 → 像素（x 向右，y 向上翻成像素向下）"""
     s = p.scale * p.H / 2
-    return torch.stack([p.W / 2 + xy[:, 0] * s, p.H / 2 - xy[:, 1] * s], 1)
+    return torch.stack([p.W / 2 + p.ox + xy[:, 0] * s, p.H / 2 + p.oy - xy[:, 1] * s], 1)
 
 
 def splat_path(pts, wseg, H, W, step=0.5, kmax=8192, max_points=12_000_000):

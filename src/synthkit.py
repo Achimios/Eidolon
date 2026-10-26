@@ -288,3 +288,23 @@ def finish(st, rms_db=-18.0, peak_db=-1.0, fade=0.02, sr=SR):
     st[:nf] *= ramp[:, None]
     st[-nf:] *= ramp[::-1, None]
     return st
+
+
+def feedback_delay_sat(x, t, g, sr=SR, damp=5000.0, drive=1.0):
+    """带饱和的反馈延迟：y[n] = x[n] + tanh(drive · g[n] · LP(y[n-D])) / drive。
+    ⭐限幅在环里（tanh），所以 g ≥ 1 时也有界：极点越过单位圆 = 反馈失稳、自激，但幅度被 tanh 接住（≤ 1/drive + |x|）。
+    g 可以是曲线（情绪 → 极点位置）。按 D 个采样一块向量化（第 k 块只依赖第 k-1 块）。x 单声道。"""
+    D = max(1, int(round(t * sr)))
+    n = len(x)
+    gc = as_curve(g, n)
+    a = math.exp(-2 * math.pi * damp / sr)
+    y = np.zeros(n)
+    zi = np.zeros(1)
+    prev = np.zeros(D)
+    for k in range(0, n, D):
+        m = min(D, n - k)
+        lp, zi = lfilter([1 - a], [1, -a], prev[:m], zi=zi)
+        y[k:k + m] = x[k:k + m] + np.tanh(drive * gc[k:k + m] * lp) / drive
+        prev = np.zeros(D)
+        prev[:m] = y[k:k + m]
+    return y
