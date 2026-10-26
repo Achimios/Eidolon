@@ -125,7 +125,7 @@ def svf(x, cutoff, q=0.707, mode="lp", sr=SR):
     n = len(x)
     fc = np.clip(as_curve(cutoff, n), 20, sr * 0.45)
     g = np.tan(np.pi * fc / sr)
-    k = 1.0 / max(q, 0.05)
+    k = 1.0 / np.maximum(as_curve(q, n), 0.05)          # q 也可以是曲线（母线的共振旋钮）
     a1 = 1.0 / (1.0 + g * (g + k))
     a2 = g * a1
     a3 = g * a2
