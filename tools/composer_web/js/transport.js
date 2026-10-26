@@ -2,6 +2,14 @@
 // 段（seg）= {ctx0, b0, b1}：音频时钟 ctx0 时刻在第 b0 拍，一直走到 b1。录音时用段把「按键的时刻」换算回拍。
 import { audibleAt, effectiveMacros, curveAt, loopRange, songBeats, spb, layerById, MACROS } from './state.js';
 
+// 键盘事件的时刻 → 「听到的」音频时钟。getOutputTimestamp().contextTime 是扬声器此刻正在放的那个样本，
+// 所以换算出来的已经是听到的时钟（排在 c 的音恰好在 c 被听到），不能再减输出延迟。
+// 拿不到时间戳时退回 now − 输出延迟。
+export function heardCtxTime(ts, evStamp, now, outLat) {
+  if (ts && ts.performanceTime && Number.isFinite(evStamp)) return ts.contextTime + (evStamp - ts.performanceTime) / 1000;
+  return now - outLat;
+}
+
 export class Transport {
   constructor(engine, getState, hooks = {}) {
     this.e = engine; this.S = getState; this.h = hooks;

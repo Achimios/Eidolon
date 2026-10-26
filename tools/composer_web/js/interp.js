@@ -11,7 +11,9 @@ export function meanOffset(notes, grid = 0.25) {
   if (notes.length < 4) return { offset: 0, consistent: false };
   const offs = notes.map(n => { const g = Math.round(n.b / grid) * grid; return n.b - g; });
   const m = median(offs), mad = median(offs.map(o => Math.abs(o - m)));
-  return { offset: m, consistent: Math.abs(m) > 0.04 && mad < Math.abs(m) * 0.8 + 0.02, mad };
+  // 偏移接近半格时，取余会绕成反号（蓝牙耳机的延迟一定超过半格）→ 不可信，不扣，提示先校准
+  const tooLarge = Math.abs(m) > grid * 0.38;
+  return { offset: m, consistent: !tooLarge && Math.abs(m) > 0.04 && mad < Math.abs(m) * 0.8 + 0.02, mad, tooLarge };
 }
 
 // ---- 2. 自动选格子：8 分 / 16 分 / 8 分三连，误差 + 复杂度惩罚（格子越细越不划算）----

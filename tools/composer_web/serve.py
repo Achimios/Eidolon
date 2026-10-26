@@ -22,6 +22,7 @@ import numpy as np
 import soundfile as sf
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))   # tools/trash.py
 DEFAULT_ROOT = Path(r"C:/Users/Administrator/Desktop/Projekt_Visual")
 OUT_DIR = "作曲"
 VER_RE = re.compile(r"^作曲_v(\d+)(?:_会话)?\.json$")
@@ -99,34 +100,54 @@ def stem_slice(work: Path, name: str, t0: float, t1: float) -> bytes:
 
 
 def save_bundle(work: Path, body: dict):
-    """写 作曲_vN.json + 会话 + 录音。任何一个目标文件已存在 → FileExistsError（不写任何东西）。"""
+    """写 作曲_vN.json + 会话 + 录音。整包要么全写成、要么一个都不落：
+    先写临时名，全部成功再逐个改成正式名；任何一个正式名已存在 → FileExistsError（409，不覆盖）。"""
     ver = str(body.get("ver", ""))
     if not re.fullmatch(r"v\d+", ver):
         raise ValueError(f"版本号不合法：{ver!r}")
-    out = work / OUT_DIR
-    out.mkdir(exist_ok=True)
-    truth_p, sess_p = out / f"作曲_{ver}.json", out / f"作曲_{ver}_会话.json"
-    audio = body.get("audio") or []
-    targets = [truth_p, sess_p] + [out / safe_name(a["name"]) for a in audio]
-    for p in targets:
-        if p.exists():
-            raise FileExistsError(p.name)
     if not isinstance(body.get("truth"), dict) or not isinstance(body.get("session"), dict):
         raise ValueError("缺 truth / session")
-    written = []
+    audio = body.get("audio") or []
+    # 录音名只许是这一版自己的名字，且彼此不重（防同批互相盖、防盖掉 作曲_vN.json）
+    name_re = re.compile(rf"^(哼唱_{ver}_第\d+遍|素材_{ver}_[A-Za-z0-9]+)\.wav$")
+    names = [str(a.get("name", "")) for a in audio]
+    for nm in names:
+        if not name_re.match(nm):
+            raise ValueError(f"录音文件名不合法：{nm!r}")
+    if len(set(names)) != len(names):
+        raise ValueError("同一批里录音文件名重复")
+    pcm = []
     for a in audio:
-        x = np.frombuffer(base64.b64decode(a["b64"]), dtype="<f4")
         sr = int(a["sr"])
         if not (8000 <= sr <= 192000):
             raise ValueError("采样率不合法")
-        p = out / safe_name(a["name"])
-        sf.write(str(p), np.clip(x, -1, 1), sr, subtype="PCM_24")
-        written.append(p.name)
-    truth = dict(body["truth"])
-    truth["saved"] = datetime.now().isoformat(timespec="seconds")
-    truth_p.write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
-    sess_p.write_text(json.dumps(body["session"], ensure_ascii=False), encoding="utf-8")
-    return {"dir": str(out), "written": [truth_p.name, sess_p.name] + written, "truth": truth_p.name, "session": sess_p.name}
+        pcm.append((np.frombuffer(base64.b64decode(a["b64"]), dtype="<f4"), sr))
+    out = work / OUT_DIR
+    out.mkdir(exist_ok=True)
+    truth_p, sess_p = out / f"作曲_{ver}.json", out / f"作曲_{ver}_会话.json"
+    finals = [truth_p, sess_p] + [out / nm for nm in names]
+    for p in finals:
+        if p.exists():
+            raise FileExistsError(p.name)
+    tag = f".tmp_{datetime.now().strftime('%H%M%S%f')}_"
+    tmps = [p.with_name(tag + p.name) for p in finals]
+    try:
+        truth = dict(body["truth"])
+        truth["saved"] = datetime.now().isoformat(timespec="seconds")
+        tmps[0].write_text(json.dumps(truth, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmps[1].write_text(json.dumps(body["session"], ensure_ascii=False), encoding="utf-8")
+        for (x, sr), tp in zip(pcm, tmps[2:]):
+            sf.write(str(tp), np.clip(x, -1, 1), sr, subtype="PCM_24", format="WAV")
+        for tp, p in zip(tmps, finals):
+            tp.rename(p)          # Windows 上目标已存在会报错 → 不会覆盖
+    except Exception:
+        # 只清这一次自己写出的临时文件（进回收站，不直接删）
+        left = [str(tp) for tp in tmps if tp.exists()]
+        if left:
+            from trash import trash
+            trash(*left)
+        raise
+    return {"dir": str(out), "written": [p.name for p in finals], "truth": truth_p.name, "session": sess_p.name}
 
 
 def list_sessions(work: Path):
@@ -161,11 +182,25 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def _foreign(self):
+        """别的网页 / DNS 重绑定发来的请求：Host 必须是本机这个端口；带 Origin 就必须是自己。"""
+        port = self.server.server_address[1]
+        ok = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        if self.headers.get("Host", "") not in ok:
+            return "Host 不对"
+        origin = self.headers.get("Origin")
+        if origin is not None and origin not in {f"http://{h}" for h in ok}:
+            return "不接受别的网页发来的请求"
+        return None
+
     def _err(self, code, msg):
         self._send(code, msg.encode("utf-8"), "text/plain; charset=utf-8")
 
     def do_GET(self):
         u = urlparse(self.path)
+        bad = self._foreign()
+        if bad:
+            return self._err(403, bad)
         if not u.path.startswith("/api/"):
             return super().do_GET()
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
@@ -200,6 +235,11 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        bad = self._foreign()
+        if bad:
+            return self._err(403, bad)
+        if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+            return self._err(415, "只收 application/json")   # 简单请求（text/plain）不会触发预检，挡掉
         try:
             n = int(self.headers.get("Content-Length", "0"))
             if n <= 0 or n > MAX_BODY:

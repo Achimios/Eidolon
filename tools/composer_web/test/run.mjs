@@ -6,6 +6,7 @@ import * as Th from '../js/theory.js';
 import * as Pi from '../js/pitch.js';
 import * as In from '../js/interp.js';
 import * as St from '../js/state.js';
+import * as Tr from '../js/transport.js';
 
 let n = 0, failed = 0;
 const t = (name, f) => { n++; try { f(); } catch (e) { failed++; console.error(`✗ ${name}\n  ${e.message}`); } };
@@ -103,7 +104,38 @@ t('起音检测：等间隔的咔哒都找到', () => {
   assert.equal(ons.length, 10, ons.join(','));
 });
 
+t('高音口哨（C7 / D7，2 kHz 以上）：自动放宽音高上限，认出旋律', () => {
+  const r = Pi.analyzeHum(voiceLike([{ midi: 96, dur: 0.4, amp: 0.3 }, { midi: 98, dur: 0.4, amp: 0.3 }]), 48000);
+  assert.equal(r.guess.mode, 'melody');
+  assert.deepEqual(pitches(r.segs), [96, 98]);
+});
+t('偏移接近半格（蓝牙延迟）→ 判不可信，不扣', () => {
+  const late = [0.11, 0.61, 1.12, 1.6, 2.11].map(b => ({ b, d: 0.2 }));
+  const o = In.meanOffset(late);
+  assert.ok(o.tooLarge && !o.consistent, JSON.stringify(o));
+});
+
+// ---- 键盘时刻 ----
+t('键盘时刻：getOutputTimestamp 已是「听到的时钟」，正好按在第 2 拍上 → 记成第 2 拍（不再多扣输出延迟）', () => {
+  const s = St.makeState();                                       // 150 BPM：一拍 0.4 s
+  const now = 11.0, outLat = 0.03;
+  const tr = new Tr.Transport({ now }, () => s);
+  tr.segs = [{ ctx0: 10, b0: 0, b1: 16 }];
+  const ts = { contextTime: now - outLat, performanceTime: 5000 };  // 扬声器此刻在放 10.97
+  const heardBeat2 = 10 + 2 * 0.4;                                // 第 2 拍排在 10.8，也在 10.8 被听到
+  const evStamp = ts.performanceTime + (heardBeat2 - ts.contextTime) * 1000;
+  assert.ok(Math.abs(tr.beatAt(Tr.heardCtxTime(ts, evStamp, now, outLat)) - 2) < 1e-9);
+  // 拿不到时间戳：退回 now − 输出延迟
+  assert.ok(Math.abs(Tr.heardCtxTime(null, NaN, now, outLat) - 10.97) < 1e-9);
+});
+
 // ---- 真值导出 ----
+t('不吸附的小数音高：导出取整，小数部分并进音分曲线', () => {
+  const s = St.makeState();
+  s.notes.push({ id: 'h', layer: 'voice', b: 0, d: 1, pitch: 64.3, vel: 0.8, input: 'hum', bend: { dt: 0.02, cents: [0, 5] } });
+  const n = St.exportTruth(s).notes[0];
+  assert.equal(n.pitch, 64); assert.deepEqual(n.bend.cents, [30, 35]);
+});
 t('导出：秒 = anchor + 拍 × 60/bpm；鼓进 hits；按时间排；格式自检通过', () => {
   const s = St.makeState(); s.anchor = 25.95; s.bpm = 150;
   s.notes.push({ id: 'a', layer: 'lead', b: 4, d: 1, pitch: 64.2, vel: 0.8, input: 'keyboard', raw: { b: 4.05, d: 1 } });

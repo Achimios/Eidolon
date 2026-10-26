@@ -1,7 +1,7 @@
 // >v<🎛作曲器-页面-锁调键盘 / 拍 / 哼唱 / XY 推子 → 循环叠录 → 变体里挑 → 时间线剪 → 保存 作曲.json + 哼唱 wav。
 import { MODES, NOTE_NAMES, ROW_A, ROW_Q, ROW_Z, KEY_LABEL, codeToDegree, degreeToMidi, noteName, parseProgression, chordAtBar, chordPcs, chordRoman, chordTones, hzMidi } from './theory.js';
 import { Engine, PRESETS, DRUM_SOUNDS, DRUM_LABEL } from './engine.js';
-import { Transport } from './transport.js';
+import { Transport, heardCtxTime } from './transport.js';
 import { Timeline } from './timeline.js';
 import { MACROS, MACRO_BY_ID, effectiveMacros, curveAt, curveWrite, makeState, makeLayer, uid, spb, loopRange, songBeats, layerById, exportTruth, exportSession, validateTruth } from './state.js';
 import { analyzeHum, notesToBeats, yin, decimate, MODE_PARAMS } from './pitch.js';
@@ -131,7 +131,7 @@ function showLatency() { $('latInfo').textContent = S.settings.latencyMs !== nul
 // 校准：扬声器放 6 下咔哒，麦克风收，测往返延迟
 async function calibrate() {
   if (!(await micOn())) return;
-  status('校准中：拿掉耳机，保持安静…', true);
+  status('校准中：保持安静。用哪副耳机哼唱，就把那副耳机贴着麦克风来校准（蓝牙耳机比扬声器多 150–250 ms）…', true);
   const t0 = E.now + 0.3, clicks = [];
   for (let k = 0; k < 6; k++) { const t = t0 + k * 0.5; clicks.push(t); const o = E.ctx.createOscillator(), g = E.ctx.createGain(); o.frequency.value = 2000; g.gain.setValueAtTime(0.6, t); g.gain.setTargetAtTime(0, t + 0.004, 0.004); o.connect(g); g.connect(E.ctx.destination); o.start(t); o.stop(t + 0.05); }
   await new Promise(r => setTimeout(r, 3800));
@@ -187,18 +187,14 @@ function processHumTake(layerId, b0, t0, t1) {
 const held = new Map();   // code → { voice, b, t, pitch, sound, layer, vel, col }
 let tapCounter = 0;
 function ctxTimeOfEvent(ev) {
-  // 键盘事件的时刻 → 音频时钟（getOutputTimestamp 把「听到的时刻」对上 performance.now）
-  try {
-    const ts = E.ctx.getOutputTimestamp();
-    if (ts && ts.performanceTime) return ts.contextTime + (ev.timeStamp - ts.performanceTime) / 1000;
-  } catch (e) { /* 老浏览器 */ }
-  return E.now;
+  let ts = null;
+  try { ts = E.ctx.getOutputTimestamp(); } catch (e) { /* 老浏览器 */ }
+  return heardCtxTime(ts, ev.timeStamp, E.now, (E.ctx.outputLatency || 0) + (E.ctx.baseLatency || 0));
 }
-// 演奏到的拍：按键时刻（换成听到的时钟）− 你的固定偏移
+// 演奏到的拍：按键时刻（听到的时钟）− 你的固定偏移
 function playedBeat(ev) {
   if (!T.playing) return null;
-  const lat = (E.ctx.outputLatency || 0) + (E.ctx.baseLatency || 0);
-  return T.beatAt(ctxTimeOfEvent(ev) - lat - (S.settings.kbOffsetMs || 0) / 1000);
+  return T.beatAt(ctxTimeOfEvent(ev) - (S.settings.kbOffsetMs || 0) / 1000);
 }
 function inLoop(b) { const [a, z] = loopRange(S); return !S.loop.on || (b >= a - 0.05 && b < z); }
 function wrapIntoLoop(b) { const [a, z] = loopRange(S); if (!S.loop.on) return b; if (b < a) return b + (z - a); if (b >= z) return b - (z - a); return b; }
@@ -210,7 +206,7 @@ function noteDown(ev) {
   if (!inRow) return false;
   if (held.has(code)) return true;
   const vel = S.settings.velMode === 'shift' ? (ev.shiftKey ? 1 : 0.72) : 0.8;
-  const when = E.now;
+  const when = E.now, heard = ctxTimeOfEvent(ev);   // when = 现在出声；heard = 记录用（起点和时值同源）
   let pitch = null, sound = null, col = 0;
   if (L.kind === 'drums') {
     const i = [ROW_A, ROW_Q, ROW_Z].map(r => r.indexOf(code)).find(i => i >= 0);
@@ -219,7 +215,7 @@ function noteDown(ev) {
     const v = ROW_Q.includes(code) ? 1 : vel;
     E.hit(L, sound, v, when);
     if (sound === 'kick') E.duck(when, (T.lastEff || effectiveMacros({}, true)).sidechain);
-    held.set(code, { b: playedBeat(ev), t: when, sound, layer: L.id, vel: v });
+    held.set(code, { b: playedBeat(ev), t: heard, sound, layer: L.id, vel: v });
   } else if (L.kind === 'synth' || L.kind === 'voice') {
     if (L.input === 'tap') {
       col = Math.max(ROW_A.indexOf(code), ROW_Q.indexOf(code), ROW_Z.indexOf(code));
@@ -234,7 +230,7 @@ function noteDown(ev) {
     // 琶音器：播放中按住 = 每个 1/16 自动弹一个和弦音（arpTick 负责），这里不出长音
     if (L.preset === 'arp' && T.playing) { held.set(code, { arp: true, pitch, layer: L.id, vel, t: when, step: null, n: 0 }); litKey(code, true); return true; }
     const voice = E.note(L, pitch, vel, when);
-    held.set(code, { voice, b: playedBeat(ev), t: when, pitch, layer: L.id, vel });
+    held.set(code, { voice, b: playedBeat(ev), t: heard, pitch, layer: L.id, vel });
   } else return true;
   litKey(code, true);
   return true;
@@ -251,7 +247,7 @@ function noteUp(ev) {
   if (S.loop.on && b < loopRange(S)[0] - 0.5) return;
   if (!inLoop(b)) b = wrapIntoLoop(b);
   if (!inLoop(b)) return;
-  const holdSec = when - h.t;
+  const holdSec = Math.max(0, ctxTimeOfEvent(ev) - h.t);
   let d = holdSec / spb(S);
   const [ls, le] = loopRange(S);
   if (S.loop.on) d = Math.min(d, le - ls);
@@ -330,7 +326,8 @@ function openNoteVariants(layerId, ids, reroll = 0) {
   const off = meanOffset(src);
   variants = { kind: 'notes', layer: layerId, removeIds: idSet, options: opts.map(o => ({ ...o, notes: o.notes.map(n => ({ ...n, layer: layerId })) })), idx: 0, reroll, ids };
   renderVariants();
-  if (off.consistent) status(`你这一段平均${off.offset < 0 ? '提前' : '拖后'} ${Math.abs(off.offset * spb(S) * 1000).toFixed(0)} ms（很稳，多半是延迟）：吸附的变体里已经扣掉`, true);
+  if (off.tooLarge) status('你这一段整体偏了将近半格：多半是延迟太大（比如蓝牙耳机）。吸附没扣偏移；先点「校准延迟」，或换有线耳机', true);
+  else if (off.consistent) status(`你这一段平均${off.offset < 0 ? '提前' : '拖后'} ${Math.abs(off.offset * spb(S) * 1000).toFixed(0)} ms（很稳，多半是延迟）：吸附的变体里已经扣掉`, true);
 }
 function openTakeVariants(layerId) {
   const takes = hum.sessionTakes.map(id => S.clips.find(c => c.id === id)).filter(Boolean);
@@ -506,7 +503,7 @@ function livePitch() {
   let e = 0; for (const v of d) e += v * v;
   const db = 10 * Math.log10(e / d.length + 1e-12);
   if (db < -50) return { db, midi: 0 };
-  const y = yin(d, sr, { fmin: 65, fmax: 1500 });
+  const y = yin(d, sr, { fmin: 65, fmax: 3000 });
   return { db, midi: y.f0 > 0 && y.ap < 0.25 ? hzMidi(y.f0) : 0 };
 }
 function drawPitchStrip() {

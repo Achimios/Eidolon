@@ -62,13 +62,13 @@
     </div>
 
     <div id="hum" class="hidden">
-      <div class="hd">哼唱 <button id="micBtn">开麦</button><button id="calib" title="拿掉耳机，让扬声器对着麦克风">校准延迟</button>
+      <div class="hd">哼唱 <button id="micBtn">开麦</button><button id="calib" title="用哪副耳机哼唱，就把它贴着麦克风校准（换耳机要重新校准）">校准延迟</button>
         <span class="dim" id="latInfo"></span></div>
       <div class="humRow">
         <div id="pitchNow"><div class="big" id="pnName">—</div><div class="dim" id="pnCents"></div></div>
         <canvas id="pitchStrip" width="560" height="110"></canvas>
       </div>
-      <div class="dim" id="humInfo">选「哼唱」层、开麦、按 ` 开始录：每一遍循环存一条，停了以后在几遍里挑。</div>
+      <div class="dim" id="humInfo">⚠️戴耳机（外放的伴奏漏进麦克风，会被当成你的声音）。选「哼唱」层、开麦、按 ` 开始录：每一遍循环存一条，停了以后在几遍里挑。换了耳机（尤其蓝牙）要重新校准。</div>
     </div>
     <div id="status"></div>
   </section>

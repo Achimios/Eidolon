@@ -123,7 +123,12 @@ export function exportTruth(s, { audioFiles = {}, macroFps = 60, created = new D
   for (const n of [...live].sort((a, b) => a.b - b.b)) {
     const raw = n.raw ? { t: T(n.raw.b ?? n.b), ...(n.raw.d !== undefined ? { dur: D(n.raw.d) } : {}), ...(n.raw.pitch_raw !== undefined ? { pitch_raw: n.raw.pitch_raw } : {}), ...(n.raw.vel !== undefined ? { vel: n.raw.vel } : {}), ...(n.raw.db !== undefined ? { db: n.raw.db } : {}) } : undefined;
     if (n.sound) hits.push({ t: T(n.b), layer: n.layer, sound: n.sound, vel: r3(n.vel), input: n.input, ...(raw ? { raw } : {}) });
-    else notes.push({ t: T(n.b), dur: D(n.d), pitch: Math.round(n.pitch), vel: r3(n.vel), layer: n.layer, input: n.input, ...(n.bright !== undefined ? { bright: n.bright } : {}), ...(n.bend ? { bend: n.bend } : {}), ...(raw ? { raw } : {}), ...(n.derived ? { derived: n.derived } : {}) });
+    else {
+      // 不吸附时音高是小数：导出取整，小数部分并进音分曲线（曲线永远相对导出的整数音高）
+      const p = Math.round(n.pitch), frac = Math.round((n.pitch - p) * 100);
+      const bend = n.bend ? (frac ? { ...n.bend, cents: n.bend.cents.map(c => c + frac) } : n.bend) : null;
+      notes.push({ t: T(n.b), dur: D(n.d), pitch: p, vel: r3(n.vel), layer: n.layer, input: n.input, ...(n.bright !== undefined ? { bright: n.bright } : {}), ...(bend ? { bend } : {}), ...(raw ? { raw } : {}), ...(n.derived ? { derived: n.derived } : {}) });
+    }
   }
   // 旋钮：逐帧（从 anchor 开始，覆盖整首）；张力另存稀疏点（和 remix_cku 的 作曲.json 一样是 [t, v] 对）
   const nF = Math.ceil(total * spb(s) * macroFps) + 1;
@@ -143,7 +148,7 @@ export function exportTruth(s, { audioFiles = {}, macroFps = 60, created = new D
     file: audioFiles[c.audio] || c.file || null, ...(c.src ? { src: c.src } : {}), ...(c.analysis ? { analysis: c.analysis } : {}),
   }));
   return {
-    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹；tension 为空 = 全程 0.5；macros 只列动过的旋钮（其余用默认值）。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
+    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹；bend.cents 相对导出的整数 pitch；tension 为空 = 全程 0.5。macros：逐帧，第 0 帧在 t0（= grid.anchor，不是 0 秒）；存的是旋钮原值，只列动过的，没列的用 macro_defaults；生效值 = 原值 × (a + b × tension)（a、b 见 macro_rules），没列出的旋钮也照这个随张力变。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
     generator: 'composer_web/1',
     created,
     work: s.work,

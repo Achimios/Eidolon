@@ -43,7 +43,7 @@ export function decimate(pcm, sr, target = 16000) {
 }
 
 // 逐帧特征：时刻 / 响度 dB / 音高 midi（0 = 没音高）/ 非周期度 / 过零率
-export function track(pcm, sr, { hopSec = 0.01, winSec = 0.04, fmin = 65, fmax = 1600 } = {}) {
+export function track(pcm, sr, { hopSec = 0.01, winSec = 0.04, fmin = 65, fmax = 3000 } = {}) {
   const { x, sr: s2 } = decimate(pcm, sr);
   const hop = Math.round(hopSec * s2);
   // YIN 需要窗长 ≥ 2 × 最长周期
@@ -225,9 +225,11 @@ export function notesToBeats(segs, { t0Beat, spb, key, prog, beatsPerBar = 4, sn
 }
 
 // 一条哼唱的完整分析
+// 音高上限 3 kHz：口哨常在 1–2.5 kHz。⚠️不能先按人声范围测再看「测不出就放宽」——纯音的周期 2τ 处也是零，
+// 上限太低时 YIN 会稳稳地测成低一个八度，而不是测不出（合成口哨 C7 实测）。人声的高八度误判靠 cleanPitch 折回
+export const FMAX = 3000;
 export function analyzeHum(pcm, sr, opts = {}) {
-  const fr0 = track(pcm, sr, opts);
-  const { frames, gate } = cleanPitch(fr0);
+  const { frames, gate } = cleanPitch(track(pcm, sr, { ...opts, fmax: FMAX }));
   const guess = classify(frames);
   const mode = opts.mode && opts.mode !== 'auto' ? opts.mode : guess.mode;
   const tune = tuningOffset(frames);

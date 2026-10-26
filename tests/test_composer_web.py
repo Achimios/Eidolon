@@ -57,12 +57,64 @@ class TestServe(unittest.TestCase):
             serve.save_bundle(self.work, self.bundle("v1"))
         self.assertEqual((out / "作曲_v1.json").read_bytes(), before)
         self.assertEqual(serve.next_version(out), 2)
-        # 有一个录音文件名撞了 → 整包都不写
+        # 有一个录音文件名撞了 → 整包都不写，已有的那个也不动
+        (out / "哼唱_v2_第1遍.wav").write_bytes(b"old")
         with self.assertRaises(FileExistsError):
-            serve.save_bundle(self.work, self.bundle("v2", [{"name": "哼唱_v1_第1遍.wav", "sr": 8000, "b64": pcm}]))
+            serve.save_bundle(self.work, self.bundle("v2", [{"name": "哼唱_v2_第1遍.wav", "sr": 8000, "b64": pcm}]))
         self.assertFalse((out / "作曲_v2.json").exists())
+        self.assertEqual((out / "哼唱_v2_第1遍.wav").read_bytes(), b"old")
+        self.assertFalse([p for p in out.iterdir() if p.name.startswith(".tmp_")])
         with self.assertRaises(ValueError):
             serve.save_bundle(self.work, self.bundle("v3/../x"))
+
+    def test_audio_names_must_belong_to_this_version(self):
+        pcm = base64.b64encode(np.zeros(80, "<f4").tobytes()).decode()
+        out = self.work / serve.OUT_DIR
+        for bad in ["作曲_v1.json", "哼唱_v2_第1遍.wav", "x.wav", "哼唱_v1_第1遍.wav.json"]:
+            with self.assertRaises(ValueError, msg=bad):
+                serve.save_bundle(self.work, self.bundle("v1", [{"name": bad, "sr": 8000, "b64": pcm}]))
+        a = {"name": "哼唱_v1_第1遍.wav", "sr": 8000, "b64": pcm}
+        with self.assertRaises(ValueError):
+            serve.save_bundle(self.work, self.bundle("v1", [a, dict(a)]))
+        with self.assertRaises(ValueError):          # 采样率不对：整包一个文件都不落
+            serve.save_bundle(self.work, self.bundle("v1", [{**a, "sr": 1}]))
+        self.assertEqual(sorted(p.name for p in out.iterdir()) if out.exists() else [], [])
+
+    def test_http_rejects_other_sites(self):
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        serve.Handler.root = self.tmp
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+        port = srv.server_address[1]
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        try:
+            def req(method, path, headers, body=None):
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                c.putrequest(method, path, skip_host=True)
+                for k, v in headers.items():
+                    c.putheader(k, v)
+                data = body.encode("utf-8") if body else b""
+                if body is not None:
+                    c.putheader("Content-Length", str(len(data)))
+                c.endheaders(data)
+                r = c.getresponse()
+                r.read()
+                c.close()
+                return r.status
+            me = f"127.0.0.1:{port}"
+            body = json.dumps(self.bundle("v1"))
+            self.assertEqual(req("GET", "/api/works", {"Host": me}), 200)
+            self.assertEqual(req("GET", "/api/works", {"Host": f"evil.com:{port}"}), 403)   # DNS 重绑定
+            self.assertEqual(req("POST", "/api/save?work=MV_%E6%B5%8B%E8%AF%95", {"Host": me, "Origin": "https://evil.com", "Content-Type": "application/json"}, body), 403)
+            self.assertEqual(req("POST", "/api/save?work=MV_%E6%B5%8B%E8%AF%95", {"Host": me, "Content-Type": "text/plain"}, body), 415)
+            self.assertFalse((self.work / serve.OUT_DIR).exists())
+            self.assertEqual(req("POST", "/api/save?work=MV_%E6%B5%8B%E8%AF%95", {"Host": me, "Origin": f"http://{me}", "Content-Type": "application/json"}, body), 200)
+            self.assertTrue((self.work / serve.OUT_DIR / "作曲_v1.json").is_file())
+        finally:
+            srv.shutdown()
+            srv.server_close()
 
     def test_stem_slice_pads_outside_file(self):
         b = serve.stem_slice(self.work, "drums.wav", -0.5, 1.0)
