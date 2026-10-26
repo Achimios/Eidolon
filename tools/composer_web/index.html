@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>作曲器</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="gate"><div><h1>作曲器 <small>能玩的乐器，不是打谱机</small></h1><p>点一下开始（浏览器要先点一下才肯出声）。</p><p class="dim">戴耳机：哼唱时伴奏漏进麦克风会被当成你的声音。</p><button id="gateBtn">开始</button></div></div>
+
+<header>
+  <div class="brand">作曲器 <span id="ver" class="dim">composer_web v1</span></div>
+  <div class="grp">
+    <label>作品 <select id="work"></select></label>
+    <label>BPM <input id="bpm" type="number" min="40" max="240" step="0.5" value="150"></label>
+    <label>调 <select id="root"></select><select id="mode"></select></label>
+    <label title="每小节一个和弦，用级数：1 6 3 7 或 i VI III VII">和弦 <input id="prog" value="i VI III VII" size="12"></label>
+    <label>循环 <select id="loopBars"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option></select> 小节</label>
+    <label>全曲 <input id="songBars" type="number" min="1" max="256" value="16"> 小节</label>
+    <label title="第 1 小节在歌曲里的播放时间（秒）。载入原曲分轨时从 感官.json 的重拍里选">起点 <input id="anchor" type="number" step="0.01" value="0"> s</label>
+  </div>
+  <div class="grp transport">
+    <button id="play" title="空格">▶ 播放</button>
+    <button id="rec" title="` 键（1 左边那个）">● 录</button>
+    <button id="loopOn" class="on" title="循环开关">⟲ 循环</button>
+    <button id="metro" class="on" title="0 键">♩ 节拍器</button>
+    <button id="countIn" class="on" title="录音前先数一小节">预备拍</button>
+    <button id="undo" title="Ctrl+Z">撤销</button><button id="redo" title="Ctrl+Shift+Z">重做</button>
+    <button id="save" class="accent">保存</button><button id="load">打开…</button>
+    <button id="help">? 键位</button>
+  </div>
+</header>
+
+<main>
+  <section id="left">
+    <div class="hd">层 <span class="dim">数字键选</span>
+      <select id="addLayer"><option value="">＋ 加一层…</option><option value="synth:bass">贝斯</option><option value="synth:pad">铺底</option><option value="synth:lead">主旋律</option><option value="synth:pluck">拨弦</option><option value="synth:bell">FM 钟</option><option value="synth:arp">琶音</option><option value="drums:drums">鼓</option><option value="voice:voice">哼唱 / 人声</option><option value="stem:file">分轨（选文件）</option></select>
+    </div>
+    <div id="layers"></div>
+    <div class="hd" id="paramHd">旋钮</div>
+    <div id="params"></div>
+  </section>
+
+  <section id="center">
+    <div id="modeBar">
+      <span id="selName" class="big"></span>
+      <span class="seg" id="inputSeg"><button data-v="keyboard">键盘</button><button data-v="tap">拍</button><button data-v="hum">哼唱</button></span>
+      <span class="dim" id="modeHint"></span>
+    </div>
+    <div id="keys"></div>
+    <div id="kbOpts">
+      <label>力度 <select id="velMode"><option value="flat">等力度</option><option value="shift">Shift = 重音</option><option value="hold">按住时长</option></select></label>
+      <label id="tapPatWrap">拍的音高 <select id="tapPat"><option value="position">跟着键的左右</option><option value="arp">上行琶音</option><option value="root">根音</option><option value="random">随机和弦音</option></select></label>
+      <span class="dim">↑↓ 八度 · Tab 换输入方式 · 原始演奏一律原样记下，吸附在「变体」里挑</span>
+    </div>
+
+    <div id="variants" class="hidden">
+      <div class="hd">挑一个 <span class="dim" id="varHint">←→ 试听 · Enter 用这个 · Shift+Enter 叠成新层 · Esc 放弃</span>
+        <button id="reroll">再来一组</button><button id="timbreVar">音色变体</button></div>
+      <div id="varCards"></div>
+    </div>
+
+    <div id="hum" class="hidden">
+      <div class="hd">哼唱 <button id="micBtn">开麦</button><button id="calib" title="拿掉耳机，让扬声器对着麦克风">校准延迟</button>
+        <span class="dim" id="latInfo"></span></div>
+      <div class="humRow">
+        <div id="pitchNow"><div class="big" id="pnName">—</div><div class="dim" id="pnCents"></div></div>
+        <canvas id="pitchStrip" width="560" height="110"></canvas>
+      </div>
+      <div class="dim" id="humInfo">选「哼唱」层、开麦、按 ` 开始录：每一遍循环存一条，停了以后在几遍里挑。</div>
+    </div>
+    <div id="status"></div>
+  </section>
+
+  <section id="right">
+    <div class="hd">XY 推子 <span class="dim">拖 = 两个旋钮；录音时记成曲线</span></div>
+    <canvas id="xy" width="280" height="280"></canvas>
+    <div class="xysel"><label>x <select id="xSel"></select></label><label>y <select id="ySel"></select></label></div>
+    <label class="chk"><input type="checkbox" id="tParent" checked> 张力当所有旋钮的总父级</label>
+    <div id="macroBars"></div>
+    <div class="hd">示波器 <span class="dim">左 = x，右 = y</span></div>
+    <canvas id="scope" width="280" height="200"></canvas>
+  </section>
+</main>
+
+<section id="bottom">
+  <div class="tlbar">
+    <button id="fitSong">全曲</button><button id="fitLoop">循环区</button>
+    <label>编辑吸附 <select id="snapEdit"><option value="1">1 拍</option><option value="0.5">1/8</option><option value="0.25" selected>1/16</option><option value="0.125">1/32</option><option value="0">自由</option></select></label>
+    <button id="copy" title="Ctrl+C">复制</button><button id="paste" title="Ctrl+V：贴到光标">粘贴</button><button id="dup" title="Ctrl+D">复制一份到后面</button><button id="del" title="Delete">删除</button>
+    <span class="dim">拖音符 = 移（上下 = 调内走级，Alt = 不吸附）· 空白处拖 = 框选 · 双击空白 = 加音 · 标尺上条拖 = 循环区 · 下条拖 = 选一段 · 曲线道直接画（右键拖 = 擦）· Ctrl+滚轮 缩放</span>
+    <span class="lanes" id="laneChecks"></span>
+  </div>
+  <div id="tlWrap"><canvas id="tl"></canvas></div>
+  <div class="hd">场景 <span class="dim">一段 = 哪些层在响；Shift+数字 跳过去</span> <button id="addScene">＋ 在循环起点加场景</button>
+    <button id="loadStems">载入原曲分轨</button><select id="anchorSel" title="从原曲的哪个重拍开始"></select></div>
+  <div id="scenes"></div>
+</section>
+
+<div id="helpBox" class="hidden"><div>
+  <h2>键位</h2>
+  <table>
+    <tr><td>A S D F G H J K L ; '</td><td>当前调式的音阶（本八度），按哪个都不会错音</td></tr>
+    <tr><td>Q W E R T Y U I O P [ ]</td><td>同一列高一个八度</td></tr>
+    <tr><td>Z X C V B N M , . /</td><td>同一列低一个八度（给贝斯）</td></tr>
+    <tr><td>鼓层</td><td>A 底鼓 · S 军鼓 · D 拍手 · F 闭镲 · G 开镲 · H 边击 · J 通鼓 · K 冲击（Q 排同样、更重）</td></tr>
+    <tr><td>拍</td><td>任意字母键 = 一下；音高自动填当前和弦的音（默认：越靠右越高）</td></tr>
+    <tr><td>空格 / `</td><td>播放 · 停 / 录音开关（循环不停，叠录）</td></tr>
+    <tr><td>1–9 / Shift+1–9</td><td>选层 / 跳到场景</td></tr>
+    <tr><td>↑ ↓ / Tab</td><td>八度 / 换输入方式（键盘 → 拍 → 哼唱）</td></tr>
+    <tr><td>← → Enter Esc</td><td>变体：试听 / 用这个（Shift+Enter 叠成新层）/ 放弃</td></tr>
+    <tr><td>- =</td><td>循环区往前 / 往后挪</td></tr>
+    <tr><td>0</td><td>节拍器</td></tr>
+    <tr><td>Ctrl+Z / C / V / D, Delete</td><td>撤销 / 复制 / 粘贴到光标 / 复制一份到后面 / 删除</td></tr>
+  </table>
+  <p class="dim">原始演奏（时刻、音高、按住时长）永远原样记进真值的 raw；吸附、力度规则都是「解释」，在变体里挑，可撤。页面里的声音只是预览，最终音质由 Python 读 作曲.json 渲染。</p>
+  <button id="helpClose">关</button>
+</div></div>
+<div id="sessBox" class="hidden"><div><h2>打开会话</h2><div id="sessList"></div><button id="sessClose">关</button></div></div>
+<input type="file" id="fileIn" accept="audio/*" class="hidden">
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
