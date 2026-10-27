@@ -160,6 +160,19 @@ t('clips.offset = 从文件开头算的片内起点（分轨按窗口切片载�
   assert.deepEqual(cs.map(c => c.offset), [25.95, 10.5, 0]);
   assert.equal(cs[0].t, 25.95);
 });
+t('clips.audible_spans：按场景切开、相邻的连起来；静音 / 没激活 = []；独奏不算', () => {
+  const s = St.makeState(); s.anchor = 10; s.bpm = 150;                 // 一拍 0.4 s，一小节 1.6 s
+  s.clips.push({ id: 'h', layer: 'voice', b: 0, dur: 6.4, audio: 'a', input: 'hum', active: true, take: 1 });   // 4 小节
+  s.clips.push({ id: 'h2', layer: 'voice', b: 0, dur: 6.4, audio: 'b', input: 'hum', active: false, take: 2 });
+  s.scenes = [{ id: 's1', bar: 0, name: 'A', layers: ['voice'] }, { id: 's2', bar: 1, name: 'B', layers: ['voice'] }, { id: 's3', bar: 2, name: 'C', layers: [] }, { id: 's4', bar: 3, name: 'D', layers: ['voice'] }];
+  s.layers.find(l => l.id === 'drums').solo = true;                     // 独奏别的层：不影响导出
+  let cs = St.exportTruth(s).clips;
+  assert.deepEqual(cs[0].audible_spans, [[10, 13.2], [14.8, 16.4]]);   // 场景 A + B 连成一段，C 不响，D 响
+  assert.deepEqual(cs[1].audible_spans, []);
+  s.layers.find(l => l.id === 'voice').mute = true;
+  cs = St.exportTruth(s).clips;
+  assert.deepEqual(cs[0].audible_spans, []);
+});
 t('不吸附的小数音高：导出取整，小数部分并进音分曲线', () => {
   const s = St.makeState();
   s.notes.push({ id: 'h', layer: 'voice', b: 0, d: 1, pitch: 64.3, vel: 0.8, input: 'hum', bend: { dt: 0.02, cents: [0, 5] } });
