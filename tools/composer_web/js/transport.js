@@ -11,9 +11,14 @@ export function heardCtxTime(ts, evStamp, now, outLat) {
 }
 
 export class Transport {
+  // hooks.countingIn(k)：第 k 拍（排到的拍，不是听到的拍）要不要打预备拍的咔哒
   constructor(engine, getState, hooks = {}) {
     this.e = engine; this.S = getState; this.h = hooks;
-    this.playing = false; this.segs = []; this.nextB = 0; this.timer = null; this.sources = [];
+    this.playing = false; this.segs = []; this.nextB = 0; this.timer = null;
+    this.live = [];            // 排好的录音 / 分轨片段 { src, layer, p0, p1（拍）, when, end（音频时钟）, v }：每 tick 按静音 / 独奏 / 场景调它的增益
+    this.endTimer = null; this.ending = false;      // 歌尾的那一次 stop（只排一次）
+    this.countInEnd = -Infinity;
+    this._warned = false;
   }
   _segEnd(b) {
     const s = this.S(), [ls, le] = loopRange(s);
@@ -21,9 +26,12 @@ export class Transport {
     if (s.loop.on && b < le - 1e-9) return le;
     return songBeats(s);
   }
-  start(fromBeat) {
+  // opts.countInEnd = 录音从第几拍开始（预备拍只打它之前的拍）。没给：开循环 = 循环起点；不循环 = 起点 + 一小节（有预备拍时）
+  start(fromBeat, opts = {}) {
     this.stop(true);
     this.playing = true;
+    const s = this.S(), [ls] = loopRange(s);
+    this.countInEnd = opts.countInEnd ?? (s.loop.on ? ls : fromBeat + (s.settings.countIn ? s.beatsPerBar : 0));
     const ctx0 = this.e.now + 0.08;
     this.segs = [{ ctx0, b0: fromBeat, b1: this._segEnd(fromBeat) }];
     this.nextB = fromBeat;
@@ -35,8 +43,10 @@ export class Transport {
   stop(silent = false) {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    for (const src of this.sources) { try { src.stop(); } catch (e) { /* 已停 */ } }
-    this.sources = [];
+    if (this.endTimer) clearTimeout(this.endTimer);
+    this.endTimer = null; this.ending = false;
+    for (const c of this.live) { try { c.src.stop(); } catch (e) { /* 已停 */ } }
+    this.live = [];
     const was = this.playing;
     this.playing = false;
     if (was && !silent) this.h.onStop?.();
@@ -84,36 +94,54 @@ export class Transport {
         this._clips(ng);
         this.h.onSegment?.(ng, g);
       } else {
-        setTimeout(() => this.stop(), Math.max(0, (gEnd - this.e.now) * 1000 + 50));
-        this.h.onSegment?.(null, g);
+        // 歌尾：只进来一次（之后每 tick 还会走到这里，不能再排 stop、再报 onSegment(null)）
+        if (!this.ending) {
+          this.ending = true;
+          this.endTimer = setTimeout(() => { this.endTimer = null; this.stop(); }, Math.max(0, (gEnd - this.e.now) * 1000 + 50));
+          this.h.onSegment?.(null, g);
+        }
         break;
       }
     }
+    this._clipGates();
     this._macros();
   }
   _when(g, b) { return g.ctx0 + (b - g.b0) * spb(this.S()); }
 
   _events(g, bA, bB) {
     const s = this.S(), sp = spb(s);
-    // 节拍器
-    if (s.settings.metro || (this.h.countingIn && this.h.countingIn())) {
-      for (let k = Math.ceil(bA - 1e-9); k < bB; k++) this.e.click(this._when(g, k), ((k % s.beatsPerBar) + s.beatsPerBar) % s.beatsPerBar === 0);
+    // 节拍器；预备拍按「排到的拍」k 判断（排程比听到早 120 ms + 输出延迟，按听到的拍判会多打循环起点那一下）
+    const ci = this.h.countingIn;
+    for (let k = Math.ceil(bA - 1e-9); k < bB; k++) {
+      if (s.settings.metro || (ci && k < this.countInEnd - 1e-9 && ci(k))) this.e.click(this._when(g, k), ((k % s.beatsPerBar) + s.beatsPerBar) % s.beatsPerBar === 0);
     }
     const events = this.h.events ? this.h.events() : s.notes;
     for (const n of events) {
-      if (n.b < bA - 1e-9 || n.b >= bB - 1e-9) continue;
+      if (!(n.b >= bA - 1e-9 && n.b < bB - 1e-9)) continue;         // 写反过来：b 是 NaN 时也跳过
       const L = layerById(s, n.layer);
       if (!L || !audibleAt(s, L, n.b)) continue;
       const when = this._when(g, n.b);
-      if (n.sound) {
-        this.e.hit(L, n.sound, n.vel, when);
-        if (n.sound === 'kick') this.e.duck(when, this._macroEff(n.b).sidechain);
-      } else if (L.kind === 'synth' || (L.kind === 'voice' && L.params.synthOn)) {
-        this.e.note(L, n.pitch, n.vel, when, Math.max(0.03, n.d * sp), L.kind === 'voice' && L.params.bendOn ? n.bend : null);
+      // 一个坏音（比如力度 NaN）不能让整个走带卡住：报一次，接着排后面的
+      try {
+        if (n.sound) {
+          this.e.hit(L, n.sound, n.vel, when);
+          if (n.sound === 'kick') this.e.duck(when, this._macroEff(n.b).sidechain);
+        } else if (L.kind === 'synth' || (L.kind === 'voice' && L.params.synthOn)) {
+          this.e.note(L, n.pitch, n.vel, when, Math.max(0.03, n.d * sp), L.kind === 'voice' && L.params.bendOn ? n.bend : null);
+        }
+      } catch (err) {
+        if (!this._warned) { this._warned = true; console.warn('有一个音排不进去，跳过', n, err); }
       }
     }
   }
-  // 录音 / 分轨：按段排；场景边界处切开（场景里不响的那段不放）
+  // 片段在第 b 拍的增益：场景里不响 / 静音 / 被别人独奏 → 0；哼唱层乘原声音量
+  _clipGain(s, L, b) {
+    if (!L || !audibleAt(s, L, b)) return 0;
+    const g = L.kind === 'voice' ? Math.pow(10, (L.params.rawGainDb ?? 0) / 20) : 1;
+    return g < 0.01 ? 0 : g;
+  }
+  // 录音 / 分轨：按段排；场景边界处切开（每片单独一个增益，场景切点是准的）。
+  // 不响的片也排上（增益 0）：静音 / 独奏 / 场景勾选 / 原声音量在播放中改了，_clipGates 下一 tick 就生效，不用等下一遍
   _clips(g) {
     const s = this.S(), sp = spb(s);
     const clips = this.h.clips ? this.h.clips() : s.clips;
@@ -123,17 +151,26 @@ export class Transport {
       const buf = this.h.buffer?.(c.audio); if (!buf) continue;
       const cEnd = c.b + c.dur / sp;
       const a = Math.max(c.b, g.b0), z = Math.min(cEnd, g.b1);
-      if (z <= a) continue;
+      if (!(z > a)) continue;
       const cuts = [a, ...s.scenes.map(sc => sc.bar * s.beatsPerBar).filter(x => x > a && x < z), z];
       for (let i = 0; i < cuts.length - 1; i++) {
         const p0 = cuts[i], p1 = cuts[i + 1];
-        if (!audibleAt(s, L, p0 + 1e-6)) continue;
-        const gain = L.kind === 'voice' ? Math.pow(10, (L.params.rawGainDb ?? 0) / 20) : 1;
-        if (gain < 0.01) continue;
-        this.sources.push(this.e.clip(L, buf, this._when(g, p0), (p0 - c.b) * sp + (c.offset || 0), (p1 - p0) * sp, gain));
+        const v = this._clipGain(s, L, p0 + 1e-6), when = this._when(g, p0), dur = (p1 - p0) * sp;
+        const src = this.e.clip(L, buf, when, (p0 - c.b) * sp + (c.offset || 0), dur, v);
+        if (src) this.live.push({ src, layer: L.id, p0, p1, when, end: when + dur, v });
       }
     }
-    if (this.sources.length > 200) this.sources = this.sources.slice(-100);
+  }
+  // 每 tick：按片子此刻放到的那一拍重算增益（还没开始的片按它的起点）。场景没改时片内不跨场景，等于按起点算
+  _clipGates() {
+    if (!this.live.length) return;
+    const s = this.S(), now = this.e.now, sp = spb(s);
+    this.live = this.live.filter(c => c.end > now - 0.1);               // 放完的丢掉
+    for (const c of this.live) {
+      const b = Math.min(c.p1 - 1e-6, Math.max(c.p0 + 1e-6, c.p0 + (now - c.when) / sp));
+      const v = this._clipGain(s, layerById(s, c.layer), b);
+      if (Math.abs(v - c.v) > 1e-4) { c.v = v; this.e.clipGain?.(c.src, v); }
+    }
   }
   _macroEff(b) {
     const s = this.S();

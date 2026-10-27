@@ -31,7 +31,9 @@ export class Timeline {
   _v() { const total = songBeats(this.S); if (!this.view || this.view[1] > total + 1e-9) this.view = [0, total]; return this.view; }
   bx(b) { const [v0, v1] = this._v(); return GUT + (b - v0) / (v1 - v0) * (this.W - GUT - 6); }
   xb(x) { const [v0, v1] = this._v(); return v0 + (x - GUT) / (this.W - GUT - 6) * (v1 - v0); }
-  snap(b, alt) { const q = this.S.settings.snapEdit || 0.25; return alt ? b : Math.round(b / q) * q; }
+  // 编辑吸附：0 =「自由」（不吸）；旧会话没有这个设置 → 1/16
+  snapQ() { const q = this.S.settings.snapEdit ?? 0.25; return q > 0 ? q : 0; }
+  snap(b, alt) { const q = this.snapQ(); return alt || !q ? b : Math.round(b / q) * q; }
   rowOf(y) {
     const S = this.S;
     if (y < RULER) return { kind: 'ruler', top: y < RULER / 2 };
@@ -85,10 +87,10 @@ export class Timeline {
     if (row.kind === 'lane') {
       if (e.button === 2) { this.drag = { kind: 'erase', macro: row.macro, b0: b }; return; }
       this.api.snapshot();
-      const v = this._laneV(y, row);
-      S.curves[row.macro.id] = curveWrite(S.curves[row.macro.id] || [], b, b, v);
+      const v = this._laneV(y, row), bc = Math.max(0, Math.min(songBeats(S), b));
+      S.curves[row.macro.id] = curveWrite(S.curves[row.macro.id] || [], bc, bc, v);
       (S.curvesInput ||= {})[row.macro.id] = 'draw';
-      this.drag = { kind: 'draw', macro: row.macro, row, lastB: b };
+      this.drag = { kind: 'draw', macro: row.macro, row, lastB: bc };
       this.api.changed('curve');
       return;
     }
@@ -118,9 +120,11 @@ export class Timeline {
       const b1 = this.snap(b); this.range = [Math.min(d.b0, b1), Math.max(d.b0, b1)]; d.moved = true;
     } else if (d.kind === 'draw') {
       const row = d.row, v = this._laneV(y, row);
-      // 拖得快会跳格：把中间补成一条直线
-      S.curves[d.macro.id] = curveWrite(S.curves[d.macro.id] || [], d.lastB, b, v);
-      d.lastB = b; this.api.changed('curve');
+      // 拖得快会跳格：上一个点和这一个点之间连成直线（中间的旧点删掉）；往左画也是新点落在鼠标这里。
+      // 鼠标拖出画布：钉在 0 – 歌尾（不写负拍）
+      const bc = Math.max(0, Math.min(songBeats(S), b));
+      S.curves[d.macro.id] = curveWrite(S.curves[d.macro.id] || [], d.lastB, bc, v);
+      d.lastB = bc; this.api.changed('curve');
     } else if (d.kind === 'erase') {
       d.b1 = b;
     } else if (d.kind === 'box') {
@@ -183,11 +187,17 @@ export class Timeline {
         const [lo, hi] = this._pitchRange(row.layer, notes);
         let p = Math.round(hi - (y - row.y0 - 4) / (ROW - 8) * (hi - lo));
         while (!inScale(S.key, p)) p--;
-        this.api.addNote({ layer: row.layer.id, b, d: S.settings.snapEdit || 0.25, pitch: p, vel: 0.8, input: 'draw' });
+        this.api.addNote({ layer: row.layer.id, b, d: this.snapQ() || 0.25, pitch: p, vel: 0.8, input: 'draw' });   // 自由时音长默认 1/16
       }
     }
   }
   _wheel(e) {
+    // 竖着滚、底栏还能往下滚（下面还有曲线道 / 场景）→ 让底栏滚；横滚 / Shift / Ctrl 才平移、缩放时间
+    const box = this.cv.closest('#bottom');
+    if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.deltaX && box && box.scrollHeight > box.clientHeight + 1) {
+      const down = e.deltaY > 0, atEnd = down ? box.scrollTop + box.clientHeight >= box.scrollHeight - 1 : box.scrollTop <= 0;
+      if (!atEnd) return;
+    }
     e.preventDefault();
     const total = songBeats(this.S), [v0, v1] = this._v(), span = v1 - v0;
     if (e.ctrlKey || e.metaKey) {
@@ -244,8 +254,8 @@ export class Timeline {
       const y0 = RULER + i * ROW;
       g.fillStyle = L.id === S.sel ? C('--selrow') : 'transparent'; g.fillRect(0, y0, W, ROW);
       g.strokeStyle = C('--line'); g.beginPath(); g.moveTo(0, y0 + ROW - 0.5); g.lineTo(W, y0 + ROW - 0.5); g.stroke();
-      // 录音波形
-      for (const c of S.clips) {
+      // 录音波形（挑 take 时画正在试听的那一条，和音符对得上）
+      for (const c of (this.api.clips ? this.api.clips() : S.clips)) {
         if (c.layer !== L.id || !c.active) continue;
         const pk = peaks(c.audio); if (!pk) continue;
         const x0 = this.bx(c.b), x1 = this.bx(c.b + c.dur / spb(S));

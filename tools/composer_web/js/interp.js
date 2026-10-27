@@ -4,7 +4,23 @@ import { beatStrength, chordAtBar, chordTones, degreeToMidi, inScale, isChordTon
 
 const median = a => { if (!a.length) return 0; const s = [...a].sort((p, q) => p - q), m = s.length >> 1; return s.length % 2 ? s[m] : 0.5 * (s[m - 1] + s[m]); };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fin = (v, def) => Number.isFinite(v) ? v : def;        // 力度 / 时值缺了或是 NaN → 用默认（NaN 进引擎会让走带卡死）
 export const cloneNotes = ns => ns.map(n => ({ ...n, raw: n.raw ? { ...n.raw } : undefined }));
+
+// ---- 0. 循环里的位置：录音时开着循环 → 音一律放进 [ls, le)（对循环长度取模）；时值超过 le 就截到 le（不拆成两段）----
+// loop = [ls, le] 或 null（没开循环 = 不动）。原始值（raw）不在这里改
+export function wrapToLoop(b, d, loop) {
+  if (!loop || !(loop[1] > loop[0]) || !Number.isFinite(b)) return { b, d };
+  const [ls, le] = loop, L = le - ls;
+  let nb = b >= ls && b < le - 1e-9 ? b : ls + (((b - ls) % L) + L) % L;
+  if (nb >= le - 1e-9) nb = ls;                               // 落在 le 上（或浮点误差贴着 le）= 下一遍的开头
+  return { b: nb, d: d === undefined ? d : Math.min(d, le - nb) };
+}
+// 变体出口统一收一遍：放进循环 + 力度不是数就给默认（试听和定下来的都不会把 NaN 送进引擎 / 真值）
+const tidyNotes = (ns, loop) => ns.map(n => {
+  const w = wrapToLoop(n.b, n.d, loop), vel = fin(n.vel, 0.8);
+  return w.b === n.b && w.d === n.d && vel === n.vel ? n : { ...n, b: w.b, d: w.d, vel };
+});
 
 // ---- 1. 稳定的提前 / 拖后（多半是延迟，不是你的意图）：对 16 分格的偏移取中值，够一致才减 ----
 export function meanOffset(notes, grid = 0.25) {
@@ -43,9 +59,11 @@ export function grooveFromOnsets(beats, { slots = 16, beatsPerBar = 4 } = {}) {
 }
 
 // ---- 4. 吸附：起音按强度靠向格子（+ 摇摆 / 律动），时值的尾巴吸得弱一点 ----
-export function quantize(notes, { grid = '1/16', strength = 1, swing = 0, groove = null, removeOffset = 0, minDur = 0.125 } = {}) {
+// loop = [ls, le]：吸到 le 上（或之后）的绕回 ls，时值截到 le（循环里放不到 le 之后的东西）
+export function quantize(notes, { grid = '1/16', strength = 1, swing = 0, groove = null, removeOffset = 0, minDur = 0.125, loop = null } = {}) {
   const g = typeof grid === 'number' ? grid : GRIDS[grid] || 0.25;
-  return notes.map(n => {
+  return notes.map(n0 => {
+    const n = Number.isFinite(n0.d) ? n0 : { ...n0, d: 0.25 };
     const b0 = n.b - removeOffset;
     let k = Math.round(b0 / g), target = k * g;
     // 摇摆：8 分格时每个偶数后的那一格往后推（16 分格推奇数 16 分）
@@ -58,29 +76,31 @@ export function quantize(notes, { grid = '1/16', strength = 1, swing = 0, groove
     const end0 = n.b + n.d - removeOffset;
     const endT = Math.max(target + g * 0.5, Math.round(end0 / g) * g);
     const end = end0 + (endT - end0) * strength * 0.6;
-    return { ...n, b, d: Math.max(minDur * strength + n.d * (1 - strength) * 0.5, end - b, 0.06) };
+    const w = wrapToLoop(b, Math.max(minDur * strength + n.d * (1 - strength) * 0.5, end - b, 0.06), loop);
+    return { ...n, b: w.b, d: w.d };
   });
 }
 
 // ---- 5. 力度规则：节拍位置（重拍强）+ 句子走向（上行渐强）+ 张力（总父级）。键盘没有力度，就让规则给 ----
+// 鼓没有音高：走向只拿有音高的音算（鼓 = 0，只看节拍位置和张力）
 export function ruleVelocity(notes, { beatsPerBar = 4, tensionAt = () => 0.5, amount = 1 } = {}) {
   const sorted = [...notes].sort((a, b) => a.b - b.b);
   const out = new Map();
   for (let i = 0; i < sorted.length; i++) {
-    const n = sorted[i];
-    const s = beatStrength(Math.round(n.b * 4) / 4, beatsPerBar);
-    // 走向：和前面 4 个音的平均音高比
-    const prev = sorted.slice(Math.max(0, i - 4), i);
+    const n = sorted[i], vel0 = fin(n.vel, 0.8);
+    const s = fin(beatStrength(Math.round(n.b * 4) / 4, beatsPerBar), 0);
+    // 走向：和前面 4 个有音高的音的平均音高比
+    const prev = Number.isFinite(n.pitch) ? sorted.slice(0, i).filter(p => Number.isFinite(p.pitch)).slice(-4) : [];
     const contour = prev.length ? clamp((n.pitch - prev.reduce((a, p) => a + p.pitch, 0) / prev.length) / 7, -1, 1) : 0;
-    const t = tensionAt(n.b);
+    const t = fin(tensionAt(n.b), 0.5);
     const v = (0.62 + 0.22 * s + 0.08 * contour) * (0.8 + 0.35 * t);
-    out.set(n, clamp(n.vel + (v - n.vel) * amount, 0.15, 1));
+    out.set(n, clamp(fin(vel0 + (v - vel0) * amount, vel0), 0.15, 1));
   }
   return notes.map(n => ({ ...n, vel: +out.get(n).toFixed(3) }));
 }
 
 // 按住时长 → 力度（短促 = 轻，按住 = 重），用于键盘的「按住时长」力度模式
-export const holdVelocity = holdSec => +clamp(0.45 + 0.55 * Math.min(1, holdSec / 0.6), 0.3, 1).toFixed(3);
+export const holdVelocity = holdSec => +clamp(0.45 + 0.55 * Math.min(1, fin(holdSec, 0) / 0.6), 0.3, 1).toFixed(3);
 
 // ---- 6. 鼓轨起音（给律动模板）：高频能量的正向差分，峰值挑选 ----
 export function detectOnsets(ch, sr, { hop = 256, win = 1024, thresh = 1.6 } = {}) {
@@ -106,7 +126,7 @@ export function detectOnsets(ch, sr, { hop = 256, win = 1024, thresh = 1.6 } = {
 }
 
 // ---- 7. 变体 ----
-// ctx = { key, prog, beatsPerBar, tensionAt, groove, octave }
+// ctx = { key, prog, beatsPerBar, tensionAt, groove, octave, loop }；loop = [ls, le]（录音时开着循环）或 null
 const VARIANT_POOL = {
   raw:     { label: '原样',            desc: '你弹 / 唱的，一点不改' },
   q60:     { label: '吸附 60%',        desc: '靠向格子六成，留人味' },
@@ -128,28 +148,31 @@ function applyVariant(kind, notes, ctx, isDrums) {
   const g = autoGrid(notes);
   const off = meanOffset(notes);
   const ro = off.consistent ? off.offset : 0;
+  const loop = ctx.loop || null;
+  const pitched = notes.filter(n => !n.sound && Number.isFinite(n.pitch));     // 叠八度 / 和声只给有音高的音
   switch (kind) {
     case 'raw': return cloneNotes(notes);
-    case 'q60': return quantize(notes, { grid: g, strength: 0.6, removeOffset: ro });
-    case 'q100': return quantize(notes, { grid: g, strength: 1, removeOffset: ro });
-    case 'groove': return quantize(notes, { grid: '1/16', strength: 1, removeOffset: ro, groove: ctx.groove });
-    case 'swing': return quantize(notes, { grid: g === '1/16' ? '1/16' : '1/8', strength: 1, swing: 0.33, removeOffset: ro });
-    case 'velrule': return ruleVelocity(quantize(notes, { grid: g, strength: 0.6, removeOffset: ro }), ctx);
+    case 'q60': return quantize(notes, { grid: g, strength: 0.6, removeOffset: ro, loop });
+    case 'q100': return quantize(notes, { grid: g, strength: 1, removeOffset: ro, loop });
+    case 'groove': return quantize(notes, { grid: '1/16', strength: 1, removeOffset: ro, groove: ctx.groove, loop });
+    case 'swing': return quantize(notes, { grid: g === '1/16' ? '1/16' : '1/8', strength: 1, swing: 0.33, removeOffset: ro, loop });
+    case 'velrule': return ruleVelocity(quantize(notes, { grid: g, strength: 0.6, removeOffset: ro, loop }), ctx);
     case 'sparse': {
-      const q = quantize(notes, { grid: g, strength: 1, removeOffset: ro });
+      const q = quantize(notes, { grid: g, strength: 1, removeOffset: ro, loop });
       const keep = q.filter(n => beatStrength(Math.round(n.b * 2) / 2, ctx.beatsPerBar) >= 0.5);
       return keep.length ? keep : q.filter((_, i) => i % 2 === 0);
     }
-    case 'octave': return [...cloneNotes(notes), ...notes.map(n => ({ ...n, pitch: n.pitch + 12, vel: +(n.vel * 0.7).toFixed(3), derived: 'octave' }))];
-    case 'harm3': return [...cloneNotes(notes), ...notes.map(n => ({ ...n, pitch: scaleStep(ctx.key, n.pitch, 2), vel: +(n.vel * 0.75).toFixed(3), derived: 'harm3' }))];
+    case 'octave': return [...cloneNotes(notes), ...pitched.map(n => ({ ...n, pitch: n.pitch + 12, vel: +(fin(n.vel, 0.8) * 0.7).toFixed(3), derived: 'octave' }))];
+    case 'harm3': return [...cloneNotes(notes), ...pitched.map(n => ({ ...n, pitch: scaleStep(ctx.key, n.pitch, 2), vel: +(fin(n.vel, 0.8) * 0.75).toFixed(3), derived: 'harm3' }))];
     case 'legato': {
       const s = [...notes].sort((a, b) => a.b - b.b);
       return s.map((n, i) => ({ ...n, d: i < s.length - 1 ? Math.max(0.1, s[i + 1].b - n.b) : n.d }));
     }
-    case 'stacc': return notes.map(n => ({ ...n, d: Math.max(0.06, n.d * 0.5) }));
+    case 'stacc': return notes.map(n => ({ ...n, d: Math.max(0.06, fin(n.d, 0.25) * 0.5) }));
     case 'chordy': {
-      const q = quantize(notes, { grid: g, strength: 1, removeOffset: ro });
+      const q = quantize(notes, { grid: g, strength: 1, removeOffset: ro, loop });
       return q.map(n => {
+        if (n.sound || !Number.isFinite(n.pitch)) return n;
         if (beatStrength(Math.round(n.b * 4) / 4, ctx.beatsPerBar) < 0.5) return n;
         const deg = chordAtBar(ctx.prog, Math.floor(n.b / ctx.beatsPerBar));
         if (isChordTone(ctx.key, deg, n.pitch)) return n;
@@ -159,9 +182,10 @@ function applyVariant(kind, notes, ctx, isDrums) {
     }
     case 'ghost': {
       if (!isDrums) return cloneNotes(notes);
-      const q = quantize(notes, { grid: '1/16', strength: 1, removeOffset: ro });
+      const q = quantize(notes, { grid: '1/16', strength: 1, removeOffset: ro, loop });
       const taken = new Set(q.map(n => Math.round(n.b * 4)));
-      const lo = Math.floor(Math.min(...q.map(n => n.b))), hi = Math.ceil(Math.max(...q.map(n => n.b + 0.25)));
+      let lo = Math.floor(Math.min(...q.map(n => n.b))), hi = Math.ceil(Math.max(...q.map(n => n.b + 0.25)));
+      if (loop) { lo = Math.max(lo, loop[0]); hi = Math.min(hi, loop[1]); }      // 鬼音只补在循环里（不补到 le 之后）
       const add = [];
       for (let k = lo * 4; k < hi * 4; k++) if (!taken.has(k) && k % 2 === 1) add.push({ b: k / 4, d: 0.125, sound: 'hat', vel: 0.28, derived: 'ghost' });
       return [...q, ...add];
@@ -178,6 +202,7 @@ export function scaleStep(key, m, steps) {
 }
 
 // 出一组变体：第一个永远是「原样」；默认 = 原样 / 吸附 60% / 吸附 100% / 律动（有律动模板时）或一个随机
+// ctx.loop = [ls, le] 时每个变体的音都放进循环里（位置取模、时值截到 le），试听和定下来的是同一份
 export function makeVariants(notes, ctx, { isDrums = false, reroll = 0 } = {}) {
   let kinds;
   if (!reroll) kinds = ['raw', 'q60', 'q100', ctx.groove ? 'groove' : (isDrums ? 'ghost' : 'velrule')];
@@ -190,7 +215,7 @@ export function makeVariants(notes, ctx, { isDrums = false, reroll = 0 } = {}) {
     for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
     kinds = ['raw', ...pool.slice(0, 3)];
   }
-  return kinds.map(k => ({ kind: k, ...VARIANT_POOL[k], notes: applyVariant(k, notes, ctx, isDrums) }));
+  return kinds.map(k => ({ kind: k, ...VARIANT_POOL[k], notes: tidyNotes(applyVariant(k, notes, ctx, isDrums), ctx.loop || null) }));
 }
 
 // 音色变体（合成层）：只改参数，不改音

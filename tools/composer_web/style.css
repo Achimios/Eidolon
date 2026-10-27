@@ -26,8 +26,29 @@ header { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; pad
 .brand { font-size: 16px; font-weight: 700; color: var(--g); }
 .grp { display: flex; gap: 8px 10px; flex-wrap: wrap; align-items: center; }
 
-main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; gap: 14px; padding: 6px 14px; }
-#left, #center, #right { min-width: 0; }
+/* 整页定高、不滚整页：顶栏 / 中间三栏（各栏自己滚）/ 底部时间线带（自己滚）。键盘和时间线同屏（C42）
+   中间至少 32vh（模式条 + 键盘 + 状态行），时间线带最多 62vh，挤不下时先缩时间线带 */
+body { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+header { flex: none; }
+main { --side: clamp(240px, 21vw, 300px); flex: 1 1 0; min-height: 32vh; display: grid; grid-template-columns: var(--side) minmax(0, 1fr) var(--side); grid-template-rows: minmax(0, 1fr); gap: 14px; padding: 6px 14px 8px; }
+#left, #center, #right { min-width: 0; min-height: 0; }
+#layers, #params, .cbody, #right, #bottom, #varCards, #scenes { overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--line2) transparent; }
+/* 左栏：层列表最多占一半，旋钮在下面自己滚 */
+#left { display: flex; flex-direction: column; }
+.lbox { flex: 0 1 auto; max-height: 50%; min-height: 0; display: flex; flex-direction: column; }
+#layers { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.pbox { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+#params { flex: 1 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 6px; }
+/* 中栏：内容自己滚，状态行钉在下面（内容短时紧跟在内容后） */
+#center { display: flex; flex-direction: column; }
+.cbody { flex: 0 1 auto; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; }
+#modeBar { order: -2; }
+/* 键全灰（哼唱输入 / 分轨）时键盘没用：哼唱面板提到键盘上面，矮屏也一眼看见音高条 */
+#keys:not(:has(.key:not(.off))) ~ #hum { order: -1; margin: 0 0 8px; }
+/* 右栏：XY 跟着栏高缩（栏 = 尺寸容器），最大 280 = 画布本身的像素，放大会糊（C39） */
+#right { overflow-y: auto; scrollbar-gutter: stable; container-type: size; }
+#right .hd { flex-wrap: nowrap; white-space: nowrap; }
+#right .hd .dim { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .layer { display: grid; grid-template-columns: 6px 18px 1fr auto; gap: 6px; align-items: center; padding: 5px 6px; border: 1px solid var(--line); border-radius: 5px; margin-bottom: 4px; background: var(--panel); cursor: pointer; }
 .layer.sel { border-color: var(--g); background: #0f1a13; }
@@ -63,8 +84,10 @@ main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; gap: 14
 .key.off { opacity: .25; }
 #kbOpts { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; margin: 6px 0; }
 
-#variants { margin-top: 10px; padding: 8px; border: 1px solid var(--o); border-radius: 6px; background: #140f0b; }
-#varCards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+/* 变体面板：中栏放不下时贴在中栏底边（盖住键盘下半），打开了就一定看得见；卡片多了在面板里滚 */
+#variants { margin-top: 10px; padding: 8px; border: 1px solid var(--o); border-radius: 6px; background: #140f0b; position: sticky; bottom: 0; z-index: 2; box-shadow: 0 -8px 14px rgba(0, 0, 0, .55); }
+#variants .hd { margin-top: 0; }
+#varCards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; max-height: 196px; overflow-y: auto; }
 .vcard { border: 1px solid var(--line2); border-radius: 5px; padding: 6px 8px; cursor: pointer; background: var(--panel); }
 .vcard.cur { border-color: var(--o); box-shadow: 0 0 0 1px var(--o) inset; }
 .vcard b { display: block; }
@@ -75,9 +98,11 @@ main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; gap: 14
 .humRow { display: flex; gap: 10px; align-items: stretch; }
 #pitchNow { width: 90px; text-align: center; padding-top: 22px; }
 #pitchStrip { flex: 1; min-width: 0; height: 110px; background: var(--bg); border-radius: 4px; }
-#status { margin-top: 10px; min-height: 20px; color: var(--o); white-space: pre-wrap; }
+#status { flex: none; margin-top: 8px; min-height: 20px; max-height: 6em; overflow-y: auto; color: var(--o); white-space: pre-wrap; }
 
-#xy { width: 100%; aspect-ratio: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; touch-action: none; cursor: crosshair; }
+#xy { display: block; width: 100%; max-width: 280px; aspect-ratio: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; touch-action: none; cursor: crosshair; }
+/* 栏矮时缩：XY + 下面的 x/y 选择一起看得见（不支持容器单位的浏览器停在上一行） */
+#xy { width: clamp(150px, min(100%, 100cqh - 76px), 280px); max-width: none; }
 .xysel { display: flex; gap: 10px; margin: 4px 0; }
 .chk { display: block; margin: 4px 0; }
 #macroBars .mb { display: grid; grid-template-columns: 54px 1fr 38px; gap: 6px; align-items: center; font-size: 12px; }
@@ -86,14 +111,16 @@ main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; gap: 14
 #macroBars .bar u { position: absolute; left: 0; top: 2px; bottom: 2px; background: var(--g); border-radius: 2px; }
 #macroBars .mb.t .bar u { background: var(--o); }
 #macroBars .mb span:last-child { text-align: right; color: var(--dim); font: 11px Consolas, monospace; }
-#scope { width: 100%; background: #000; border: 1px solid var(--line); border-radius: 6px; }
+#scope { display: block; width: 100%; max-width: 280px; background: #000; border: 1px solid var(--line); border-radius: 6px; }
 
-#bottom { padding: 0 14px 30px; }
-.tlbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 6px 0; }
+/* 底部时间线带：钉在底下，内容高了自己滚（工具条钉在带子顶上）。时间线画布宽 = #tlWrap 宽（timeline.js 的 ResizeObserver） */
+#bottom { flex: 0 1 auto; min-height: 150px; max-height: 62vh; overflow-y: auto; scrollbar-gutter: stable; border-top: 1px solid var(--line); padding: 0 14px 10px; }
+.tlbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 0 0 4px; padding: 6px 0 2px; position: sticky; top: 0; z-index: 2; background: var(--bg); }
 .tlbar .dim { font-size: 12px; }
 .lanes label { margin-right: 6px; font-size: 12px; }
 #tlWrap { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 #tl { display: block; }
+#scenes { overflow-x: auto; }
 #scenes table { border-collapse: collapse; }
 #scenes td, #scenes th { border: 1px solid var(--line); padding: 2px 6px; text-align: center; }
 #scenes th input { width: 90px; }
@@ -102,11 +129,34 @@ main { display: grid; grid-template-columns: 300px minmax(0, 1fr) 300px; gap: 14
 #scenes .txt { width: 150px; }
 
 #gate, #helpBox, #sessBox { position: fixed; inset: 0; background: rgba(0, 0, 0, .78); display: flex; align-items: center; justify-content: center; z-index: 20; }
-#gate > div, #helpBox > div, #sessBox > div { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 22px 26px; max-width: 760px; }
+#gate > div, #helpBox > div, #sessBox > div { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 22px 26px; max-width: min(760px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; }
 #gate h1 small { font-size: 14px; color: var(--dim); font-weight: 400; margin-left: 8px; }
 #gate button { font-size: 16px; padding: 6px 22px; margin-top: 8px; }
 #helpBox td { padding: 3px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
 #helpBox td:first-child { font-family: Consolas, monospace; color: var(--g); white-space: nowrap; }
 #sessList button { display: block; margin: 4px 0; text-align: left; width: 100%; }
 
-@media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+/* 矮屏：层行收紧，左栏多露几层 */
+@media (max-height: 960px) {
+  .layer { padding: 3px 6px; row-gap: 3px; }
+  .layer .sw { height: 20px; }
+}
+/* 宽屏：层列表和旋钮各占一栏，旋钮不用跟层列表抢高度 */
+@media (min-width: 1680px) {
+  main { grid-template-columns: 564px minmax(0, 1fr) 300px; }
+  #left { display: grid; grid-template-columns: 250px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 14px; }
+  .lbox { max-height: none; }
+}
+/* 窄或矮：退回整页滚，按块往下排；画布照样封顶，不放大（C39） */
+@media (max-width: 999px), (max-height: 559px) {
+  body { display: block; height: auto; overflow: visible; }
+  main { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: none; min-height: 0; }
+  #center { grid-column: 1 / -1; order: -1; }
+  #left, #center, .lbox, .pbox { display: block; max-height: none; }
+  #layers, #params, .cbody, #right, #bottom { overflow: visible; scrollbar-gutter: auto; }
+  #right { container-type: normal; }
+  #xy { width: 100%; max-width: 280px; }
+  #bottom { max-height: none; min-height: 0; padding-bottom: 30px; }
+  .tlbar, #variants { position: static; }
+}
+@media (max-width: 640px) { main { grid-template-columns: minmax(0, 1fr); } }

@@ -121,7 +121,14 @@ def save_bundle(work: Path, body: dict):
         sr = int(a["sr"])
         if not (8000 <= sr <= 192000):
             raise ValueError("采样率不合法")
-        pcm.append((np.frombuffer(base64.b64decode(a["b64"]), dtype="<f4"), sr))
+        x = np.frombuffer(base64.b64decode(a["b64"]), dtype="<f4")
+        # 拖进来的立体声文件：b64 = 第 1 个声道，extra_channels = 其余声道（同长），叠成多声道 wav
+        ex = [np.frombuffer(base64.b64decode(e), dtype="<f4") for e in (a.get("extra_channels") or [])]
+        if ex:
+            if any(len(e) != len(x) for e in ex):
+                raise ValueError("声道长度不一致")
+            x = np.stack([x] + ex, 1)
+        pcm.append((x, sr))
     out = work / OUT_DIR
     out.mkdir(exist_ok=True)
     truth_p, sess_p = out / f"作曲_{ver}.json", out / f"作曲_{ver}_会话.json"

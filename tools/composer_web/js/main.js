@@ -1,5 +1,5 @@
 // >v<🎛作曲器-页面-锁调键盘 / 拍 / 哼唱 / XY 推子 → 循环叠录 → 变体里挑 → 时间线剪 → 保存 作曲.json + 哼唱 wav。
-import { MODES, NOTE_NAMES, ROW_A, ROW_Q, ROW_Z, KEY_LABEL, codeToDegree, degreeToMidi, noteName, parseProgression, chordAtBar, chordPcs, chordRoman, chordTones, hzMidi } from './theory.js';
+import { MODES, NOTE_NAMES, ROW_A, ROW_Q, ROW_Z, KEY_LABEL, codeToDegree, degreeToMidi, noteName, parseProgression, chordAtBar, chordTonePcs, chordRoman, chordTones, hzMidi } from './theory.js';
 import { Engine, PRESETS, DRUM_SOUNDS, DRUM_LABEL } from './engine.js';
 import { Transport, heardCtxTime } from './transport.js';
 import { Timeline } from './timeline.js';
@@ -32,24 +32,52 @@ const peaksCache = new Map();
 let undoStack = [], redoStack = [];
 let server = false;
 let groove = null;                // 律动模板（载入原曲鼓轨后有）
-let variants = null;              // { layer, removeIds, options, idx, kind, range, reroll }
+let variants = null;              // { layer, removeIds, options, idx, kind, range, reroll, loop, playIdx }
 let shownLanes = new Set(['cutoff', 'drive']);
 let clipboard = null;
+let sessionGen = 0;               // 打开别的会话 +1：还在分析的哼唱不往新会话里塞
+const FILE_KEEP_SEC = 90;         // 拖进来的文件这么长以内随会话存成 wav；再长只记来源（重开会话时没声音）
 
 // ---------- 小工具 ----------
-const status = (msg, keep = false) => { $('status').textContent = msg; if (!keep) { clearTimeout(status._t); status._t = setTimeout(() => { $('status').textContent = ''; }, 9000); } };
+// keep = 一直留着（不然 9 s 后清掉）；之前那条的清除定时器一律取消（不然会把后来要留着的这条清掉）
+const status = (msg, keep = false) => { $('status').textContent = msg; clearTimeout(status._t); if (!keep) status._t = setTimeout(() => { $('status').textContent = ''; }, 9000); };
 const sel = () => layerById(S, S.sel) || S.layers[0];
-const ctxObj = () => ({ key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, tensionAt: b => curveAt(S.curves.tension, b, 0.5), groove });
+const mod = (a, n) => ((a % n) + n) % n;
+// 解释用的上下文；loop = 录音时的循环区（吸附落到循环尾巴上 / 之后的绕回循环头，见 interp.js）
+const curLoop = () => (S.loop.on ? loopRange(S) : null);
+const ctxObj = (loop = curLoop()) => ({ key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, tensionAt: b => curveAt(S.curves.tension, b, 0.5), groove, loop });
 function snapshot() { undoStack.push(JSON.stringify(S)); if (undoStack.length > 150) undoStack.shift(); redoStack = []; }
-function restore(str) { const cur = S; S = JSON.parse(str); S.sel = layerById(S, cur.sel) ? cur.sel : S.layers[0]?.id; syncAll(); }
-function undo() { if (!undoStack.length) return status('没有可撤销的'); redoStack.push(JSON.stringify(S)); restore(undoStack.pop()); status('撤销'); }
-function redo() { if (!redoStack.length) return; undoStack.push(JSON.stringify(S)); restore(redoStack.pop()); status('重做'); }
+// 一遍循环结束的撤销点：和栈顶一样就不推（不然 Ctrl+Z 要按两下才动一次）
+function pushUndo() { const s = JSON.stringify(S); if (undoStack[undoStack.length - 1] === s) return; undoStack.push(s); if (undoStack.length > 150) undoStack.shift(); }
+// 撤销 / 重做：变体面板一律关掉（试听中的音色先还原）；播放中速度变了 → 从排到的那一拍按新速度接着走
+function restore(str) {
+  closeVariants();
+  const cur = S, front = playFront();
+  S = JSON.parse(str); S.sel = layerById(S, cur.sel) ? cur.sel : S.layers[0]?.id;
+  tempoChanged(cur.bpm, front);
+  syncAll();
+}
+// 和现在一模一样的撤销点跳过（空的一遍、重复推的）：每按一次都真的变
+function undo() { const cur = JSON.stringify(S); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
+function redo() { const cur = JSON.stringify(S); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
 function autosave() { try { localStorage.setItem(AUTOSAVE, JSON.stringify({ ...S, clips: [] })); } catch (e) { /* 满了 / 不可用 */ } }
 setInterval(autosave, 4000);
+// 播放中改了速度：从已经排到的那一拍按新速度重新起（不回跳；已经排进去的音不再排一遍）
+const playFront = () => (T && T.playing ? T.nextB : null);
+function tempoChanged(oldBpm, front) {
+  if (front === null || S.bpm === oldBpm) return;
+  if (rec.on && hum.pass) { hum.pass = null; status('录音中速度变了：正在收的这一遍哼唱不要了', true); }
+  const [ls, le] = loopRange(S);
+  T.start(S.loop.on && front >= le - 1e-9 ? ls : front, { countInEnd: rec.on ? rec.countEnd : undefined });
+}
+// 新加的层（加一层 / 叠成新层 / 复制成合成层 / 分轨 / 拖进来的文件）：进每一个已有的场景，不然在场景管着的地方一声不响
+function joinScenes(id) { for (const sc of S.scenes) if (!sc.layers.includes(id)) sc.layers.push(id); }
+// 还没存进硬盘的录音（拖进来的长文件本来就不随会话存，不算）
+function hasUnsavedAudio() { return S.clips.some(c => { const a = audio.get(c.audio); return a && !a.file && !(c.input !== 'hum' && a.buffer.duration > FILE_KEEP_SEC); }); }
 
-// 当前要播的事件（变体试听时替换掉被试的那几个音）
+// 当前要播的事件（变体试听时替换掉被试的那几个音；挑哪一遍时，音符跟着正在放的那一遍录音）
 function events() {
-  const activeTakes = new Set(S.clips.filter(c => c.active).map(c => c.id));
+  const activeTakes = new Set(clipsNow().filter(c => c.active).map(c => c.id));
   let ev = S.notes.filter(n => !n.take || activeTakes.has(n.take));
   if (variants) {
     const o = variants.options[variants.idx];
@@ -60,12 +88,19 @@ function events() {
   }
   return ev;
 }
-function clipsForPlay() {
+// 同一层、同一起点的几遍哼唱 = 互相替换（只能有一遍在用）
+function sameTakeSlot(c, ch) { return c.layer === ch.layer && c.input === 'hum' && Math.abs(c.b - ch.b) < 1e-6; }
+// 挑哪一遍：录音在下一段开头才换（走带每段开头调 clipsForPlay 一次），音符跟着录音一起换（不会第 1 遍的人声配第 3 遍的旋律）
+function clipsNow() {
   if (variants && variants.kind === 'takes') {
-    const o = variants.options[variants.idx];
-    return S.clips.map(c => variants.takeIds.includes(c.id) ? { ...c, active: c.id === o.clipId } : c);
+    const o = variants.options[variants.playIdx ?? variants.idx], ch = o && S.clips.find(c => c.id === o.clipId);
+    if (ch) return S.clips.map(c => sameTakeSlot(c, ch) ? { ...c, active: c.id === ch.id } : c);
   }
   return S.clips;
+}
+function clipsForPlay() {
+  if (variants && variants.kind === 'takes') variants.playIdx = variants.idx;
+  return clipsNow();
 }
 
 // ---------- 音频 ----------
@@ -86,12 +121,13 @@ function addAudio(buffer, extra = {}) {
 }
 
 // ---------- 麦克风 ----------
-const mic = { on: false, node: null, chunks: [], live: new Float32Array(48000 * 2), liveN: 0, sr: 48000, strip: [], keepSec: 30 };
+const mic = { on: false, node: null, stream: null, mod: false, chunks: [], live: new Float32Array(48000 * 2), liveN: 0, sr: 48000, strip: [], keepSec: 30 };
 async function micOn() {
   if (mic.on) return true;
+  let stream = null;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
-    await E.ctx.audioWorklet.addModule('js/mic-worklet.js');
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } });
+    if (!mic.mod) { await E.ctx.audioWorklet.addModule('js/mic-worklet.js'); mic.mod = true; }
     const src = E.ctx.createMediaStreamSource(stream);
     mic.node = new AudioWorkletNode(E.ctx, 'mic-rec');
     const sink = E.ctx.createGain(); sink.gain.value = 0;
@@ -100,20 +136,33 @@ async function micOn() {
     mic.node.port.onmessage = ev => {
       const { t, x } = ev.data;
       mic.chunks.push({ t, x });
-      // 只留最近 keepSec 秒，除非正在录
-      const keepFrom = E.now - (hum.active ? 600 : mic.keepSec);
+      // 只留最近 keepSec 秒；正在收的这一遍、还没取走样本的那几遍，从它们的起点留起（一条最长 10 分钟）
+      const keepFrom = Math.min(E.now - mic.keepSec, hum.pass ? hum.pass.ctx0 : Infinity, ...hum.waiting.map(w => w.t0)) - 0.5;
       while (mic.chunks.length && mic.chunks[0].t < keepFrom) mic.chunks.shift();
       // 实时音高用的滑动缓冲
       const L = mic.live;
       if (mic.liveN + x.length > L.length) { L.copyWithin(0, x.length); mic.liveN -= x.length; }
       L.set(x, mic.liveN); mic.liveN += x.length;
     };
-    mic.on = true;
+    for (const tr of stream.getAudioTracks()) tr.addEventListener('ended', micLost);
+    mic.stream = stream; mic.on = true;
     $('micBtn').classList.add('on'); $('micBtn').textContent = '麦已开';
     if (S.settings.latencyMs === null) S.settings.latencyMs = Math.round(((E.ctx.baseLatency || 0) + (E.ctx.outputLatency || 0)) * 1000 + 12);
     showLatency();
     return true;
-  } catch (err) { status('开不了麦克风：' + err.message); return false; }
+  } catch (err) {
+    if (stream) for (const tr of stream.getTracks()) tr.stop();       // 拿到了麦但后面失败：别让麦一直开着
+    status('开不了麦克风：' + err.message); return false;
+  }
+}
+// 麦克风拔了 / 被别的程序抢了：说一声（不然之后的哼唱全是空的）
+function micLost() {
+  if (!mic.on) return;
+  mic.on = false;
+  try { mic.node.disconnect(); } catch (e) { /* 已断 */ }
+  mic.node = null; mic.stream = null;
+  $('micBtn').classList.remove('on'); $('micBtn').textContent = '开麦';
+  status('⚠️麦克风断开了：之后收到的哼唱是空的。插好以后再点「开麦」', true);
 }
 // 从缓冲里取 [t0, t1)（音频时钟）的样本
 function micExtract(t0, t1) {
@@ -139,47 +188,104 @@ async function calibrate() {
   let mx = 0; for (const v of x) mx = Math.max(mx, Math.abs(v));
   const found = [];
   for (const c of clicks) {
-    const a = Math.round((c - t0 + 0.05) * sr), z = Math.min(x.length, a + Math.round(0.4 * sr));
+    // 每下之后 0.45 s 里找（咔哒间隔 0.5 s；蓝牙耳机往返可到 400 ms 以上）
+    const a = Math.round((c - t0 + 0.05) * sr), z = Math.min(x.length, a + Math.round(0.45 * sr));
     for (let i = a; i < z; i++) if (Math.abs(x[i]) > mx * 0.35) { found.push((i - a) / sr * 1000); break; }
   }
-  if (found.length < 4 || mx < 0.01) { status(`校准失败：只听到 ${found.length} / 6 下（音量 ${mx.toFixed(3)}）。音量开大、拿掉耳机再试。`); return; }
+  if (found.length < 4 || mx < 0.01) { status(`校准失败：只听到 ${found.length} / 6 下（音量 ${mx.toFixed(3)}）。音量开大，把哼唱时戴的那副耳机贴紧麦克风再试。`); return; }
   found.sort((p, q) => p - q);
   S.settings.latencyMs = Math.round(found[found.length >> 1]); S.settings.latencyCal = true;
   showLatency(); status(`往返延迟 ${S.settings.latencyMs} ms（6 下里的 ${found.length} 下），之后的哼唱都按这个对齐`);
 }
 
-// ---------- 哼唱录音（每一遍循环 = 一条 take）----------
-const hum = { active: false, pass: null, takeNo: 0, sessionTakes: [] };
-function humPassStart(seg) { hum.pass = { ctx0: seg.ctx0, b0: seg.b0, b1: seg.b1 }; }
+// ---------- 哼唱分析放到后台线程（长循环的分析会卡住走带的 120 ms 提前量）；开不了 worker 就在这里同步算 ----------
+let humWorker = null;             // null = 还没开；false = 开不了，一律同步
+const humJobs = new Map();
+let humJobId = 0;
+function analyzeAsync(pcm, sr, opts) {
+  const sync = () => analyzeHum(pcm, sr, opts);
+  if (humWorker === null) {
+    try {
+      humWorker = new Worker('js/hum-worker.js', { type: 'module' });
+      humWorker.onmessage = ev => { const j = humJobs.get(ev.data.id); if (!j) return; humJobs.delete(ev.data.id); if (ev.data.err) j.fallback(); else j.resolve(ev.data.an); };
+      // worker 起不来 / 崩了：手上的活改成同步算，之后也不再用它
+      humWorker.onerror = ev => { ev?.preventDefault?.(); try { humWorker.terminate(); } catch (e) { /* */ } humWorker = false; const js = [...humJobs.values()]; humJobs.clear(); for (const j of js) j.fallback(); };
+    } catch (e) { humWorker = false; }
+  }
+  if (!humWorker) return Promise.resolve().then(sync);
+  return new Promise((resolve, reject) => {
+    const id = ++humJobId;
+    humJobs.set(id, { resolve, fallback: () => { try { resolve(sync()); } catch (e) { reject(e); } } });
+    const cp = pcm.slice();                            // 原样本还要存成录音：发一份拷贝过去
+    humWorker.postMessage({ id, pcm: cp, sr, opts }, [cp.buffer]);
+  });
+}
+
+// ---------- 哼唱录音（开循环：每一遍循环 = 一条 take；关循环：从开始录到停 = 一条，最长 10 分钟）----------
+const HUM_MAX_SEC = 600;
+// pending = 排了还没分析完的遍数；waiting = 还没从麦克风缓冲里取样本的那几遍；pickFor = 停了以后等它们都完了再开「挑哪一遍」
+const hum = { active: false, pass: null, takeNo: 0, sessionTakes: [], pending: 0, waiting: [], pickFor: null, afterPick: null };
+// 录音锁在开始录的那一层（中途选别的层不影响这一遍存到哪）
+function humPassStart(seg) { hum.pass = { ctx0: seg.ctx0, b0: seg.b0, b1: seg.b1, layer: rec.layer }; }
+// 关着循环录哼唱：从 b0 到停（或歌尾）是一条；10 分钟自动停
+function humStartAt(b0) {
+  const g = [...T.segs].reverse().find(s => b0 >= s.b0 - 1e-9 && b0 < s.b1 - 1e-9);
+  if (!g) return false;
+  const ctx0 = g.ctx0 + (b0 - g.b0) * spb(S);
+  humPassStart({ ctx0, b0, b1: Math.min(g.b1, b0 + HUM_MAX_SEC / spb(S)) });
+  clearTimeout(rec.autoStop);
+  rec.autoStop = setTimeout(() => {
+    if (!(rec.on && hum.active)) return;
+    hum.afterPick = '一条哼唱最长 10 分钟：自动停了录音（这一条存下了）';       // 分析完、挑选面板出来以后再说一遍（不被「第 N 遍」盖掉）
+    stopRec(); status(hum.afterPick, true);
+  }, Math.max(0, ctx0 - E.now) * 1000 + HUM_MAX_SEC * 1000);
+  return true;
+}
 function humPassEnd(ctxEnd, partial = false) {
   const p = hum.pass; hum.pass = null;
   if (!p) return;
-  const L = sel(); if (!L || L.kind !== 'voice') return;
+  const L = layerById(S, p.layer); if (!L || L.kind !== 'voice') { status('这一遍没存：录音的哼唱层不见了'); return; }
   const lat = (S.settings.latencyMs || 0) / 1000;
   const bEnd = partial ? Math.min(p.b1, p.b0 + (ctxEnd - p.ctx0) / spb(S)) : p.b1;
   if (bEnd - p.b0 < S.beatsPerBar * 0.5) return;
   const t0 = p.ctx0 + lat, t1 = p.ctx0 + (bEnd - p.b0) * spb(S) + lat;
-  // 等麦克风的数据到齐（再晚 lat + 0.15 s）
-  setTimeout(() => processHumTake(L.id, p.b0, t0, t1), (lat + 0.2) * 1000 + Math.max(0, (t1 - E.now) * 1000));
+  // 等麦克风的数据到齐（再晚 lat + 0.15 s）；取样本之前缓冲不裁（见 micOn），分析完之前不开挑选面板（见 maybePick）
+  const job = { t0 }, sess = hum.sessionTakes;
+  hum.waiting.push(job); hum.pending++;
+  setTimeout(() => {
+    const pr = processHumTake(L.id, p.b0, t0, t1, sess);      // 取样本是同步的；分析在后台线程
+    hum.waiting = hum.waiting.filter(w => w !== job);
+    pr.catch(e => status('这一遍分析失败：' + e.message)).finally(() => { hum.pending--; maybePick(); });
+  }, (lat + 0.2) * 1000 + Math.max(0, (t1 - E.now) * 1000));
 }
-function processHumTake(layerId, b0, t0, t1) {
-  const pcm = micExtract(t0, t1), sr = mic.sr;
+// 停了以后：等每一遍都分析完再开「挑哪一遍」（固定等多久不行：延迟大时最后一遍会来不及）
+function maybePick() {
+  if (!hum.pickFor || hum.pending > 0 || rec.on) return;
+  const id = hum.pickFor; hum.pickFor = null;
+  openTakeVariants(id);
+  if (hum.afterPick) { status(hum.afterPick, true); hum.afterPick = null; }
+}
+// sess = 这次录音的那几遍（toggleRec 换新的；晚到的旧遍不会混进新一次录音）
+async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes) {
+  const pcm = micExtract(t0, t1), sr = mic.sr, gen = sessionGen;
   let peak = 0; for (const v of pcm) peak = Math.max(peak, Math.abs(v));
-  const L = layerById(S, layerId); if (!L) return;
+  const L0 = layerById(S, layerId); if (!L0) return;
+  const opts = { mode: L0.params.mode, snap: L0.params.snap }, takeNo = ++hum.takeNo;
+  const an = await analyzeAsync(pcm, sr, opts);
+  if (gen !== sessionGen) return;                       // 等分析的时候打开了别的会话
+  const L = layerById(S, layerId); if (!L) { status(`第 ${takeNo} 遍没存：哼唱层不见了（删了 / 撤销了？）`); return; }
   snapshot();
   const buf = E.ctx.createBuffer(1, pcm.length || 1, sr); buf.copyToChannel(pcm, 0);
   const aid = addAudio(buf, { pcm });
-  hum.takeNo++;
-  const clip = { id: uid('C'), layer: layerId, b: b0, dur: pcm.length / sr, audio: aid, input: 'hum', take: hum.takeNo, active: true, src: 'mic' };
-  for (const c of S.clips) if (c.layer === layerId && c.input === 'hum' && Math.abs(c.b - b0) < 1e-6) c.active = false;
-  const an = analyzeHum(pcm, sr, { mode: L.params.mode, snap: L.params.snap });
+  const clip = { id: uid('C'), layer: layerId, b: b0, dur: pcm.length / sr, audio: aid, input: 'hum', take: takeNo, active: true, src: 'mic' };
+  for (const c of S.clips) if (sameTakeSlot(c, clip)) c.active = false;
   clip.analysis = { mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1), stats: an.guess.stats, peak: +peak.toFixed(3) };
   S.clips.push(clip);
-  const notes = notesToBeats(an.segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: L.params.snap });
+  const notes = notesToBeats(an.segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
   for (const n of notes) S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: clip.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
-  hum.sessionTakes.push(clip.id);
+  sess.push(clip.id);
   const tn = Math.abs(an.tuneCents) >= 8 ? `，整体${an.tuneCents > 0 ? '偏高' : '偏低'} ${Math.abs(an.tuneCents).toFixed(0)} 音分（吸附前已扣掉）` : '';
-  status(`第 ${hum.takeNo} 遍：${MODE_PARAMS[an.mode].label}（${an.guess.why}）· ${notes.length} 个音${tn}${peak < 0.02 ? ' · ⚠️几乎没声音，麦克风选对了吗？' : ''}${peak > 0.98 ? ' · ⚠️削波了，离麦远一点' : ''}`, true);
+  status(`第 ${takeNo} 遍：${MODE_PARAMS[an.mode]?.label ?? an.mode}（${an.guess.why}）· ${notes.length} 个音${tn}${peak < 0.02 ? ' · ⚠️几乎没声音，麦克风选对了吗？' : ''}${peak > 0.98 ? ' · ⚠️削波了，离麦远一点' : ''}`, true);
   syncAll();
 }
 
@@ -196,11 +302,25 @@ function playedBeat(ev) {
   if (!T.playing) return null;
   return T.beatAt(ctxTimeOfEvent(ev) - (S.settings.kbOffsetMs || 0) / 1000);
 }
-function inLoop(b) { const [a, z] = loopRange(S); return !S.loop.on || (b >= a - 0.05 && b < z); }
-function wrapIntoLoop(b) { const [a, z] = loopRange(S); if (!S.loop.on) return b; if (b < a) return b + (z - a); if (b >= z) return b - (z - a); return b; }
+// 录到的拍放到哪（真按下的那一拍留在 raw）：
+// 开循环 = 对循环长度取模放进 [循环头, 循环尾)（抢拍落在循环尾巴上，听起来就在下一遍的头前面；吸附时再绕回循环头），
+// 预备拍里早于循环头半拍以上的不算；关循环 = 早于开始录的那一拍半拍以上的不算（预备拍里随手按的），不早于第 0 拍
+function placeRecBeat(b) {
+  if (S.loop.on) {
+    const [ls, le] = loopRange(S);
+    if (b < ls - 0.5) return null;
+    return ls + mod(b - ls, le - ls);
+  }
+  if (b < rec.startB - 0.5) return null;
+  return Math.max(0, b);
+}
+// 拍的音高按这个音最后落在哪个小节取和弦：先就近对到 1/16，再按录音的规则放（抢拍 = 下一拍的和弦）
+function chordBeat(b) { const q = Math.round(b * 4) / 4; if (!S.loop.on) return Math.max(0, q); const [ls, le] = loopRange(S); return ls + mod(q - ls, le - ls); }
+// 录音时一律弹 / 记开始录的那一层（中途换层只换显示，见 selectLayer）
+const playLayer = () => (rec.on && layerById(S, rec.layer)) || sel();
 
 function noteDown(ev) {
-  const L = sel(); if (!L) return false;
+  const L = playLayer(); if (!L) return false;
   const code = ev.code;
   const inRow = ROW_A.includes(code) || ROW_Q.includes(code) || ROW_Z.includes(code);
   if (!inRow) return false;
@@ -215,22 +335,22 @@ function noteDown(ev) {
     const v = ROW_Q.includes(code) ? 1 : vel;
     E.hit(L, sound, v, when);
     if (sound === 'kick') E.duck(when, (T.lastEff || effectiveMacros({}, true)).sidechain);
-    held.set(code, { b: playedBeat(ev), t: heard, sound, layer: L.id, vel: v });
+    held.set(code, { b: playedBeat(ev), t: heard, sound, layer: L.id, vel: v, recId: rec.on ? rec.pass : null });
   } else if (L.kind === 'synth' || L.kind === 'voice') {
     if (L.input === 'tap') {
       col = Math.max(ROW_A.indexOf(code), ROW_Q.indexOf(code), ROW_Z.indexOf(code));
       const oct = L.octave + (ROW_Q.includes(code) ? 1 : ROW_Z.includes(code) ? -1 : 0);
       const b = T.playing ? (playedBeat(ev) ?? 0) : 0;
-      pitch = tapPitch(ctxObj(), b, Math.floor(col / 2), oct, S.settings.tapPattern, tapCounter++);
+      pitch = tapPitch(ctxObj(), T.playing ? chordBeat(b) : b, Math.floor(col / 2), oct, S.settings.tapPattern, tapCounter++);
     } else {
       const d = codeToDegree(S.key, code); if (d === null) return true;
       pitch = degreeToMidi(S.key, L.octave, d);
     }
     if (L.kind === 'voice' && L.input === 'hum') return true;
     // 琶音器：播放中按住 = 每个 1/16 自动弹一个和弦音（arpTick 负责），这里不出长音
-    if (L.preset === 'arp' && T.playing) { held.set(code, { arp: true, pitch, layer: L.id, vel, t: when, step: null, n: 0 }); litKey(code, true); return true; }
+    if (L.preset === 'arp' && T.playing) { held.set(code, arpHold(ev, L, pitch, vel)); litKey(code, true); return true; }
     const voice = E.note(L, pitch, vel, when);
-    held.set(code, { voice, b: playedBeat(ev), t: heard, pitch, layer: L.id, vel });
+    held.set(code, { voice, b: playedBeat(ev), t: heard, pitch, layer: L.id, vel, recId: rec.on ? rec.pass : null });
   } else return true;
   litKey(code, true);
   return true;
@@ -240,91 +360,139 @@ function noteUp(ev) {
   held.delete(ev.code); litKey(ev.code, false);
   const when = E.now;
   h.voice?.release(when);
-  if (h.arp || !rec.on || h.b === null || !T.playing) return;
-  const L = layerById(S, h.layer); if (!L) return;
-  let b = h.b;
-  // 预备拍里随手按的不算；循环起点前一点点（抢拍）= 循环尾巴上同一个位置
-  if (S.loop.on && b < loopRange(S)[0] - 0.5) return;
-  if (!inLoop(b)) b = wrapIntoLoop(b);
-  if (!inLoop(b)) return;
+  if (h.arp) return arpRelease(h, ev);
+  // 只记这一次录音里按下的、录音那一层的
+  if (!rec.on || h.recId !== rec.pass || h.b === null || !T.playing) return;
+  const L = layerById(S, h.layer); if (!L || L.id !== rec.layer) return;
+  const b = placeRecBeat(h.b); if (b === null) return;
   const holdSec = Math.max(0, ctxTimeOfEvent(ev) - h.t);
-  let d = holdSec / spb(S);
-  const [ls, le] = loopRange(S);
-  if (S.loop.on) d = Math.min(d, le - ls);
+  const dRaw = Math.max(0.05, holdSec / spb(S));
+  const le = S.loop.on ? loopRange(S)[1] : Infinity;
+  const d = Math.min(dRaw, le - b);                  // 拖过循环尾巴的截在循环尾巴（不拆成两个音）；raw 留真按住的时长
   const vel = S.settings.velMode === 'hold' ? holdVelocity(holdSec) : h.vel;
   const input = L.input === 'tap' ? 'tap' : 'keyboard';
-  const n = { id: uid(), layer: L.id, b, d: Math.max(0.05, d), vel, input, pass: rec.pass, raw: { b, d: Math.max(0.05, d), vel, hold_s: +holdSec.toFixed(3) } };
-  if (h.sound) { n.sound = h.sound; n.d = 0.25; } else n.pitch = h.pitch;
+  // raw.b = 真按下的那一拍（不早于歌的开头：那之前没有时间）
+  const n = { id: uid(), layer: L.id, b, d, vel, input, pass: rec.pass, raw: { b: Math.max(h.b, -S.anchor / spb(S)), d: dRaw, vel, hold_s: +holdSec.toFixed(3) } };
+  if (h.sound) { n.sound = h.sound; n.d = Math.min(0.25, le - b); } else n.pitch = h.pitch;
   S.notes.push(n);
   rec.added.push(n.id);
 }
 
-// 琶音器：按住的键 → 从这个音往上的和弦音，每 1/16 一个；生成的每个音都是真值（录音时照记）
+// 琶音器：按住的键 → 从这个音往上的和弦音，每 1/16 一个；生成的每个音都是真值（录音时照记）。
+// 一律按「听到的」时钟：第一个音落在按下的那一格（按晚一点点也算那一格），松开那一刻起的格子不算；
+// 格子按段走（循环转回去、预备拍交给循环时接着弹，段尾那一格 = 下一段的第一格）
+const ARP_TOL = 0.03;      // 秒：按晚 / 松早这么多还算同一格
+function arpHold(ev, L, pitch, vel) {
+  const sp = spb(S), th = ctxTimeOfEvent(ev) - (S.settings.kbOffsetMs || 0) / 1000, seg = T.segAt(th);
+  const k = Math.ceil((seg.b0 + (th - seg.ctx0) / sp - ARP_TOL / sp) * 4 - 1e-6);
+  return { arp: true, pitch, layer: L.id, vel, n: 0, seg, k: Math.max(k, Math.ceil(seg.b0 * 4 - 1e-6)), steps: [], recId: rec.on ? rec.pass : null };
+}
 function arpTick() {
   if (!T || !T.playing) return;
-  const sp = spb(S), look = E.now + 0.04;
+  const sp = spb(S), horizon = E.now + 0.03;            // 只排马上要响的格子（松手后最多多出这一点）
   for (const h of held.values()) {
     if (!h.arp) continue;
     const L = layerById(S, h.layer); if (!L) continue;
-    const seg = T.segAt(look), b = seg.b0 + (look - seg.ctx0) / sp;
-    const k = Math.ceil(b * 4 - 1e-6);
-    if (h.step !== null && k <= h.step) continue;
-    h.step = k;
-    const nb = k / 4;
-    if (nb >= seg.b1) continue;                       // 段尾那一格交给下一段
-    const when = seg.ctx0 + (nb - seg.b0) * sp;
-    const deg = chordAtBar(S.prog, Math.floor(nb / S.beatsPerBar));
-    const tones = chordTones(S.key, deg, h.pitch - 0.5, 4);
-    const p = tones[h.n % 3] + (h.n % 6 >= 3 ? 12 : 0);
-    h.n++;
-    E.note(L, p, h.vel, Math.max(when, E.now), sp * 0.2);
-    if (rec.on && inLoop(nb)) {
-      const n = { id: uid(), layer: L.id, b: nb, d: 0.2, pitch: p, vel: h.vel, input: 'keyboard', derived: 'arp', pass: rec.pass, raw: { b: nb, d: 0.2, held_pitch: h.pitch } };
-      S.notes.push(n); rec.added.push(n.id);
+    for (let guard = 0; guard < 32; guard++) {
+      let i = T.segs.indexOf(h.seg);
+      if (i < 0) {                                      // 走带重新起过：从现在这一格接着
+        h.seg = T.segAt(E.now); i = T.segs.indexOf(h.seg);
+        h.k = Math.ceil((h.seg.b0 + (E.now - h.seg.ctx0) / sp) * 4 - 1e-6);
+      }
+      const seg = h.seg, nb = h.k / 4;
+      if (nb >= seg.b1 - 1e-9) {                        // 段尾那一格 = 下一段的第一格（下一段还没排出来就下次再来）
+        const nx = T.segs[i + 1]; if (!nx) break;
+        h.seg = nx; h.k = Math.ceil(nx.b0 * 4 - 1e-6); continue;
+      }
+      const when = seg.ctx0 + (nb - seg.b0) * sp;
+      if (when > horizon) break;
+      h.k++;
+      const deg = chordAtBar(S.prog, Math.floor(nb / S.beatsPerBar));
+      const tones = chordTones(S.key, deg, h.pitch - 0.5, 4);
+      const p = tones[h.n % 3] + (h.n % 6 >= 3 ? 12 : 0);
+      h.n++;
+      const st = { when, voice: E.note(L, p, h.vel, Math.max(when, E.now), sp * 0.2), id: null };
+      const rb = rec.on && h.recId === rec.pass && L.id === rec.layer ? placeRecBeat(nb) : null;
+      if (rb !== null) {
+        const d = S.loop.on ? Math.min(0.2, loopRange(S)[1] - rb) : 0.2;
+        const n = { id: uid(), layer: L.id, b: rb, d, pitch: p, vel: h.vel, input: 'keyboard', derived: 'arp', pass: rec.pass, raw: { b: nb, d: 0.2, held_pitch: h.pitch } };
+        S.notes.push(n); rec.added.push(n.id); st.id = n.id;
+      }
+      h.steps.push(st); if (h.steps.length > 64) h.steps.shift();
     }
   }
 }
 setInterval(arpTick, 8);
+// 松开：从松开那一刻起的格子不算 —— 记下的删掉，还没响的停掉（引擎给了 cancel 才停得掉）
+function arpRelease(h, ev) {
+  const tr = ctxTimeOfEvent(ev) - (S.settings.kbOffsetMs || 0) / 1000 - ARP_TOL, drop = new Set();
+  for (const st of h.steps) if (st.when >= tr) { st.voice?.cancel?.(); if (st.id) drop.add(st.id); }
+  if (drop.size) { S.notes = S.notes.filter(n => !drop.has(n.id)); rec.added = rec.added.filter(id => !drop.has(id)); }
+}
 
 // ---------- 录音开关 ----------
-const rec = { on: false, pass: null, added: [], layer: null, startedAt: 0 };
+// layer = 录到哪一层（开始录时选的那层，中途换层不变）；startB = 从第几拍开始算录音；countEnd = 预备拍打到哪；loop0 = 开始录时的循环区
+const rec = { on: false, pass: null, added: [], layer: null, startB: 0, countEnd: -Infinity, loop0: null, autoStop: null };
 async function toggleRec() {
   if (rec.on) return stopRec();
   const L = sel();
-  if (L.kind === 'voice' && !(await micOn())) return;
+  // 哼唱层切到键盘 / 拍 = 像合成层那样录音符，不开麦、不收哼唱
+  const isHum = L.kind === 'voice' && L.input === 'hum';
+  if (isHum && !(await micOn())) return;
+  if (rec.on) return;                                    // 等麦克风权限时又按了一下
+  closeVariants();                                       // 先收起变体（试听中的音色还原），再记撤销点
   snapshot();
-  rec.on = true; rec.pass = uid('P'); rec.added = []; rec.layer = L.id;
-  hum.active = L.kind === 'voice'; hum.sessionTakes = [];
-  closeVariants(false);
+  rec.on = true; rec.pass = uid('P'); rec.added = []; rec.layer = L.id; rec.loop0 = { ...S.loop };
+  hum.active = isHum; hum.sessionTakes = []; hum.pass = null; hum.pickFor = null; hum.afterPick = null;
   $('rec').classList.add('rec-on');
+  const [ls] = loopRange(S);
   if (!T.playing) {
-    const [ls] = loopRange(S);
     const pre = S.settings.countIn ? S.beatsPerBar : 0;
-    T.start(S.loop.on ? ls - pre : (TL.cursor || 0) - pre);
-  } else if (hum.active) {
-    status('从下一遍循环开头开始收音…', true);
+    rec.startB = S.loop.on ? ls : (TL.cursor || 0);
+    rec.countEnd = rec.startB;
+    T.start(rec.startB - pre, { countInEnd: rec.startB });
+    if (isHum && !S.loop.on) humStartAt(rec.startB);
+  } else {
+    rec.countEnd = -Infinity;
+    const hb = T.beatNow ?? 0;
+    if (S.loop.on) { rec.startB = ls; if (isHum) status('从下一遍循环开头开始收音…', true); }
+    else if (isHum) {
+      // 关着循环、正在放：从下一小节开始收这一条
+      rec.startB = Math.ceil(hb / S.beatsPerBar - 1e-6) * S.beatsPerBar;
+      status(humStartAt(rec.startB) ? `从第 ${rec.startB / S.beatsPerBar + 1} 小节开始收音…（再按 \` 停）` : '离歌尾太近了，收不到一条', true);
+    } else rec.startB = hb;
   }
 }
 function stopRec() {
-  rec.on = false;
+  rec.on = false; clearTimeout(rec.autoStop); rec.autoStop = null;
   $('rec').classList.remove('rec-on');
+  const wasHum = hum.active;
   if (hum.active && hum.pass) humPassEnd(E.now, true);
-  const wasHum = hum.active; hum.active = false;
-  // 变体：键盘 / 拍 = 这次录进来的音；哼唱 = 这次的几遍（等最后一遍分析完）
-  if (wasHum) setTimeout(() => openTakeVariants(rec.layer), ((S.settings.latencyMs || 0) + 450));
+  hum.active = false; hum.pass = null;
+  // 变体：键盘 / 拍 = 这次录进来的音；哼唱 = 这次的几遍（等每一遍都分析完）
+  if (wasHum) { hum.pickFor = rec.layer; maybePick(); }
   else if (rec.added.length) openNoteVariants(rec.layer, rec.added);
 }
+// 打开别的会话时：录音直接作废（不开变体、晚到的几遍也不收）
+function abortRec() {
+  rec.on = false; clearTimeout(rec.autoStop); rec.autoStop = null; rec.added = [];
+  hum.active = false; hum.pass = null; hum.pickFor = null;
+  $('rec').classList.remove('rec-on');
+}
+// 录音中挪循环区：这一遍会对不上（哼唱整遍丢掉、键盘的音放错地方）→ 不让挪
+const LOOP_LOCKED = '录音中不能挪循环区（这一遍会对不上）：先按 ` 停';
 
 // ---------- 变体 ----------
-function openNoteVariants(layerId, ids, reroll = 0) {
+// loop = 录音时的循环区：吸附到循环尾巴上的绕回循环头（再来一组也用同一个）
+function openNoteVariants(layerId, ids, reroll = 0, loop = curLoop()) {
   const L = layerById(S, layerId); if (!L) return;
   const idSet = new Set(ids);
   const src = S.notes.filter(n => idSet.has(n.id));
   if (!src.length) return;
   const isDrums = L.kind === 'drums';
-  const opts = makeVariants(src, ctxObj(), { isDrums, reroll });
+  const opts = makeVariants(src, ctxObj(loop), { isDrums, reroll });
   const off = meanOffset(src);
-  variants = { kind: 'notes', layer: layerId, removeIds: idSet, options: opts.map(o => ({ ...o, notes: o.notes.map(n => ({ ...n, layer: layerId })) })), idx: 0, reroll, ids };
+  variants = { kind: 'notes', layer: layerId, removeIds: idSet, options: opts.map(o => ({ ...o, notes: o.notes.map(n => ({ ...n, layer: n.layer || layerId })) })), idx: 0, reroll, ids, loop };
   renderVariants();
   if (off.tooLarge) status('你这一段整体偏了将近半格：多半是延迟太大（比如蓝牙耳机）。吸附没扣偏移；先点「校准延迟」，或换有线耳机', true);
   else if (off.consistent) status(`你这一段平均${off.offset < 0 ? '提前' : '拖后'} ${Math.abs(off.offset * spb(S) * 1000).toFixed(0)} ms（很稳，多半是延迟）：吸附的变体里已经扣掉`, true);
@@ -335,25 +503,29 @@ function openTakeVariants(layerId) {
   if (takes.length === 1) return openHumInterp(layerId, takes[0]);
   const last = takes.slice(-4);
   variants = {
-    kind: 'takes', layer: layerId, takeIds: last.map(c => c.id), removeIds: new Set(), idx: last.length - 1,
-    options: last.map(c => ({ label: `第 ${c.take} 遍`, desc: `${MODE_PARAMS[c.analysis.mode].label} · ${S.notes.filter(n => n.take === c.id).length} 个音`, clipId: c.id, notes: null })),
+    kind: 'takes', layer: layerId, takeIds: last.map(c => c.id), removeIds: new Set(), idx: last.length - 1, playIdx: last.length - 1,
+    options: last.map(c => ({ label: `第 ${c.take} 遍`, desc: `${MODE_PARAMS[c.analysis?.mode]?.label ?? '?'} · ${S.notes.filter(n => n.take === c.id).length} 个音`, clipId: c.id, notes: null })),
   };
   renderVariants();
 }
 // 一条哼唱的几种解释：不吸附 / 吸到调 / 吸到调 + 节拍 60% / 100%
-function openHumInterp(layerId, clip) {
+function openHumInterp(layerId, clip, loop = curLoop()) {
   const src = S.notes.filter(n => n.take === clip.id);
   if (!src.length) { status('这一遍没认出音符（太轻？太短？）'); return; }
   const mk = (label, desc, f) => ({ label, desc, notes: f(cloneNotes(src)) });
-  const unsnap = ns => ns.map(n => ({ ...n, pitch: Math.round(n.raw.pitch_raw) }));
+  // 只取半音：音分曲线原来相对吸附后的音，换了音高要跟着挪（音高 + 音分 = 唱的那个音）
+  const unsnap = ns => ns.map(n => {
+    const p = Math.round(n.raw.pitch_raw), dc = Math.round((p - n.pitch) * 100);
+    return { ...n, pitch: p, ...(n.bend ? { bend: { ...n.bend, cents: n.bend.cents.map(c => c - dc) } } : {}) };
+  });
   const off = meanOffset(src), ro = off.consistent ? off.offset : 0;
   variants = {
-    kind: 'notes', layer: layerId, removeIds: new Set(src.map(n => n.id)), idx: 1,
+    kind: 'notes', layer: layerId, removeIds: new Set(src.map(n => n.id)), idx: 1, loop,
     options: [
       mk('原样（半音）', '音高只取最近的半音，不管调', unsnap),
       mk('吸到调', '调内 + 强拍偏和弦音（默认）', ns => ns),
-      mk('吸到调 + 节拍 60%', '时刻靠向格子六成', ns => quantize(ns, { strength: 0.6, removeOffset: ro })),
-      mk('吸到调 + 节拍 100%', '完全对齐 1/16', ns => quantize(ns, { strength: 1, removeOffset: ro })),
+      mk('吸到调 + 节拍 60%', '时刻靠向格子六成', ns => quantize(ns, { strength: 0.6, removeOffset: ro, loop })),
+      mk('吸到调 + 节拍 100%', '完全对齐 1/16', ns => quantize(ns, { strength: 1, removeOffset: ro, loop })),
     ].map(o => ({ ...o, notes: o.notes.map(n => ({ ...n, layer: layerId, take: clip.id })) })),
   };
   renderVariants();
@@ -366,12 +538,27 @@ function openTimbreVariants() {
 function previewVariant() {
   if (!variants) return;
   if (variants.kind === 'timbre') { const L = layerById(S, variants.layer); L.params = { ...variants.options[variants.idx].params }; E.updateLayer(L, true); renderParams(); }
-  if (variants.kind === 'takes' && T.playing) { /* 下一遍循环生效 */ }
+  // 挑哪一遍：没在放 = 马上换；在放 = 下一段开头录音和音符一起换（clipsForPlay）
+  if (variants.kind === 'takes') { if (!T.playing) variants.playIdx = variants.idx; else if (variants.playIdx !== variants.idx) status('下一遍循环开头换成这一遍（人声和音符一起换）'); }
   renderVariants(); TL && TL.draw(T.beatNow);
+}
+// 变体里挑出来的音：规则生成的（鬼音 / 八度叠 / 三度和声 / 琶音……）来源一律记成 pick、不编 raw；其余没有 raw 的补上
+function committed(n, layer) {
+  const c = { ...n, id: uid(), layer };
+  delete c._preview;
+  if (c.derived) c.input = 'pick';
+  else { c.input = c.input || 'pick'; if (!c.raw) c.raw = { b: n.b, d: n.d }; }
+  return c;
 }
 function commitVariant(action) {
   if (!variants) return;
   const v = variants, o = v.options[v.idx], L = layerById(S, v.layer);
+  // 撤销过了的变体（那一层 / 那一遍 / 那些音已经不在了）不能再用：关掉，不记 pick
+  if (!L) { closeVariants(false); return status('这一层已经不在了，变体关掉了'); }
+  if (v.kind === 'takes' && !S.clips.some(c => c.id === o.clipId)) { closeVariants(false); return status('这一遍已经撤销了，变体关掉了'); }
+  if (v.kind === 'notes' && v.removeIds.size && ![...v.removeIds].some(id => S.notes.some(n => n.id === id))) { closeVariants(false); return status('这些音已经撤销了，变体关掉了'); }
+  // 音色：撤销点要是试听之前的音色（试听改的是 L.params）
+  if (v.kind === 'timbre') L.params = { ...v.orig };
   snapshot();
   const [ls] = loopRange(S);
   S.picks.push({ at: new Date().toISOString(), t: +(S.anchor + ls * spb(S)).toFixed(3), layer: v.layer, kind: v.kind, options: v.options.map(x => x.label), chose: o.label, action, input: 'pick' });
@@ -380,15 +567,16 @@ function commitVariant(action) {
     else L.params = { ...o.params };
     E.updateLayer(L, true);
   } else if (v.kind === 'takes') {
-    if (action !== 'discard') for (const c of S.clips) if (v.takeIds.includes(c.id)) c.active = c.id === o.clipId;
+    // 同一层同一起点的哼唱只留挑中的这一遍（晚到的那遍也算在里面）
+    if (action !== 'discard') { const ch = S.clips.find(c => c.id === o.clipId); for (const c of S.clips) if (sameTakeSlot(c, ch)) c.active = c.id === ch.id; }
   } else if (action === 'replace') {
     S.notes = S.notes.filter(n => !v.removeIds.has(n.id));
-    for (const n of o.notes) { const c = { ...n, id: uid(), layer: v.layer }; delete c._preview; if (!c.raw) c.raw = { b: n.b, d: n.d }; S.notes.push(c); }
+    for (const n of o.notes) S.notes.push(committed(n, n.layer || v.layer));
   } else if (action === 'overlay') {
     const nl = makeLayer(L.kind === 'voice' ? 'synth' : L.kind, L.kind === 'voice' ? 'lead' : L.preset, `${L.name}·${o.label}`, S.layers.length);
     if (L.kind !== 'voice') nl.params = { ...L.params }; nl.octave = L.octave;
-    S.layers.push(nl);
-    for (const n of o.notes) { const c = { ...n, id: uid(), layer: nl.id, input: n.input || 'pick' }; delete c._preview; delete c.take; S.notes.push(c); }
+    S.layers.push(nl); joinScenes(nl.id);
+    for (const n of o.notes) { const c = committed(n, nl.id); delete c.take; S.notes.push(c); }
   }
   const verb = { replace: '用了', overlay: '叠成新层', discard: '放弃了变体，留原样' }[action];
   status(`${verb}「${o.label}」`);
@@ -426,34 +614,45 @@ function renderVariants() {
 }
 
 // ---------- XY 推子 ----------
-const xy = { down: false, x: 0.5, y: 0.5, lastB: null, live: {} };
+// runV / runN：每个旋钮上一次写的值、连着写了几次这个值（按住不动时只留一段的两头）
+const xy = { down: false, x: 0.5, y: 0.5, lastB: null, live: {}, runV: {}, runN: {} };
 function xyTargets() { return [$('xSel').value, $('ySel').value]; }
-function xyApply(e) {
+function xyPos(e) {
   const r = $('xy').getBoundingClientRect();
   xy.x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
   xy.y = Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / r.height));
   const [mx, my] = xyTargets();
   xy.live = { [mx]: xy.x, [my]: xy.y };
-  if (rec.on && T.playing) {
-    const b = T.beatNow; if (b === null) return;
-    const [ls, le] = loopRange(S);
-    for (const [id, v] of Object.entries(xy.live)) {
-      let pts = S.curves[id] || [];
-      const from = xy.lastB ?? b;
-      if (S.loop.on && b < from - 0.5) { pts = curveWrite(pts, from, le - 1e-3, v); pts = curveWrite(pts, ls, b, v); }
-      else pts = curveWrite(pts, from, b, v);
-      S.curves[id] = pts;
-      (S.curvesInput ||= {})[id] = 'xy';
-      shownLanes.add(id);
+}
+// 录音中把手上的值写进曲线：按住不动也一直写（每帧，见 frame）—— 听到的是它，真值也得是它
+function xyWrite() {
+  if (!(rec.on && T.playing)) return;
+  const b = T.beatNow; if (b === null) return;
+  const [ls, le] = loopRange(S);
+  if (b < (S.loop.on ? ls : rec.startB)) { xy.lastB = null; return; }     // 预备拍里不写（声音照样跟着手）
+  const rb = +b.toFixed(4), from = xy.lastB ?? rb, wrap = S.loop.on && rb < from - 0.5;
+  for (const [id, v0] of Object.entries(xy.live)) {
+    const v = +v0.toFixed(4);
+    let pts = S.curves[id] || [];
+    if (wrap) { pts = curveWrite(pts, from, le - 1e-3, v); pts = curveWrite(pts, ls, rb, v); xy.runN[id] = 0; }
+    else {
+      // 同一个值连着写：把上一个点挪到现在（不每帧加一个点）
+      if (xy.runV[id] === v && xy.runN[id] >= 2 && rb > from) pts = pts.filter(p => Math.abs(p[0] - from) > 1e-6);
+      pts = curveWrite(pts, from, rb, v);
     }
-    xy.lastB = b;
+    xy.runN[id] = xy.runV[id] === v ? (xy.runN[id] || 0) + 1 : 1; xy.runV[id] = v;
+    S.curves[id] = pts;
+    (S.curvesInput ||= {})[id] = 'xy';
+    shownLanes.add(id);
   }
+  xy.lastB = rb;
 }
 function setupXY() {
   const cv = $('xy');
-  cv.addEventListener('pointerdown', e => { xy.down = true; xy.lastB = null; try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件没有指针 */ } if (rec.on) snapshot(); xyApply(e); });
-  cv.addEventListener('pointermove', e => { if (xy.down) xyApply(e); });
-  const up = () => { xy.down = false; xy.live = {}; xy.lastB = null; renderLaneChecks(); };
+  cv.addEventListener('pointerdown', e => { xy.down = true; xy.lastB = null; xy.runV = {}; xy.runN = {}; try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件没有指针 */ } if (rec.on) snapshot(); xyPos(e); xyWrite(); });
+  cv.addEventListener('pointermove', e => { if (xy.down) { xyPos(e); xyWrite(); } });
+  // 松手：先把按住到现在的这一段写完
+  const up = () => { if (xy.down) xyWrite(); xy.down = false; xy.live = {}; xy.lastB = null; renderLaneChecks(); };
   cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', up);
   for (const s of [$('xSel'), $('ySel')]) s.innerHTML = MACROS.map(m => `<option value="${m.id}">${m.label}</option>`).join('');
   $('xSel').value = 'cutoff'; $('ySel').value = 'drive';
@@ -539,12 +738,14 @@ function renderLayers() {
       if (a === 'm') { snapshot(); L.mute = !L.mute; }
       else if (a === 's') { L.solo = !L.solo; }
       else if (a === 'x') { snapshot(); S.layers = S.layers.filter(q => q.id !== L.id); S.notes = S.notes.filter(n => n.layer !== L.id); S.clips = S.clips.filter(c => c.layer !== L.id); E.removeLayer(L.id); for (const sc of S.scenes) sc.layers = sc.layers.filter(id => id !== L.id); if (S.sel === L.id) S.sel = S.layers[0]?.id; status(`删了层「${L.name}」（Ctrl+Z 能找回来）`); }
-      else S.sel = L.id;
+      else return selectLayer(L.id);
       syncAll();
     };
     d.ondblclick = ev => { if (ev.target.dataset.a) return; const nm = prompt('层的名字', L.name); if (nm) { snapshot(); L.name = nm; syncAll(); } };
     box.appendChild(d);
   });
+  // 层列表自己会滚（定高布局）：数字键选的那层要露出来
+  box.querySelector('.layer.sel')?.scrollIntoView?.({ block: 'nearest' });
 }
 const P = (label, key, min, max, step, fmt = v => v) => ({ label, key, min, max, step, fmt });
 const SYNTH_GROUPS = [
@@ -606,20 +807,27 @@ function renderParams() {
   }
   for (const s of box.querySelectorAll('select')) s.addEventListener('change', () => { if (L.kind === 'voice') renderParams(); });
 }
-function reanalyze(L) {
-  const clips = S.clips.filter(c => c.layer === L.id && c.input === 'hum');
+// 重新识别：只换每一遍自己的音（take 指着它的）；贴出来 / 复制出去的音不挂在哪一遍上，不动。分析在后台线程，算完再一起换
+async function reanalyze(L0) {
+  const clips = S.clips.filter(c => c.layer === L0.id && c.input === 'hum' && audio.get(c.audio));
   if (!clips.length) return status('这一层还没有录音');
+  const opts = { mode: L0.params.mode, snap: L0.params.snap }, gen = sessionGen, layerId = L0.id;
+  status(`重新识别 ${clips.length} 条…`, true);
+  const res = [];
+  for (const c of clips) { const a = audio.get(c.audio); res.push(await analyzeAsync(a.pcm || a.buffer.getChannelData(0), a.sr, opts)); }
+  if (gen !== sessionGen || !layerById(S, layerId)) return;
   snapshot();
-  for (const c of clips) {
-    const a = audio.get(c.audio); if (!a) continue;
-    const pcm = a.pcm || a.buffer.getChannelData(0);
-    const an = analyzeHum(pcm, a.sr, { mode: L.params.mode, snap: L.params.snap });
+  let n0 = 0;
+  clips.forEach((c0, i) => {
+    const c = S.clips.find(x => x.id === c0.id); if (!c) return;          // 等的时候撤销掉了
+    const an = res[i];
     S.notes = S.notes.filter(n => n.take !== c.id);
-    const notes = notesToBeats(an.segs, { t0Beat: c.b, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: L.params.snap });
-    for (const n of notes) S.notes.push({ id: uid(), layer: L.id, input: 'hum', take: c.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
+    const notes = notesToBeats(an.segs, { t0Beat: c.b, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
+    for (const n of notes) S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: c.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
     c.analysis = { ...c.analysis, mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1) };
-  }
-  status(`重新识别了 ${clips.length} 条`); syncAll();
+    n0++;
+  });
+  status(`重新识别了 ${n0} 条`); syncAll();
 }
 function copyHumToSynth(L) {
   const act = new Set(S.clips.filter(c => c.active && c.layer === L.id).map(c => c.id));
@@ -627,7 +835,7 @@ function copyHumToSynth(L) {
   if (!src.length) return status('没有音符可复制');
   snapshot();
   const nl = makeLayer('synth', 'lead', `${L.name}→合成`, S.layers.length);
-  S.layers.push(nl);
+  S.layers.push(nl); joinScenes(nl.id);
   for (const n of src) { const c = { ...n, id: uid(), layer: nl.id }; delete c.take; delete c.bend; S.notes.push(c); }
   S.sel = nl.id; syncAll(); status('复制成了一条合成层（原哼唱层不动）');
 }
@@ -638,7 +846,7 @@ function renderKeys() {
   $('hum').classList.toggle('hidden', !L || L.kind !== 'voice');
   $('tapPatWrap').classList.toggle('hidden', !L || L.input !== 'tap');
   const bar = T && T.playing ? Math.floor((T.beatNow ?? 0) / S.beatsPerBar) : S.loop.start;
-  const deg = chordAtBar(S.prog, bar), pcs = chordPcs(S.key, deg);
+  const deg = chordAtBar(S.prog, bar), pcs = chordTonePcs(S.key, deg);
   const hint = { keyboard: '按哪个都不会错音：你只管节奏和走向', tap: `只拍节奏；音高自动填当前和弦（${chordRoman(S.key, deg)}）的音`, hum: '开麦、按 ` 录：每一遍循环存一条', none: '分轨：只能静音 / 送效果 / 进场景' }[L?.input || 'none'];
   $('modeHint').textContent = L?.kind === 'drums' ? '鼓：一个键一种鼓（Q 排更重）' : hint;
   for (const row of [ROW_Q, ROW_A, ROW_Z]) {
@@ -663,6 +871,14 @@ function renderKeys() {
   }
 }
 function litKey(code, on) { const k = $('k_' + code); if (k) k.classList.toggle('down', on); }
+// 选层：录音中只换显示，录的还是开始录的那一层（D3）
+function selectLayer(id, quiet = false) {
+  if (S.sel !== id) {
+    S.sel = id;
+    if (rec.on && id !== rec.layer) status(`录音中：还在录「${layerById(S, rec.layer)?.name ?? '?'}」（键盘弹的也是它；换层只换显示，停了再录别的层）`);
+  }
+  if (quiet) { renderLayers(); renderParams(); renderKeys(); } else syncAll();
+}
 
 // ---------- 场景 ----------
 function renderScenes() {
@@ -688,6 +904,7 @@ function addScene() {
 }
 function jumpScene(i) {
   const sc = S.scenes[i]; if (!sc) return;
+  if (rec.on) return status(LOOP_LOCKED);
   const next = S.scenes[i + 1];
   S.loop.start = sc.bar; S.loop.bars = Math.max(1, Math.min(16, (next ? next.bar : S.songBars) - sc.bar));
   syncHeader(); status(`循环区 → ${sc.name}（第 ${sc.bar + 1}–${sc.bar + S.loop.bars} 小节）`);
@@ -698,26 +915,42 @@ function deleteSel() {
   if (TL.sel.size) { snapshot(); S.notes = S.notes.filter(n => !TL.sel.has(n.id)); TL.sel.clear(); status('删了'); return syncAll(); }
   if (TL.range) {
     snapshot(); const [a, z] = TL.range;
-    S.notes = S.notes.filter(n => n.b < a || n.b >= z);
+    // 只删看得见的（没在用的那几遍哼唱的音不动，换回那一遍时它还在）
+    const act = new Set(S.clips.filter(c => c.active).map(c => c.id));
+    S.notes = S.notes.filter(n => n.b < a || n.b >= z || (n.take && !act.has(n.take)));
     for (const k of Object.keys(S.curves)) S.curves[k] = S.curves[k].filter(p => p[0] < a || p[0] > z);
-    status(`删了第 ${(a / S.beatsPerBar + 1).toFixed(2)}–${(z / S.beatsPerBar + 1).toFixed(2)} 小节里的所有东西`); syncAll();
+    status(`删了第 ${(a / S.beatsPerBar + 1).toFixed(2)}–${(z / S.beatsPerBar + 1).toFixed(2)} 小节里的音符和曲线（录音 / 分轨的声音不动）`); syncAll();
   }
 }
+// 复制出去的音：拍和原始拍位都相对复制起点；不再挂在哪一遍哼唱上（贴出来 = 普通音符：换一遍 / 重新识别都不动它）
+function relNote(n, a) {
+  const c = { ...n, b: n.b - a, ...(n.raw ? { raw: { ...n.raw, b: (n.raw.b ?? n.b) - a } } : {}) };
+  delete c.take; delete c._preview;
+  return c;
+}
+// 复制成了返回 true；什么都没选 / 选的已经不在了 → 只提示，剪贴板不动
 function copySel() {
   if (TL.range) {
     const [a, z] = TL.range;
-    clipboard = { span: z - a, notes: events().filter(n => !n._preview && n.b >= a && n.b < z).map(n => ({ ...n, b: n.b - a })), curves: Object.fromEntries(Object.entries(S.curves).map(([k, p]) => [k, p.filter(q => q[0] >= a && q[0] <= z).map(q => [q[0] - a, q[1]])])) };
-  } else if (TL.sel.size) {
-    const ns = S.notes.filter(n => TL.sel.has(n.id)), a = Math.min(...ns.map(n => n.b));
-    clipboard = { span: Math.max(...ns.map(n => n.b + (n.d || 0.25))) - a, notes: ns.map(n => ({ ...n, b: n.b - a })), curves: {} };
-  } else return status('先选：拖标尺下条选一段，或框选音符');
+    const notes = events().filter(n => !n._preview && n.b >= a && n.b < z).map(n => relNote(n, a));
+    const curves = Object.fromEntries(Object.entries(S.curves).map(([k, p]) => [k, p.filter(q => q[0] >= a && q[0] <= z).map(q => [q[0] - a, q[1]])]));
+    if (!notes.length && !Object.values(curves).some(p => p.length)) { status('这一段里没有音符也没有曲线'); return false; }
+    clipboard = { span: z - a, notes, curves };
+  } else {
+    const ns = S.notes.filter(n => TL.sel.has(n.id));
+    if (!ns.length) { status('先选：拖标尺下条选一段，或框选音符'); return false; }
+    const a = Math.min(...ns.map(n => n.b));
+    clipboard = { span: Math.max(...ns.map(n => n.b + (n.d || 0.25))) - a, notes: ns.map(n => relNote(n, a)), curves: {} };
+  }
   status(`复制了 ${clipboard.notes.length} 个音${Object.values(clipboard.curves).some(p => p.length) ? ' + 曲线' : ''}`);
+  return true;
 }
 function pasteAt(b) {
   if (!clipboard) return status('剪贴板是空的');
+  if (!Number.isFinite(b)) return status('贴到哪？先在标尺下半条点一下放光标');
   snapshot();
   const ids = [];
-  for (const n of clipboard.notes) { const id = uid(); ids.push(id); S.notes.push({ ...n, id, b: n.b + b }); }
+  for (const n of clipboard.notes) { const id = uid(); ids.push(id); S.notes.push({ ...n, id, b: n.b + b, ...(n.raw ? { raw: { ...n.raw, b: n.raw.b + b } } : {}) }); }
   for (const [k, pts] of Object.entries(clipboard.curves)) {
     if (!pts.length) continue;
     let cur = (S.curves[k] || []).filter(p => p[0] < b || p[0] > b + clipboard.span);
@@ -728,7 +961,7 @@ function pasteAt(b) {
   status(`贴到第 ${(b / S.beatsPerBar + 1).toFixed(2)} 小节`); syncAll();
 }
 function duplicate() {
-  copySel(); if (!clipboard) return;
+  if (!copySel()) return;                    // 没选东西：不拿旧剪贴板去贴（以前会贴到第 Infinity 拍）
   const start = TL.range ? TL.range[0] : Math.min(...S.notes.filter(n => TL.sel.has(n.id)).map(n => n.b));
   const span = TL.range ? clipboard.span : Math.ceil(clipboard.span / S.beatsPerBar) * S.beatsPerBar;
   pasteAt(start + span);
@@ -736,7 +969,9 @@ function duplicate() {
 }
 
 // ---------- 原曲分轨 / 拖进来的文件 ----------
-async function api(path, opt) { const r = await fetch(path, opt); if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r; }
+// 连不上服务器（不是服务器回了错）的错误带 offline 标记：保存时改成下载
+const netFetch = (path, opt) => fetch(path, opt).catch(e => { const err = new Error(e?.message || String(e)); err.offline = true; throw err; });
+async function api(path, opt) { const r = await netFetch(path, opt); if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r; }
 async function loadSense() {
   try {
     const j = await (await api(`/api/sense?work=${encodeURIComponent(S.work)}`)).json();
@@ -755,18 +990,60 @@ async function loadStems() {
   status(`载入 ${names.length} 条分轨（${t0.toFixed(2)}–${t1.toFixed(2)} s）…`, true);
   snapshot();
   const msgs = [];
+  let ok = 0;
   for (const nm of names) {
-    const r = await api(`/api/stem?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(nm)}&t0=${t0}&t1=${t1}`);
-    const buf = await E.ctx.decodeAudioData(await r.arrayBuffer());
+    let buf;
+    try {
+      const r = await api(`/api/stem?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(nm)}&t0=${t0}&t1=${t1}`);
+      buf = await E.ctx.decodeAudioData(await r.arrayBuffer());
+    } catch (e) { msgs.push(`⚠️${nm} 没载入：${e.message}`); continue; }
     const aid = addAudio(buf, { file: `分轨/${nm}` });
     const L = makeLayer('stem', 'stem', '原曲·' + nm.replace(/\.wav$/i, ''), S.layers.length);
-    S.layers.push(L);
+    S.layers.push(L); joinScenes(L.id);
     S.clips.push({ id: uid('C'), layer: L.id, b: 0, dur: buf.duration, audio: aid, input: 'stem', active: true, fileOffset: t0, src: `分轨/${nm}@${t0.toFixed(3)}-${t1.toFixed(3)}` });
     if (/drum/i.test(nm)) msgs.push(buildGroove(buf));
+    ok++;
   }
   msgs.push(checkGridDrift());
-  status([`载入了 ${names.length} 条分轨`, ...msgs.filter(Boolean)].join('\n'), true);
+  status([`载入了 ${ok} / ${names.length} 条分轨`, ...msgs.filter(Boolean)].join('\n'), true);
   syncAll();
+}
+// 起点 / 速度 / 全曲长度变了：原曲分轨按新窗口重新切（不然分轨还放旧的那一段，和格子、真值都差一截）。
+// 新切的用新的音频号：撤销回去的旧片段还指着旧的那段声音
+let stemWant = '';
+async function reloadStems() {
+  const stems = S.clips.filter(c => c.input === 'stem' && c.src && c.src.includes('@'));
+  if (!stems.length) return;
+  if (!server) return status('⚠️起点 / 速度变了，但没连上 serve.py：分轨没重新切，和格子对不上了', true);
+  const t0 = S.anchor, t1 = S.anchor + songBeats(S) * spb(S), want = `${S.work}|${t0}|${t1}`, gen = sessionGen;
+  stemWant = want;
+  const got = [];
+  for (const c of stems) {
+    const nm = c.src.split('@')[0].replace(/^分轨\//, '');
+    try {
+      const r = await api(`/api/stem?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(nm)}&t0=${t0}&t1=${t1}`);
+      got.push({ id: c.id, nm, buf: await E.ctx.decodeAudioData(await r.arrayBuffer()) });
+    } catch (e) { return status(`⚠️分轨 ${nm} 没重新切成（${e.message}）：分轨和格子对不上了，改回原来的起点或重新「载入原曲分轨」`, true); }
+  }
+  if (gen !== sessionGen || stemWant !== want) return;      // 等的时候又改了 / 换了会话：以最后那次为准
+  const msgs = [];
+  for (const g of got) {
+    const c = S.clips.find(x => x.id === g.id); if (!c) continue;
+    c.audio = addAudio(g.buf, { file: `分轨/${g.nm}` }); c.dur = g.buf.duration; c.fileOffset = t0; c.src = `分轨/${g.nm}@${t0.toFixed(3)}-${t1.toFixed(3)}`;
+    if (/drum/i.test(g.nm)) msgs.push(buildGroove(g.buf));
+  }
+  status([`分轨按新的起点重新切了（${t0.toFixed(2)}–${t1.toFixed(2)} s，${got.length} 条；正在放的话下一遍生效）`, ...msgs].join('\n'), true);
+  syncAll();
+}
+// 改速度：哼唱的音符跟着它那一遍录音走（录音是秒，音符是拍）——按新速度换算回拍，跟唱的合成器不跑偏
+function retimeHum(oldBpm) {
+  if (oldBpm === S.bpm) return;
+  const k = (60 / oldBpm) / spb(S), clips = new Map(S.clips.map(c => [c.id, c]));
+  for (const n of S.notes) {
+    const c = n.take && clips.get(n.take); if (!c) continue;
+    n.b = c.b + (n.b - c.b) * k; n.d *= k;
+    if (n.raw) { if (Number.isFinite(n.raw.b)) n.raw.b = c.b + (n.raw.b - c.b) * k; if (Number.isFinite(n.raw.d)) n.raw.d *= k; }
+  }
 }
 function buildGroove(buf) {
   const ch = buf.getChannelData(0);
@@ -792,17 +1069,23 @@ async function addFileLayer(file) {
     snapshot();
     const aid = addAudio(buf, { file: null });
     const L = makeLayer('stem', 'stem', file.name.replace(/\.[^.]+$/, ''), S.layers.length);
-    S.layers.push(L);
+    S.layers.push(L); joinScenes(L.id);
     const [ls] = loopRange(S);
-    S.clips.push({ id: uid('C'), layer: L.id, b: ls, dur: buf.duration, audio: aid, input: 'file', active: true, src: file.name });
+    // fileOffset 0：存下来的就是这个文件本身，从头放（文件名里碰巧有「@128-」也不当切片号）
+    S.clips.push({ id: uid('C'), layer: L.id, b: ls, dur: buf.duration, audio: aid, input: 'file', active: true, fileOffset: 0, src: file.name });
     const gm = /drum|鼓/i.test(file.name) ? '\n' + buildGroove(buf) : '';
-    status(`拖进来：${file.name}（${buf.duration.toFixed(1)} s，从循环起点开始放）${gm}`, !!gm);
+    const long = buf.duration > FILE_KEEP_SEC ? `\n⚠️超过 ${FILE_KEEP_SEC} s：保存时不会把它存进会话（重新打开时这层没声音）。长伴奏请放进作品的 分轨/ 再「载入原曲分轨」` : '';
+    status(`拖进来：${file.name}（${buf.duration.toFixed(1)} s，${buf.numberOfChannels} 声道，从循环起点开始放）${gm}${long}`, !!(gm || long));
     syncAll();
   } catch (e) { status('读不了这个文件：' + e.message); }
 }
 
 // ---------- 保存 / 打开 ----------
 function f32ToB64(f) { const u = new Uint8Array(f.buffer, f.byteOffset, f.byteLength); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+// 要存的声道：录音 = 单声道 pcm；拖进来的文件按它原来的声道（立体声不只存左声道）
+const audioChannels = a => a.pcm ? [a.pcm] : Array.from({ length: a.buffer.numberOfChannels }, (_, i) => a.buffer.getChannelData(i));
+// b64 = 第 1 个声道（旧的 serve.py 只认它）；extra_channels = 第 2 个起的声道，serve.py 叠成多声道 wav
+function wavPayload(name, a) { const ch = audioChannels(a); return { name, sr: a.sr, b64: f32ToB64(ch[0]), ...(ch.length > 1 ? { extra_channels: ch.slice(1).map(f32ToB64) } : {}) }; }
 async function save() {
   const errs = validateTruth(exportTruth(S));
   if (errs.length) { status('自检没过，没存：' + errs.join('；')); return; }
@@ -812,44 +1095,51 @@ async function save() {
     for (let attempt = 0; attempt < 3; attempt++) {
       const { ver } = await (await api(`/api/next?work=${encodeURIComponent(S.work)}`)).json();
       // 要存的音频：麦克风录的 + 拖进来的短文件（原曲分轨只记来源，不重复存；已经存过的沿用旧文件）
-      const files = {}, toSave = [];
+      const files = {}, toSave = [], skipped = [];
       for (const c of S.clips) {
         const a = audio.get(c.audio); if (!a) continue;
         if (a.file) { files[c.audio] = a.file; continue; }
-        if (c.input === 'file' && a.buffer.duration > 90) continue;
+        if (c.input !== 'hum' && a.buffer.duration > FILE_KEEP_SEC) { skipped.push(c.src || c.id); continue; }
         const name = c.input === 'hum' ? `哼唱_${ver}_第${c.take}遍.wav` : `素材_${ver}_${c.id}.wav`;
         files[c.audio] = `作曲/${name}`;          // 路径一律相对作品文件夹（分轨是 分轨/xxx.wav）
-        toSave.push({ name, sr: a.sr, b64: f32ToB64(a.pcm || a.buffer.getChannelData(0)) });
+        toSave.push(wavPayload(name, a));
       }
-      const truth = exportTruth(S, { audioFiles: files }), session = exportSession(S, files);
-      const r = await fetch(`/api/save?work=${encodeURIComponent(S.work)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ver, truth, session, audio: toSave }) });
+      // 会话里的片段也记上文件名（重新打开以后 exportTruth 和存下来的那份一样）
+      const truth = exportTruth(S, { audioFiles: files }), session = exportSession({ ...S, clips: S.clips.map(c => files[c.audio] ? { ...c, file: files[c.audio] } : c) }, files);
+      const r = await netFetch(`/api/save?work=${encodeURIComponent(S.work)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ver, truth, session, audio: toSave }) });
       if (r.status === 409) continue;
       if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
       const j = await r.json();
       for (const [id, fn] of Object.entries(files)) { const a = audio.get(id); if (a) a.file = fn; }
       for (const c of S.clips) if (files[c.audio]) c.file = files[c.audio];
-      status(`存好了（${ver}）：${j.dir}\n${j.written.join(' · ')}`, true);
+      const sk = skipped.length ? `\n⚠️没存声音：${skipped.join('、')}（拖进来的超过 ${FILE_KEEP_SEC} s 只记来源，重新打开会话时这层没声音；长伴奏请放进 分轨/）` : '';
+      status(`存好了（${ver}）：${j.dir}\n${j.written.join(' · ')}${sk}`, true);
       lastSaved = { truth: j.truth, snap: JSON.stringify(S) };
       return j.truth;
     }
     status('保存失败：连续三次撞上已有的版本号');
-  } catch (e) { status('保存失败：' + e.message); }
+  } catch (e) {
+    // 连不上（serve.py 的窗口关了 / 崩了）：别丢，改成下载
+    if (e.offline) { downloadAll(); status('⚠️连不上 serve.py（窗口关了？）：这次下载到浏览器的下载文件夹了。重新打开 serve.py 后再存一次就回到作品文件夹', true); return; }
+    status('保存失败：' + e.message);
+  }
 }
 // 服务器那边用同一个 exportTruth 的结果（页面先算好），这里给离线用
 function downloadAll() {
   const dl = (name, blob) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); };
   const files = {};
-  for (const c of S.clips) { const a = audio.get(c.audio); if (!a || a.file) continue; const nm = `哼唱_${c.take ?? c.id}.wav`; files[c.audio] = nm; dl(nm, wavBlob(a.pcm || a.buffer.getChannelData(0), a.sr)); }
+  for (const c of S.clips) { const a = audio.get(c.audio); if (!a || a.file) continue; const nm = `哼唱_${c.take ?? c.id}.wav`; files[c.audio] = nm; dl(nm, wavBlob(audioChannels(a), a.sr)); }
   dl('作曲.json', new Blob([JSON.stringify(exportTruth(S, { audioFiles: files }), null, 1)], { type: 'application/json' }));
   dl('作曲_会话.json', new Blob([JSON.stringify(exportSession(S, files))], { type: 'application/json' }));
   status('没连上 serve.py：下载到浏览器的下载文件夹了');
 }
-function wavBlob(f, sr) {
-  const n = f.length, b = new ArrayBuffer(44 + n * 2), v = new DataView(b);
+// 16 bit wav；chans = 每个声道一条（交错写）
+function wavBlob(chans, sr) {
+  const C = chans.length, n = chans[0].length, bytes = n * C * 2, b = new ArrayBuffer(44 + bytes), v = new DataView(b);
   const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
-  w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
-  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true);
-  for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, f[i])) * 32767, true);
+  w(0, 'RIFF'); v.setUint32(4, 36 + bytes, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, C, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2 * C, true); v.setUint16(32, 2 * C, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, bytes, true);
+  for (let i = 0; i < n; i++) for (let k = 0; k < C; k++) v.setInt16(44 + (i * C + k) * 2, Math.max(-1, Math.min(1, chans[k][i])) * 32767, true);
   return new Blob([b], { type: 'audio/wav' });
 }
 // 定稿：写 作曲/当前.txt（下游只读它）。改过还没存 → 先存一版再定
@@ -872,22 +1162,36 @@ async function finalize() {
 }
 async function openSessions() {
   if (!server) return status('要用 serve.py 打开页面才能读会话');
-  const list = await (await api(`/api/sessions?work=${encodeURIComponent(S.work)}`)).json();
+  let list;
+  try { list = await (await api(`/api/sessions?work=${encodeURIComponent(S.work)}`)).json(); } catch (e) { return status('读不到会话列表：' + e.message); }
   const box = $('sessList'); box.innerHTML = list.length ? '' : '<p class="dim">这个作品还没有存过会话</p>';
   for (const s of list) { const b = document.createElement('button'); b.textContent = `${s.name}  ·  ${s.mtime}`; b.onclick = () => loadSession(s.name); box.appendChild(b); }
   $('sessBox').classList.remove('hidden');
 }
+// 换作品时把录音 / 分轨带过去：存过的文件名都在上一个作品的文件夹里 → 作废，下次保存重新写进新作品；
+// 原曲分轨也是上一个作品的 → 改成普通素材（存的就是现在这一段，从头放）。撤销记录清空（旧的撤销点还指着上一个作品的文件）
+function moveAudioToWork() {
+  for (const a of audio.values()) a.file = null;
+  for (const c of S.clips) { delete c.file; if (c.input === 'stem') { c.input = 'file'; c.fileOffset = 0; } }
+  undoStack = []; redoStack = [];
+  const long = S.clips.filter(c => { const a = audio.get(c.audio); return c.input !== 'hum' && a && a.buffer.duration > FILE_KEEP_SEC; }).length;
+  return long ? `⚠️有 ${long} 段超过 ${FILE_KEEP_SEC} s 的分轨 / 文件存不进新作品（重新打开会话时没声音）：要用的话把它放进新作品的 分轨/ 再载入` : '';
+}
 async function loadSession(name) {
   $('sessBox').classList.add('hidden');
+  if ((hasUnsavedAudio() || hum.pending) && !confirm('有还没存的录音：打开别的会话会把它们丢掉（撤销也找不回来）。\n确定 = 丢掉、打开；取消 = 先回去存（Ctrl+S）')) return;
   try {
     const j = await (await api(`/api/file?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(name)}`)).json();
-    T.stop(true); closeVariants(false);
+    T.stop(true); abortRec(); closeVariants();
+    sessionGen++;
     const { audioFiles = {}, ...st } = j;
-    snapshot();
     S = { ...makeState(), ...st };
-    audio.clear(); peaksCache.clear();
+    // 撤销记录清空：旧会话的录音音频下面就清掉了，撤回去只会剩没声音的空壳（存的时候还会丢）
+    undoStack = []; redoStack = []; lastSaved = null; groove = null;
+    audio.clear(); peaksCache.clear(); hum.sessionTakes = [];
     for (const c of S.clips) {
       const fn = audioFiles[c.audio] || c.file;
+      if (fn) c.file = fn;                    // 片段上也记着文件名：exportTruth 不靠 audioFiles 也对
       try {
         let r;
         if (c.input === 'stem' && c.src && c.src.includes('@')) {
@@ -897,10 +1201,11 @@ async function loadSession(name) {
         else continue;
         const buf = await E.ctx.decodeAudioData(await r.arrayBuffer());
         audio.set(c.audio, { buffer: buf, pcm: c.input === 'hum' ? buf.getChannelData(0) : null, sr: buf.sampleRate, file: fn || null });
+        if (c.input === 'stem' && /drum/i.test(c.src || '')) buildGroove(buf);
       } catch (e) { status(`有一条音频没读到：${fn || c.src}`); }
     }
-    hum.takeNo = Math.max(0, ...S.clips.map(c => c.take || 0));
-    status(`打开了 ${name}`); syncAll();
+    hum.takeNo = Math.max(hum.takeNo, ...S.clips.map(c => c.take || 0));
+    status(`打开了 ${name}（撤销记录从这里重新开始）`); syncAll();
   } catch (e) { status('打开失败：' + e.message); }
 }
 
@@ -928,18 +1233,45 @@ function syncAll() {
 function bindHeader() {
   $('root').innerHTML = NOTE_NAMES.map((n, i) => `<option value="${i}">${n}</option>`).join('');
   $('mode').innerHTML = Object.entries(MODES).map(([k, m]) => `<option value="${k}">${m.label}</option>`).join('');
-  const restartIfPlaying = () => { if (T.playing) { const b = T.beatNow ?? 0; T.start(b); } };
-  $('bpm').onchange = () => { snapshot(); S.bpm = Math.max(40, Math.min(240, +$('bpm').value || 120)); restartIfPlaying(); syncAll(); };
+  // 改速度：先记下排到哪一拍（按旧速度），哼唱音符跟着录音换算，播放中从那一拍按新速度接着走
+  const setBpm = bpm => { const front = playFront(), old = S.bpm; S.bpm = bpm; retimeHum(old); tempoChanged(old, front); return old !== S.bpm; };
+  $('bpm').onchange = () => {
+    if (rec.on) { $('bpm').value = S.bpm; return status('录音中不能改速度：先按 ` 停'); }
+    snapshot(); const ch = setBpm(Math.max(40, Math.min(240, +$('bpm').value || 120))); syncAll(); if (ch) reloadStems();
+  };
   $('root').onchange = () => { snapshot(); S.key.root = +$('root').value; syncAll(); };
   $('mode').onchange = () => { snapshot(); S.key.mode = $('mode').value; syncAll(); };
   $('prog').onchange = () => { snapshot(); S.prog = parseProgression($('prog').value); syncAll(); };
-  $('loopBars').onchange = () => { S.loop.bars = +$('loopBars').value; S.loop.start = Math.min(S.loop.start, Math.max(0, S.songBars - S.loop.bars)); syncAll(); };
-  $('songBars').onchange = () => { snapshot(); S.songBars = Math.max(1, Math.min(256, +$('songBars').value || 16)); TL.fit('song'); syncAll(); };
-  $('anchor').onchange = () => { snapshot(); S.anchor = +$('anchor').value || 0; const w = checkGridDrift(); if (w) status(w, true); syncAll(); };
-  $('anchorSel').onchange = () => { const v = $('anchorSel').value; if (v === '') return; snapshot(); S.anchor = +v; if (S._sense?.bpm) S.bpm = S._sense.bpm; syncAll(); status([`起点 = ${(+v).toFixed(2)} s（第 1 小节对齐原曲这个重拍）`, checkGridDrift()].filter(Boolean).join('\n'), true); };
-  $('work').onchange = async () => { S.work = $('work').value; lastSaved = null; await loadSense(); refreshFinal(); status(`作品：${S.work}`); };
+  // 循环区永远在歌里面（全曲改短了也一样）；没在录音时播放中的循环立刻挪过去
+  const clampLoop = () => {
+    const before = JSON.stringify(S.loop);
+    S.loop.bars = Math.max(1, Math.min(S.loop.bars, S.songBars));
+    S.loop.start = Math.max(0, Math.min(S.loop.start, S.songBars - S.loop.bars));
+    if (JSON.stringify(S.loop) !== before && T.playing && S.loop.on && !rec.on) T.start(loopRange(S)[0]);
+  };
+  $('loopBars').onchange = () => { if (rec.on) { syncHeader(); return status(LOOP_LOCKED); } S.loop.bars = +$('loopBars').value; clampLoop(); syncAll(); };
+  $('songBars').onchange = () => {
+    if (rec.on) { syncHeader(); return status('录音中不能改全曲长度：先按 ` 停'); }
+    snapshot(); S.songBars = Math.max(1, Math.min(256, +$('songBars').value || 16)); clampLoop(); TL.fit('song'); syncAll(); reloadStems();
+  };
+  $('anchor').onchange = () => { snapshot(); S.anchor = +$('anchor').value || 0; const w = checkGridDrift(); if (w) status(w, true); syncAll(); reloadStems(); };
+  $('anchorSel').onchange = () => {
+    const v = $('anchorSel').value; if (v === '') return;
+    if (rec.on && S._sense?.bpm && S._sense.bpm !== S.bpm) { $('anchorSel').value = ''; return status('录音中不能改速度：先按 ` 停'); }
+    snapshot(); S.anchor = +v; if (S._sense?.bpm) setBpm(S._sense.bpm); syncAll();
+    status([`起点 = ${(+v).toFixed(2)} s（第 1 小节对齐原曲这个重拍）`, checkGridDrift()].filter(Boolean).join('\n'), true);
+    reloadStems();
+  };
+  $('work').onchange = async () => {
+    const nw = $('work').value, old = S.work;
+    if (rec.on) { $('work').value = old; return status('录音中不能换作品：先按 ` 停'); }
+    // 录音 / 分轨存的文件名都在上一个作品的文件夹里：带过去就得在新作品里重新存，不然真值指着不存在的文件
+    if (S.clips.length && !confirm(`换到「${nw}」：这个会话里的录音 / 分轨是「${old}」的。\n确定 = 带过去（下次保存时录音重新存进「${nw}」；「${old}」的原曲分轨当成普通素材一起存）\n取消 = 不换`)) { $('work').value = old; return; }
+    const warn = S.clips.length ? moveAudioToWork() : '';
+    S.work = nw; lastSaved = null; await loadSense(); refreshFinal(); status(`作品：${S.work}${warn ? '\n' + warn : ''}`, !!warn);
+  };
   $('play').onclick = togglePlay; $('rec').onclick = toggleRec;
-  $('loopOn').onclick = () => { S.loop.on = !S.loop.on; syncHeader(); };
+  $('loopOn').onclick = () => { if (rec.on) return status(LOOP_LOCKED); S.loop.on = !S.loop.on; syncHeader(); };
   $('metro').onclick = () => { S.settings.metro = !S.settings.metro; syncHeader(); };
   $('countIn').onclick = () => { S.settings.countIn = !S.settings.countIn; syncHeader(); };
   $('undo').onclick = undo; $('redo').onclick = redo; $('save').onclick = save; $('load').onclick = openSessions; $('final').onclick = finalize;
@@ -957,17 +1289,20 @@ function bindHeader() {
     snapshot();
     const name = kind === 'synth' ? PRESETS[preset].label : kind === 'drums' ? '鼓' : '哼唱';
     const L = makeLayer(kind, preset, name, S.layers.length);
-    S.layers.push(L); S.sel = L.id; syncAll();
+    S.layers.push(L); joinScenes(L.id); selectLayer(L.id);
+    if (S.scenes.length) status(`新层「${name}」已经加进全部 ${S.scenes.length} 个场景（不要它响的场景在场景表里点掉）`);
   };
   $('fileIn').onchange = () => { const f = $('fileIn').files[0]; if (f) addFileLayer(f); $('fileIn').value = ''; };
   $('micBtn').onclick = micOn; $('calib').onclick = calibrate;
-  $('reroll').onclick = () => { if (variants?.ids) openNoteVariants(variants.layer, variants.ids, (variants.reroll || 0) + 1); };
+  $('reroll').onclick = () => { if (variants?.ids) openNoteVariants(variants.layer, variants.ids, (variants.reroll || 0) + 1, variants.loop); };
   $('timbreVar').onclick = openTimbreVariants;
   $('fitSong').onclick = () => TL.fit('song'); $('fitLoop').onclick = () => TL.fit('loop');
   $('copy').onclick = copySel; $('paste').onclick = () => pasteAt(TL.cursor); $('dup').onclick = duplicate; $('del').onclick = deleteSel;
   $('addScene').onclick = addScene; $('loadStems').onclick = loadStems;
   // 点完按钮把焦点还给页面：不然空格 / 字母键会去「按」那个按钮
   document.addEventListener('click', e => { const b = e.target.closest('button'); if (b) b.blur(); });
+  // 改完顶栏 / 旋钮的下拉框、数字框：焦点也还给页面（不然字母键会去下拉框里跳选项，空格 / ` 没反应）
+  document.addEventListener('change', e => { const t = e.target; if (t && (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && t.type !== 'range'))) t.blur(); });
   document.addEventListener('dragover', e => e.preventDefault());
   document.addEventListener('drop', e => { e.preventDefault(); for (const f of e.dataTransfer.files) if (/^audio\//.test(f.type) || /\.(wav|mp3|flac|ogg|m4a)$/i.test(f.name)) addFileLayer(f); });
 }
@@ -980,7 +1315,8 @@ function togglePlay() {
 // ---------- 全局键盘 ----------
 function onKeyDown(ev) {
   const tag = ev.target.tagName;
-  if ((tag === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.code === 'Escape') ev.target.blur(); return; }
+  // 输入框里：Esc 退出；数字框 / 单行框里按 Enter = 确定（触发 change）并把焦点还给页面
+  if ((tag === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.code === 'Escape' || (ev.code === 'Enter' && tag === 'INPUT')) ev.target.blur(); return; }
   if (!E) return;
   const ctrl = ev.ctrlKey || ev.metaKey;
   if (ctrl) {
@@ -1003,7 +1339,7 @@ function onKeyDown(ev) {
   if (/^Digit[1-9]$/.test(ev.code)) {
     const i = +ev.code.slice(5) - 1;
     if (ev.shiftKey) return jumpScene(i);
-    if (S.layers[i]) { S.sel = S.layers[i].id; syncAll(); }
+    if (S.layers[i]) selectLayer(S.layers[i].id);
     return;
   }
   if (ev.code === 'Digit0') { S.settings.metro = !S.settings.metro; syncHeader(); return; }
@@ -1012,7 +1348,7 @@ function onKeyDown(ev) {
   if (variants && ev.code === 'Enter') { ev.preventDefault(); return commitVariant(ev.shiftKey ? 'overlay' : 'replace'); }
   if (ev.code === 'Escape') { if (variants) { commitVariant('discard'); } else { TL.sel.clear(); TL.range = null; } return; }
   if (ev.code === 'Delete' || ev.code === 'Backspace') { ev.preventDefault(); return deleteSel(); }
-  if (ev.code === 'Minus' || ev.code === 'Equal') { const d = ev.code === 'Minus' ? -S.loop.bars : S.loop.bars; S.loop.start = Math.max(0, Math.min(S.songBars - S.loop.bars, S.loop.start + d)); syncHeader(); status(`循环区：第 ${S.loop.start + 1}–${S.loop.start + S.loop.bars} 小节`); return; }
+  if (ev.code === 'Minus' || ev.code === 'Equal') { if (rec.on) return status(LOOP_LOCKED); const d = ev.code === 'Minus' ? -S.loop.bars : S.loop.bars; S.loop.start = Math.max(0, Math.min(S.songBars - S.loop.bars, S.loop.start + d)); syncHeader(); status(`循环区：第 ${S.loop.start + 1}–${S.loop.start + S.loop.bars} 小节`); return; }
   if (ev.repeat) { ev.preventDefault(); return; }
   if (noteDown(ev)) ev.preventDefault();
 }
@@ -1021,6 +1357,7 @@ function onKeyDown(ev) {
 let lastKeysBar = -1;
 function frame() {
   const b = T.playing ? T.beatNow : null;
+  if (xy.down) xyWrite();                        // 录音中按住 XY 不动：值照样一帧一帧写进曲线
   const eff = renderMacroBars(b ?? TL.cursor ?? 0);
   if (!T.playing) E.setMacros(eff);
   TL.draw(b);
@@ -1038,23 +1375,29 @@ async function boot() {
   T = new Transport(E, () => S, {
     events, clips: clipsForPlay, buffer: id => audio.get(id)?.buffer,
     liveMacro: id => xy.live[id],
-    countingIn: () => rec.on && T.playing && (T.beatNow ?? 0) < loopRange(S)[0],
+    // 预备拍：k = 排到的那一拍（走带传进来）；老走带不传就用听到的拍。只打到开始录的那一拍之前
+    countingIn: k => rec.on && T.playing && (k ?? T.beatNow ?? 0) < rec.countEnd - 1e-9,
     onSegment: (ng, prev) => {
-      if (!rec.on) return;
+      // 关着循环：哼唱从开始录到停是一条（toggleRec / stopRec 管），键盘不按遍撤销
+      if (!rec.on || !S.loop.on) return;
       const [ls, le] = loopRange(S);
       if (prev && prev.b0 <= ls + 1e-9 && prev.b1 >= le - 1e-9) {
-        // 一遍循环结束：键盘 / XY 的这一遍可单独撤销；哼唱这一遍收起来
+        // 一遍循环结束：哼唱这一遍收起来（存的时候自己记撤销点）；键盘 / XY 的这一遍可单独撤销
         if (hum.active) humPassEnd(ng ? ng.ctx0 : E.now);
-        undoStack.push(JSON.stringify(S));
+        else pushUndo();
       }
       if (ng && hum.active && Math.abs(ng.b0 - ls) < 1e-9) humPassStart(ng);
     },
     onStop: () => { if (rec.on) stopRec(); },
   });
   TL = new Timeline($('tl'), {
-    getState: () => S, events, peaks: peaksOf, shownLanes: () => shownLanes,
-    snapshot, changed: k => { if (k === 'loop') syncHeader(); if (k === 'notes-done' || k === 'curve') renderLaneChecks(); },
-    selectLayer: (id, quiet) => { if (S.sel !== id) { S.sel = id; if (!quiet) syncAll(); else { renderLayers(); renderParams(); renderKeys(); } } },
+    getState: () => S, events, clips: clipsNow, peaks: peaksOf, shownLanes: () => shownLanes,
+    snapshot, changed: k => {
+      // 录音中在标尺上拖循环区：拖不动（这一遍会对不上），还原成开始录时的
+      if (k === 'loop' && rec.on && rec.loop0 && JSON.stringify(S.loop) !== JSON.stringify(rec.loop0)) { S.loop = { ...rec.loop0 }; status(LOOP_LOCKED); }
+      if (k === 'loop') syncHeader(); if (k === 'notes-done' || k === 'curve') renderLaneChecks();
+    },
+    selectLayer: (id, quiet) => { if (S.sel !== id) selectLayer(id, quiet); },
     addNote: n => { S.notes.push({ id: uid(), ...n, raw: { b: n.b, d: n.d } }); },
   });
   bindHeader(); setupXY();
@@ -1073,18 +1416,22 @@ async function boot() {
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('keyup', ev => { if (E) noteUp(ev); });
   window.addEventListener('blur', () => { for (const code of [...held.keys()]) noteUp({ code }); });
+  // 关页面 / 刷新：还有没存进硬盘的录音（或还在分析的那一遍）就先问一声（浏览器自己的自动存档里没有录音）
+  window.addEventListener('beforeunload', e => { if (hasUnsavedAudio() || hum.pending > 0) { e.preventDefault(); e.returnValue = ''; } });
+  // 换了耳机 / 声卡：校准过的延迟多半不对了
+  try { navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (S.settings.latencyCal) status('音频设备变了（换了耳机？）：麦克风延迟补偿可能不对了，建议重新「校准延迟」', true); }); } catch (e) { /* 老浏览器 */ }
   syncAll();
   if (restoredNote && server) status(restoredNote);
   if (E.silent) { status('静音模式（网址带 ?silent）：一切照常运行，只是不从扬声器出声', true); document.title = '作曲器（静音）'; }
   requestAnimationFrame(frame);
   window.__composer = { get S() { return S; }, E, T, TL, audio, exportTruth: () => exportTruth(S), validate: () => validateTruth(exportTruth(S)), processHumBuffer: (pcm, sr, b0) => injectHum(pcm, sr, b0) };
 }
-// 测试 / 调试：直接塞一段音频当哼唱（不经过麦克风）
-function injectHum(pcm, sr, b0 = 0) {
+// 测试 / 调试：直接塞一段音频当哼唱（不经过麦克风）。分析在后台线程：返回 Promise，await 它再看结果
+async function injectHum(pcm, sr, b0 = 0) {
   mic.sr = sr; mic.chunks = [{ t: 100, x: pcm }];
   const L = sel(); if (L.kind !== 'voice') { S.sel = 'voice'; }
-  hum.sessionTakes = [];
-  processHumTake(sel().id, b0, 100, 100 + pcm.length / sr);
+  const sess = hum.sessionTakes = [];
+  await processHumTake(sel().id, b0, 100, 100 + pcm.length / sr, sess);
   openTakeVariants(sel().id);
 }
 

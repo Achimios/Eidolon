@@ -34,52 +34,58 @@
 
 <main>
   <section id="left">
-    <div class="hd">层 <span class="dim">数字键选</span>
-      <select id="addLayer"><option value="">＋ 加一层…</option><option value="synth:bass">贝斯</option><option value="synth:pad">铺底</option><option value="synth:lead">主旋律</option><option value="synth:pluck">拨弦</option><option value="synth:bell">FM 钟</option><option value="synth:arp">琶音</option><option value="drums:drums">鼓</option><option value="voice:voice">哼唱 / 人声</option><option value="stem:file">分轨（选文件）</option></select>
+    <div class="lbox">
+      <div class="hd">层 <span class="dim">数字键选</span>
+        <select id="addLayer"><option value="">＋ 加一层…</option><option value="synth:bass">贝斯</option><option value="synth:pad">铺底</option><option value="synth:lead">主旋律</option><option value="synth:pluck">拨弦</option><option value="synth:bell">FM 钟</option><option value="synth:arp">琶音</option><option value="drums:drums">鼓</option><option value="voice:voice">哼唱 / 人声</option><option value="stem:file">分轨（选文件）</option></select>
+      </div>
+      <div id="layers"></div>
     </div>
-    <div id="layers"></div>
-    <div class="hd" id="paramHd">旋钮</div>
-    <div id="params"></div>
+    <div class="pbox">
+      <div class="hd" id="paramHd">旋钮</div>
+      <div id="params"></div>
+    </div>
   </section>
 
   <section id="center">
-    <div id="modeBar">
-      <span id="selName" class="big"></span>
-      <span class="seg" id="inputSeg"><button data-v="keyboard">键盘</button><button data-v="tap">拍</button><button data-v="hum">哼唱</button></span>
-      <span class="dim" id="modeHint"></span>
-    </div>
-    <div id="keys"></div>
-    <div id="kbOpts">
-      <label>力度 <select id="velMode"><option value="flat">等力度</option><option value="shift">Shift = 重音</option><option value="hold">按住时长</option></select></label>
-      <label id="tapPatWrap">拍的音高 <select id="tapPat"><option value="position">跟着键的左右</option><option value="arp">上行琶音</option><option value="root">根音</option><option value="random">随机和弦音</option></select></label>
-      <span class="dim">↑↓ 八度 · Tab 换输入方式 · 原始演奏一律原样记下，吸附在「变体」里挑</span>
-    </div>
-
-    <div id="variants" class="hidden">
-      <div class="hd">挑一个 <span class="dim" id="varHint">←→ 试听 · Enter 用这个 · Shift+Enter 叠成新层 · Esc 放弃</span>
-        <button id="reroll">再来一组</button><button id="timbreVar">音色变体</button></div>
-      <div id="varCards"></div>
-    </div>
-
-    <div id="hum" class="hidden">
-      <div class="hd">哼唱 <button id="micBtn">开麦</button><button id="calib" title="用哪副耳机哼唱，就把它贴着麦克风校准（换耳机要重新校准）">校准延迟</button>
-        <span class="dim" id="latInfo"></span></div>
-      <div class="humRow">
-        <div id="pitchNow"><div class="big" id="pnName">—</div><div class="dim" id="pnCents"></div></div>
-        <canvas id="pitchStrip" width="560" height="110"></canvas>
+    <div class="cbody">
+      <div id="modeBar">
+        <span id="selName" class="big"></span>
+        <span class="seg" id="inputSeg"><button data-v="keyboard">键盘</button><button data-v="tap">拍</button><button data-v="hum">哼唱</button></span>
+        <span class="dim" id="modeHint"></span>
       </div>
-      <div class="dim" id="humInfo">⚠️戴耳机（外放的伴奏漏进麦克风，会被当成你的声音）。选「哼唱」层、开麦、按 ` 开始录：每一遍循环存一条，停了以后在几遍里挑。换了耳机（尤其蓝牙）要重新校准。</div>
+      <div id="keys"></div>
+      <div id="kbOpts">
+        <label>力度 <select id="velMode"><option value="flat">等力度</option><option value="shift">Shift = 重音</option><option value="hold">按住时长</option></select></label>
+        <label id="tapPatWrap">拍的音高 <select id="tapPat"><option value="position">跟着键的左右</option><option value="arp">上行琶音</option><option value="root">根音</option><option value="random">随机和弦音</option></select></label>
+        <span class="dim">↑↓ 八度 · Tab 换输入方式 · 原始演奏一律原样记下，吸附在「变体」里挑</span>
+      </div>
+
+      <div id="variants" class="hidden">
+        <div class="hd">挑一个 <span class="dim" id="varHint">←→ 试听 · Enter 用这个 · Shift+Enter 叠成新层 · Esc 放弃</span>
+          <button id="reroll">再来一组</button><button id="timbreVar">音色变体</button></div>
+        <div id="varCards"></div>
+      </div>
+
+      <div id="hum" class="hidden">
+        <div class="hd">哼唱 <button id="micBtn">开麦</button><button id="calib" title="用哪副耳机哼唱，就把它贴着麦克风校准（换耳机要重新校准）">校准延迟</button>
+          <span class="dim" id="latInfo"></span></div>
+        <div class="humRow">
+          <div id="pitchNow"><div class="big" id="pnName">—</div><div class="dim" id="pnCents"></div></div>
+          <canvas id="pitchStrip" width="560" height="110"></canvas>
+        </div>
+        <div class="dim" id="humInfo">⚠️戴耳机（外放的伴奏漏进麦克风，会被当成你的声音）。选「哼唱」层、开麦、按 ` 开始录：每一遍循环存一条，停了以后在几遍里挑。换了耳机（尤其蓝牙）要重新校准。</div>
+      </div>
     </div>
     <div id="status"></div>
   </section>
 
   <section id="right">
-    <div class="hd">XY 推子 <span class="dim">拖 = 两个旋钮；录音时记成曲线</span></div>
+    <div class="hd">XY 推子 <span class="dim" title="拖 = 两个旋钮；录音时记成曲线">拖 = 两个旋钮；录音时记成曲线</span></div>
     <canvas id="xy" width="280" height="280"></canvas>
     <div class="xysel"><label>x <select id="xSel"></select></label><label>y <select id="ySel"></select></label></div>
     <label class="chk"><input type="checkbox" id="tParent" checked> 张力当所有旋钮的总父级</label>
     <div id="macroBars"></div>
-    <div class="hd">示波器 <span class="dim">左 = x，右 = y</span></div>
+    <div class="hd">示波器 <span class="dim" title="左 = x，右 = y">左 = x，右 = y</span></div>
     <canvas id="scope" width="280" height="200"></canvas>
   </section>
 </main>
@@ -89,7 +95,7 @@
     <button id="fitSong">全曲</button><button id="fitLoop">循环区</button>
     <label>编辑吸附 <select id="snapEdit"><option value="1">1 拍</option><option value="0.5">1/8</option><option value="0.25" selected>1/16</option><option value="0.125">1/32</option><option value="0">自由</option></select></label>
     <button id="copy" title="Ctrl+C">复制</button><button id="paste" title="Ctrl+V：贴到光标">粘贴</button><button id="dup" title="Ctrl+D">复制一份到后面</button><button id="del" title="Delete">删除</button>
-    <span class="dim">拖音符 = 移（上下 = 调内走级，Alt = 不吸附）· 空白处拖 = 框选 · 双击空白 = 加音 · 标尺上条拖 = 循环区 · 下条拖 = 选一段 · 曲线道直接画（右键拖 = 擦）· Ctrl+滚轮 缩放</span>
+    <span class="dim">拖音符 = 移（上下 = 调内走级，Alt = 不吸附）· 空白处拖 = 框选 · 双击空白 = 加音 · 标尺上条拖 = 循环区 · 下条拖 = 选一段 · 曲线道直接画（右键拖 = 擦）· Ctrl+滚轮 缩放 · Shift+滚轮 平移</span>
     <span class="lanes" id="laneChecks"></span>
   </div>
   <div id="tlWrap"><canvas id="tl"></canvas></div>

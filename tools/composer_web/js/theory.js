@@ -97,13 +97,24 @@ export function chordAtBar(prog, bar) {
   return prog[((Math.floor(bar) % prog.length) + prog.length) % prog.length];
 }
 // 和弦音（midi），从 lo 往上铺 count 个
+// 能弹的和弦音：七声调式 = 三和弦；五声调式里三和弦会带调外音（E 小调五声的 VI = C E G，C 不在调里）→ 只留调内的；
+// 剩不到两个就用离和弦根音最近的调内音 + 往上隔一个的调内音。拍 / 琶音 / 吸和弦音都走这里，保证「按哪个都不会错音」
+export function chordTonePcs(key, degree) {
+  const pcs = chordPcs(key, degree), steps = MODES[key.mode].steps;
+  if (steps.length === 7) return pcs;
+  const inS = pcs.filter(pc => inScale(key, pc));
+  if (inS.length >= 2) return inS;
+  const rel = ((pcs[0] - key.root) % 12 + 12) % 12;
+  const i = steps.reduce((bi, s, k) => Math.abs(s - rel) < Math.abs(steps[bi] - rel) ? k : bi, 0);
+  return [i, i + 2].map(k => (key.root + steps[k % steps.length]) % 12);
+}
 export function chordTones(key, degree, lo, count) {
-  const pcs = chordPcs(key, degree), out = [];
+  const pcs = chordTonePcs(key, degree), out = [];
   for (let m = Math.ceil(lo); out.length < count && m < lo + 60; m++) if (pcs.includes(((m % 12) + 12) % 12)) out.push(m);
   return out;
 }
 export function isChordTone(key, degree, m) {
-  return chordPcs(key, degree).includes(((Math.round(m) % 12) + 12) % 12);
+  return chordTonePcs(key, degree).includes(((Math.round(m) % 12) + 12) % 12);
 }
 
 // 带和弦偏好的吸附：调内候选按距离排，强拍上和弦音有一点优惠；离两个候选差不多远时，跟上一个音走（惯性）

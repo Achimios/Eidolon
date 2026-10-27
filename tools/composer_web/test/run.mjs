@@ -30,6 +30,22 @@ t('吸附：调内 + 两边差不多时跟上一个音', () => {
   assert.equal(Th.snapMelodic(Em, 65.5, { prev: 66 }), 66);
 });
 
+t('所有调式（含五声）× 各种和弦进行：拍 / 琶音 / 吸和弦音都不出调外音', () => {
+  for (const mode of Object.keys(Th.MODES)) for (const root of [0, 4, 9]) for (const progS of ['i VI III VII', '1 4 5 1', '2 5 1', '7 3 6 2']) {
+    const key = { root, mode }, prog = Th.parseProgression(progS);
+    const ctx = { key, prog, beatsPerBar: 4, tensionAt: () => 0.5, groove: null };
+    for (let bar = 0; bar < prog.length; bar++) {
+      const deg = Th.chordAtBar(prog, bar);
+      assert.ok(Th.chordTonePcs(key, deg).length >= 2, `${mode} ${progS} bar${bar}`);
+      for (const p of Th.chordTones(key, deg, 40, 10)) assert.ok(Th.inScale(key, p), `${mode} chordTones ${p}`);
+      for (const pat of ['position', 'arp', 'root', 'random']) for (let col = 0; col < 6; col++) {
+        const p = In.tapPitch(ctx, bar * 4 + 0.5, col, 4, pat, col);
+        assert.ok(Th.inScale(key, p), `${mode} ${progS} tap ${pat} ${p}`);
+      }
+    }
+  }
+});
+
 // ---- 哼唱识别 ----
 const mel = [{ midi: 64, dur: 0.4 }, { midi: 67, dur: 0.4 }, { midi: 71, dur: 0.6 }, { midi: 69, dur: 0.3 }, { midi: 67, dur: 0.5 }];
 t('干净的哼唱：5 个音、音高对、起点误差 < 30 ms', () => {

@@ -67,6 +67,17 @@ class TestServe(unittest.TestCase):
         with self.assertRaises(ValueError):
             serve.save_bundle(self.work, self.bundle("v3/../x"))
 
+    def test_stereo_file_saved_as_two_channels(self):
+        l, r = np.full(400, 0.5, "<f4"), np.full(400, -0.25, "<f4")
+        b = lambda x: base64.b64encode(x.tobytes()).decode()
+        serve.save_bundle(self.work, self.bundle("v1", [{"name": "素材_v1_C1.wav", "sr": 8000, "b64": b(l), "extra_channels": [b(r)]}]))
+        y, _ = sf.read(str(self.work / serve.OUT_DIR / "素材_v1_C1.wav"))
+        self.assertEqual(y.shape, (400, 2))
+        self.assertAlmostEqual(float(y[0, 0]), 0.5, places=4)
+        self.assertAlmostEqual(float(y[0, 1]), -0.25, places=4)
+        with self.assertRaises(ValueError):
+            serve.save_bundle(self.work, self.bundle("v2", [{"name": "素材_v2_C1.wav", "sr": 8000, "b64": b(l), "extra_channels": [b(r[:10])]}]))
+
     def test_final_pointer(self):
         out = self.work / serve.OUT_DIR
         self.assertIsNone(serve.read_final(self.work))
@@ -146,8 +157,14 @@ class TestServe(unittest.TestCase):
 @unittest.skipUnless(shutil.which("node"), "没装 node")
 class TestPageLogic(unittest.TestCase):
     def test_node_selftest(self):
-        r = subprocess.run(["node", str(ROOT / "tools" / "composer_web" / "test" / "run.mjs")], capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # run.mjs + 各模块的 t_*.mjs + 版面规则 layout.mjs（都是纯 node，不开浏览器）
+        d = ROOT / "tools" / "composer_web" / "test"
+        files = [d / "run.mjs", d / "layout.mjs"] + sorted(d.glob("t_*.mjs"))
+        self.assertGreaterEqual(len(files), 5)
+        for f in files:
+            with self.subTest(f.name):
+                r = subprocess.run(["node", str(f)], capture_output=True, text=True, encoding="utf-8")
+                self.assertEqual(r.returncode, 0, f.name + "\n" + r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

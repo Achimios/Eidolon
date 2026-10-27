@@ -17,6 +17,8 @@ export const DRUM_LABEL = { kick: '底鼓', snare: '军鼓', clap: '拍手', hat
 export const DRUM_PARAMS = { drive: 0.1, delaySend: 0, reverbSend: 0.08, duck: false, pan: 0 };
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+// AudioParam 收到 NaN / Infinity 会直接抛错（走带那一 tick 就断了）：力度不对就用 0.8
+const velOk = v => Number.isFinite(v) ? clamp(v, 0, 1) : 0.8;
 const tanhCurve = (k, n = 1024) => {
   const c = new Float32Array(n), t = Math.tanh(k);
   for (let i = 0; i < n; i++) { const x = i / (n - 1) * 2 - 1; c[i] = Math.tanh(k * x) / t; }
@@ -33,6 +35,8 @@ function noiseBuffer(ctx, sec = 2) {
 // ---- 一个合成音（离线测响度也走这一个函数）----
 // 返回 { release(when) }；dur 给了就自动松开
 export function synthVoice(ctx, dest, p, pitch, vel, when, dur = null, bend = null) {
+  vel = velOk(vel);
+  if (bend && !(Number.isFinite(bend.dt) && Array.isArray(bend.cents) && bend.cents.every(Number.isFinite))) bend = null;
   const f = midiHz(pitch);
   // 力度同时推音量和亮度（真乐器越响越亮）
   const amp = 0.18 + 0.82 * Math.pow(vel, 1.5);
@@ -101,11 +105,18 @@ export function synthVoice(ctx, dest, p, pitch, vel, when, dur = null, bend = nu
     nodes[nodes.length - 1]?.addEventListener?.('ended', () => { try { out.disconnect(); } catch (e) { /* */ } });
   };
   if (dur !== null) release(when + dur);
-  return { release };
+  // cancel：已经排上、但不该再响的音（琶音松键后排在后面的那一步）直接掐掉
+  const cancel = () => {
+    released = true;
+    try { out.gain.cancelScheduledValues(0); out.gain.value = 0; out.disconnect(); } catch (e) { /* 已断 */ }
+    for (const nd of nodes) { try { nd.stop(); } catch (e) { /* 没开始 / 已停 */ } }
+  };
+  return { release, cancel };
 }
 
 // ---- 鼓（全是现算的，没有采样）----
 export function drumHit(ctx, dest, noise, sound, vel, when) {
+  vel = velOk(vel);
   const g = ctx.createGain(); g.connect(dest);
   const a = 0.25 + 0.75 * Math.pow(vel, 1.3);
   const env = (node, peak, dec, t0 = when) => { node.gain.setValueAtTime(0, t0); node.gain.linearRampToValueAtTime(peak, t0 + 0.002); node.gain.setTargetAtTime(0, t0 + 0.002, dec / 4); };
@@ -217,19 +228,24 @@ export class Engine {
   removeLayer(id) { const L = this.layers.get(id); if (L) { try { L.pan.disconnect(); L.duck.disconnect(); } catch (e) { /* */ } this.layers.delete(id); } }
 
   note(layer, pitch, vel, when, dur = null, bend = null) {
+    if (!Number.isFinite(pitch) || !Number.isFinite(when) || (dur !== null && !Number.isFinite(dur))) return { release() {} };
     const L = this.ensureLayer(layer);
     const p = layer.kind === 'voice' ? PRESETS[layer.params.synthPreset || 'sing'].p : layer.params;
     return synthVoice(this.ctx, L.in, p, pitch, vel, when, dur, bend);
   }
-  hit(layer, sound, vel, when) { const L = this.ensureLayer(layer); drumHit(this.ctx, L.in, this.noise, sound, vel, when); }
+  hit(layer, sound, vel, when) { if (!Number.isFinite(when)) return; const L = this.ensureLayer(layer); drumHit(this.ctx, L.in, this.noise, sound, vel, when); }
+  // 返回音源；s.vca = 这一片自己的增益（走带每 tick 用 clipGain 调它：静音 / 独奏 / 场景 / 原声音量立刻生效）
   clip(layer, buffer, when, offset, dur, gain = 1) {
+    if (![when, offset, dur, gain].every(Number.isFinite)) return null;
     const L = this.ensureLayer(layer);
     const s = this.ctx.createBufferSource(); s.buffer = buffer;
     const g = this.ctx.createGain(); g.gain.value = gain;
     s.connect(g); g.connect(L.in);
     s.start(Math.max(when, this.now), Math.max(0, offset), Math.max(0.001, dur));
+    s.vca = g;
     return s;
   }
+  clipGain(src, v) { if (src && src.vca && Number.isFinite(v)) src.vca.gain.setTargetAtTime(v, this.now, 0.012); }
   click(when, accent) {
     const c = this.ctx, o = c.createOscillator(), g = c.createGain();
     o.type = 'square'; o.frequency.value = accent ? 1760 : 1180;
@@ -238,7 +254,8 @@ export class Engine {
   }
   // 侧链：底鼓一响，被闪避的层压下去再弹回来
   duck(when, depth) {
-    if (depth <= 0.001) return;
+    if (!(depth > 0.001) || !Number.isFinite(when)) return;
+    depth = Math.min(1, depth);
     for (const L of this.layers.values()) {
       if (!L.ducked) continue;
       L.duck.gain.cancelScheduledValues(when);
@@ -247,8 +264,9 @@ export class Engine {
     }
   }
   // 旋钮（已经过「张力当父级」换算的有效值，0–1；pole_g 可到 1.1）
-  setMacros(m) {
-    const t = this.now;
+  setMacros(m0) {
+    const t = this.now, m = {};
+    for (const [k, v] of Object.entries(m0 || {})) if (Number.isFinite(v)) m[k] = v;     // 曲线里混进 NaN 也不让它进 AudioParam
     if (m.cutoff !== undefined) { const f = 60 * Math.pow(2, m.cutoff * 8.4); this.mf1.frequency.setTargetAtTime(f, t, 0.02); this.mf2.frequency.setTargetAtTime(f, t, 0.02); }
     if (m.reso !== undefined) this.mf1.Q.setTargetAtTime(0.7 + m.reso * 12, t, 0.02);
     if (m.drive !== undefined && Math.abs(m.drive - this._lastDrive) > 0.01) {

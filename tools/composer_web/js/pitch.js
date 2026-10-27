@@ -44,18 +44,23 @@ export function decimate(pcm, sr, target = 16000) {
 
 // 逐帧特征：时刻 / 响度 dB / 音高 midi（0 = 没音高）/ 非周期度 / 过零率
 export function track(pcm, sr, { hopSec = 0.01, winSec = 0.04, fmin = 65, fmax = 3000 } = {}) {
-  const { x, sr: s2 } = decimate(pcm, sr);
+  const { x: x0, sr: s2 } = decimate(pcm, sr);
   const hop = Math.round(hopSec * s2);
   // YIN 需要窗长 ≥ 2 × 最长周期
   const win = Math.max(Math.round(winSec * s2), 2 * Math.ceil(s2 / fmin) + 4);
+  // YIN 只积分窗的前一半（x[i] − x[i+τ]，i < win/2）→ 音高的时刻 = 前一半的中心 st + win/4，不是整窗中心（晚 10 ms）。
+  // 开头补 win/4 个零：第一帧的时刻 = 0，录音一开头就唱的音和中间的音一样起（不补的话开头的音晚 +15 ms）
+  const pad = win >> 2, x = new Float32Array(x0.length + pad); x.set(x0, pad);
   const frames = [];
   for (let st = 0; st + win <= x.length; st += hop) {
     const fr = x.subarray(st, st + win);
-    let e = 0, zc = 0;
-    for (let i = 0; i < win; i++) { e += fr[i] * fr[i]; if (i && (fr[i] >= 0) !== (fr[i - 1] >= 0)) zc++; }
+    let e = 0, e1 = 0, zc = 0;
+    for (let i = 0; i < win; i++) { if (i === win >> 1) e1 = e; e += fr[i] * fr[i]; if (i && (fr[i] >= 0) !== (fr[i - 1] >= 0)) zc++; }
     const rms = Math.sqrt(e / win), db = 20 * Math.log10(rms + 1e-9);
-    const y = db > -60 ? yin(fr, s2, { fmin, fmax }) : { f0: 0, ap: 1 };
-    frames.push({ t: (st + win / 2) / s2, db, midi: y.f0 > 0 ? hzMidi(y.f0) : 0, ap: y.ap, zcr: zc / win * s2 / 2 });
+    // YIN 积分的前一半也得有声音：起音帧的前一半是静音时，静音里微弱的周期信号会被测成音高（起点早 ~25 ms）
+    const db1 = 20 * Math.log10(Math.sqrt(e1 / (win >> 1)) + 1e-9);
+    const y = db > -60 && db1 > -60 ? yin(fr, s2, { fmin, fmax }) : { f0: 0, ap: 1 };
+    frames.push({ t: (st - pad + (win >> 2)) / s2, db, midi: y.f0 > 0 ? hzMidi(y.f0) : 0, ap: y.ap, zcr: zc / win * s2 / 2 });
   }
   return frames;
 }
@@ -105,6 +110,8 @@ export function tuningOffset(frames) {
     sx += Math.cos(a); sy += Math.sin(a); n++;
   }
   if (!n) return 0;
+  // 滑音 / 颤音多时相位几乎均匀分布（合成长度 R = |Σe^{iφ}|/n 很小）→ 算出来的 ±50 是噪声，不扣
+  if (Math.hypot(sx, sy) / n < 0.5) return 0;
   return Math.atan2(sy, sx) / (2 * Math.PI) * 100;
 }
 
@@ -148,10 +155,12 @@ export function segment(frames, mode = 'hum', { tuneCents = 0 } = {}) {
   const notes = [];
   const corr = f => f.midi - tuneCents / 100;
   const emit = fr => {
-    const dur = fr.length ? fr[fr.length - 1].t - fr[0].t + hop : 0;
+    // 起点 = 第一个浊音帧往前半帧；录音开头之前没有东西 → 不早于 0（终点不动）
+    const t0 = fr.length ? Math.max(0, fr[0].t - hop / 2) : 0;
+    const dur = fr.length ? fr[fr.length - 1].t + hop / 2 - t0 : 0;
     if (dur < P.minNote) return;
     const body = fr.length > scoopN + 3 ? fr.slice(scoopN) : fr;
-    notes.push({ t: fr[0].t - hop / 2, dur, pitchRaw: median(body.map(corr)), db: median(fr.map(f => f.db)), zcr: median(fr.map(f => f.zcr)), curve: fr.map(f => ({ t: f.t, m: corr(f) })) });
+    notes.push({ t: t0, dur, pitchRaw: median(body.map(corr)), db: median(fr.map(f => f.db)), zcr: median(fr.map(f => f.zcr)), curve: fr.map(f => ({ t: f.t, m: corr(f) })) });
   };
   // 同音重唱（嗯、嗯、嗯）：音高不变，响度先掉 reartic dB 再起来 → 在谷底切开
   const minN = Math.max(2, Math.round(P.minNote / hop)), look = Math.round(0.15 / hop);
@@ -165,15 +174,18 @@ export function segment(frames, mode = 'hum', { tuneCents = 0 } = {}) {
     }
     return [fr];
   };
-  let cur = null, gap = 0, gapLoud = 0, dev = 0;
+  // gapAp = 这段空隙里最深的 YIN 谷（f.ap）：真辅音（噪声）≈ 0.8；元音里 YIN 断续的帧只有 0.15–0.35，不算辅音
+  let cur = null, gap = 0, gapLoud = 0, gapAp = 0, dev = 0;
   const close = () => { if (cur) for (const piece of splitReartic(cur)) emit(piece); cur = null; };
   for (let i = 0; i < frames.length; i++) {
     const f = frames[i];
     if (f.voiced) {
-      // 人声：中间隔了一段响的清音（辅音）→ 新音节
-      if (cur && P.consonantSplits && gapLoud >= 2) close();
+      // 人声：中间隔了一段响的清音（辅音）→ 新音节。⚠️要至少一帧明显没周期（ap ≥ 0.4）：
+      // 只数「响」的话元音里的断续也会切，碎片 < minNote 被丢 → 整句没音（真人声实测）；
+      // 也不能每帧都要求 ap ≥ 0.4 —— 20 ms 的短辅音只有一帧那么深，两边的帧窗里混着元音
+      if (cur && P.consonantSplits && gapLoud >= 2 && gapAp >= 0.4) close();
       if (!cur) { cur = []; dev = 0; }
-      gap = 0; gapLoud = 0;
+      gap = 0; gapLoud = 0; gapAp = 0;
       if (cur.length > scoopN + 2) {
         // 参考音高 = 进音以后、最近 0.2 s 的中值；持续偏到同一侧才算换音（颤音一来一回不会）
         const ref = median(cur.slice(Math.max(scoopN, cur.length - 20)).map(corr));
@@ -188,9 +200,9 @@ export function segment(frames, mode = 'hum', { tuneCents = 0 } = {}) {
       cur.push(f);
     } else if (cur) {
       gap++;
-      if (f.loud) gapLoud++;
+      if (f.loud) { gapLoud++; gapAp = Math.max(gapAp, f.ap); }
       const bridging = P.consonantSplits && f.loud && gap < 12;   // 辅音不算断，等下一个元音
-      if (gap > gapN && !bridging) { close(); gap = 0; gapLoud = 0; }
+      if (gap > gapN && !bridging) { close(); gap = 0; gapLoud = 0; gapAp = 0; }
     }
   }
   close();
