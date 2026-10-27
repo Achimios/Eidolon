@@ -137,7 +137,8 @@ export function drumHit(ctx, dest, noise, sound, vel, when) {
 }
 
 export class Engine {
-  constructor() {
+  // silent：整条链照常跑（时序、录音、示波器、电平都能测），只是扬声器那一级增益 = 0。自动测试一律用 ?silent=1（👤：测试别放音乐）
+  constructor({ silent = false } = {}) {
     this.ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
     const c = this.ctx;
     this.noise = noiseBuffer(c);
@@ -150,7 +151,9 @@ export class Engine {
     this.limiter.threshold.value = -8; this.limiter.knee.value = 4; this.limiter.ratio.value = 14; this.limiter.attack.value = 0.002; this.limiter.release.value = 0.12;
     this.out = c.createGain(); this.out.gain.value = 0.9;
     this.sum.connect(this.mf1); this.mf1.connect(this.mf2); this.mf2.connect(this.mshape); this.mshape.connect(this.makeup);
-    this.makeup.connect(this.limiter); this.limiter.connect(this.out); this.out.connect(c.destination);
+    this.speaker = c.createGain(); this.speaker.gain.value = silent ? 0 : 1; this.speaker.connect(c.destination);
+    this.silent = silent;
+    this.makeup.connect(this.limiter); this.limiter.connect(this.out); this.out.connect(this.speaker);
     // 示波器：左 = x，右 = y（同合成器词表）
     const sp = c.createChannelSplitter(2);
     this.scopeL = c.createAnalyser(); this.scopeR = c.createAnalyser();

@@ -133,7 +133,7 @@ async function calibrate() {
   if (!(await micOn())) return;
   status('校准中：保持安静。用哪副耳机哼唱，就把那副耳机贴着麦克风来校准（蓝牙耳机比扬声器多 150–250 ms）…', true);
   const t0 = E.now + 0.3, clicks = [];
-  for (let k = 0; k < 6; k++) { const t = t0 + k * 0.5; clicks.push(t); const o = E.ctx.createOscillator(), g = E.ctx.createGain(); o.frequency.value = 2000; g.gain.setValueAtTime(0.6, t); g.gain.setTargetAtTime(0, t + 0.004, 0.004); o.connect(g); g.connect(E.ctx.destination); o.start(t); o.stop(t + 0.05); }
+  for (let k = 0; k < 6; k++) { const t = t0 + k * 0.5; clicks.push(t); const o = E.ctx.createOscillator(), g = E.ctx.createGain(); o.frequency.value = 2000; g.gain.setValueAtTime(0.6, t); g.gain.setTargetAtTime(0, t + 0.004, 0.004); o.connect(g); g.connect(E.speaker); o.start(t); o.stop(t + 0.05); }
   await new Promise(r => setTimeout(r, 3800));
   const x = micExtract(t0 - 0.05, t0 + 3.2), sr = mic.sr;
   let mx = 0; for (const v of x) mx = Math.max(mx, Math.abs(v));
@@ -1033,7 +1033,7 @@ function frame() {
 }
 
 async function boot() {
-  E = new Engine();
+  E = new Engine({ silent: new URLSearchParams(location.search).has('silent') });
   await E.ctx.resume();
   T = new Transport(E, () => S, {
     events, clips: clipsForPlay, buffer: id => audio.get(id)?.buffer,
@@ -1075,6 +1075,7 @@ async function boot() {
   window.addEventListener('blur', () => { for (const code of [...held.keys()]) noteUp({ code }); });
   syncAll();
   if (restoredNote && server) status(restoredNote);
+  if (E.silent) { status('静音模式（网址带 ?silent）：一切照常运行，只是不从扬声器出声', true); document.title = '作曲器（静音）'; }
   requestAnimationFrame(frame);
   window.__composer = { get S() { return S; }, E, T, TL, audio, exportTruth: () => exportTruth(S), validate: () => validateTruth(exportTruth(S)), processHumBuffer: (pcm, sr, b0) => injectHum(pcm, sr, b0) };
 }
