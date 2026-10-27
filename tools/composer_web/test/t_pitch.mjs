@@ -151,5 +151,24 @@ t('同音音节 + 短辅音（20 / 30 / 60 ms 噪声）：人声模式照样一�
   assert.deepEqual(pitches(r3.segs), [64, 67, 71, 69, 67]);
 });
 
+t('预读：早唱 40 ms 的强拍放在这一遍开头、整音不缺头，early ≈ 40 ms；上一遍的尾巴丢掉；拖过来的长音不算抢拍', () => {
+  // voiceLike 前面有 0.15 s 静音：把「这一遍」的开头放在 0.19 s，强拍就早了 40 ms
+  const x = voiceLike([{ midi: 64, dur: 0.5 }, { midi: 67, dur: 0.4 }], 48000);
+  const an = Pi.analyzeHum(x, 48000, { mode: 'hum' });
+  const segs = Pi.trimPreroll(an.segs, 0.19);
+  assert.deepEqual(segs.map(s => Math.round(s.pitchRaw)), [64, 67]);
+  assert.equal(segs[0].t, 0);
+  assert.ok(Math.abs(segs[0].early - 0.04) <= 0.012, `early ${segs[0].early}`);
+  assert.ok(Math.abs(segs[0].dur - 0.46) <= 0.02, `dur ${segs[0].dur}`);
+  assert.equal(segs[1].early, undefined);
+  for (const s of segs) for (const c of s.curve) assert.ok(c.t >= 0);
+  // 构造：上一遍的尾巴（预读里就结束了）、拖过来的长音（从预读开头就在响）
+  const mk = (t, dur) => ({ t, dur, pitchRaw: 60, db: -20, zcr: 100, curve: [{ t, m: 60 }, { t: t + dur - 0.01, m: 60 }] });
+  const out = Pi.trimPreroll([mk(0.0, 0.1), mk(0.0, 0.5)], 0.15);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].early, undefined);
+  assert.ok(Math.abs(out[0].dur - 0.35) < 1e-9);
+});
+
 console.log(`${n - failed}/${n} 通过`);
 if (failed) process.exit(1);

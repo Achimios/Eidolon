@@ -4,7 +4,7 @@ import { Engine, PRESETS, DRUM_SOUNDS, DRUM_LABEL } from './engine.js';
 import { Transport, heardCtxTime } from './transport.js';
 import { Timeline } from './timeline.js';
 import { MACROS, MACRO_BY_ID, effectiveMacros, curveAt, curveWrite, makeState, makeLayer, uid, spb, loopRange, songBeats, layerById, exportTruth, exportSession, validateTruth } from './state.js';
-import { analyzeHum, notesToBeats, yin, decimate, MODE_PARAMS } from './pitch.js';
+import { analyzeHum, notesToBeats, trimPreroll, yin, decimate, MODE_PARAMS } from './pitch.js';
 import { makeVariants, TIMBRE_VARIANTS, holdVelocity, tapPitch, detectOnsets, grooveFromOnsets, meanOffset, quantize, cloneNotes } from './interp.js';
 
 const $ = id => document.getElementById(id);
@@ -71,7 +71,23 @@ function restore(str) {
 // 和现在一模一样的撤销点跳过（空的一遍、重复推的）：每按一次都真的变
 function undo() { const cur = serial(); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
 function redo() { const cur = serial(); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
-function autosave() { try { localStorage.setItem(AUTOSAVE, serial({ ...S, clips: [] })); } catch (e) { /* 满了 / 不可用 */ } }
+// 自动存档只有一个格子：两个标签页都开着作曲器会互相盖掉 → 后开的那个停写并提示；存不进去（满了 / 被禁用）提示一次
+const tabLock = { off: false, warned: false, id: Math.random().toString(36).slice(2) };
+function autosave() {
+  if (tabLock.off) return;
+  try { localStorage.setItem(AUTOSAVE, serial({ ...S, clips: [] })); }
+  catch (e) { if (!tabLock.warned) { tabLock.warned = true; status('⚠️浏览器存不了自动存档（满了 / 被禁用）：记得常按保存（Ctrl+S）', true); } }
+}
+function watchOtherTabs() {
+  const BC = window.BroadcastChannel; if (!BC) return;
+  const ch = new BC('composer_web');
+  ch.onmessage = ev => {
+    const m = ev.data || {}; if (m.id === tabLock.id) return;
+    if (m.type === 'hello') { ch.postMessage({ type: 'here', id: tabLock.id }); status('另一个窗口也打开了作曲器：那边的自动存档停了，这边照常', true); }
+    if (m.type === 'here' && !tabLock.off) { tabLock.off = true; status('⚠️另一个窗口在用作曲器：这个窗口的自动存档停了（免得互相盖掉）。这边的东西记得手动保存', true); }
+  };
+  ch.postMessage({ type: 'hello', id: tabLock.id });
+}
 setInterval(autosave, 4000);
 // 播放中改了速度：从已经排到的那一拍按新速度重新起（不回跳；已经排进去的音不再排一遍）
 const playFront = () => (T && T.playing ? T.nextB : null);
@@ -234,6 +250,7 @@ function analyzeAsync(pcm, sr, opts) {
 
 // ---------- 哼唱录音（开循环：每一遍循环 = 一条 take；关循环：从开始录到停 = 一条，最长 10 分钟）----------
 const HUM_MAX_SEC = 600;
+const HUM_PREROLL = 0.15;  // 秒：每一遍往前多读这么多，只给分析看第一个音的起音（早唱的强拍不再少了头）
 // pending = 排了还没分析完的遍数；waiting = 还没从麦克风缓冲里取样本的那几遍；pickFor = 停了以后等它们都完了再开「挑哪一遍」
 const hum = { active: false, pass: null, takeNo: 0, sessionTakes: [], pending: 0, waiting: [], pickFor: null, afterPick: null };
 // 录音锁在开始录的那一层（中途选别的层不影响这一遍存到哪）
@@ -280,13 +297,16 @@ function maybePick() {
 // sess = 这次录音的那几遍（toggleRec 换新的；晚到的旧遍不会混进新一次录音）
 // partial = 停在一遍中间的残段：同一位置已经有整遍时它不当默认（不顶掉整遍，挑的时候也不默认选它）
 async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen = sessionGen, partial = false) {
-  const pcm = micExtract(t0, t1), sr = mic.sr;
+  // 往前多读 HUM_PREROLL：只给分析看起音（存的 wav 和片段照旧从这一遍开头起）
+  const sr = mic.sr, preN = Math.round(HUM_PREROLL * sr);
+  const full = micExtract(t0 - preN / sr, t1), pcm = full.slice(preN);
   if (gen !== sessionGen) return;
   let peak = 0; for (const v of pcm) peak = Math.max(peak, Math.abs(v));
   const L0 = layerById(S, layerId); if (!L0) return;
   const opts = { mode: L0.params.mode, snap: L0.params.snap }, takeNo = ++hum.takeNo;
-  const an = await analyzeAsync(pcm, sr, opts);
+  const an = await analyzeAsync(full, sr, opts);       // full 会被转给后台线程（之后不能再读）；pcm 是另一份
   if (gen !== sessionGen) return;                       // 等分析的时候打开了别的会话
+  const segs = trimPreroll(an.segs, preN / sr);
   const L = layerById(S, layerId); if (!L) { status(`第 ${takeNo} 遍没存：哼唱层不见了（删了 / 撤销了？）`); return; }
   snapshot();
   const buf = E.ctx.createBuffer(1, pcm.length || 1, sr); buf.copyToChannel(pcm, 0);
@@ -297,8 +317,13 @@ async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen 
   else for (const c of S.clips) if (sameTakeSlot(c, clip)) c.active = false;
   clip.analysis = { mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1), stats: an.guess.stats, peak: +peak.toFixed(3) };
   S.clips.push(clip);
-  const notes = notesToBeats(an.segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
-  for (const n of notes) S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: clip.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
+  const notes = notesToBeats(segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
+  notes.forEach((n, i) => {
+    const raw = { b: n.b, d: n.d, ...n.raw };
+    // 抢拍唱的强拍：放在这一遍开头，raw 记真起音（早了多少）
+    if (segs[i].early) { raw.t = -segs[i].early; raw.b = b0 - segs[i].early / spb(S); raw.early_ms = Math.round(segs[i].early * 1000); }
+    S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: clip.id, ...n, raw });
+  });
   sess.push(clip.id);
   const tn = Math.abs(an.tuneCents) >= 8 ? `，整体${an.tuneCents > 0 ? '偏高' : '偏低'} ${Math.abs(an.tuneCents).toFixed(0)} 音分（吸附前已扣掉）` : '';
   status(`第 ${takeNo} 遍：${MODE_PARAMS[an.mode]?.label ?? an.mode}（${an.guess.why}）· ${notes.length} 个音${tn}${peak < 0.02 ? ' · ⚠️几乎没声音，麦克风选对了吗？' : ''}${peak > 0.98 ? ' · ⚠️削波了，离麦远一点' : ''}`, true);
@@ -1483,6 +1508,7 @@ async function boot() {
   syncAll();
   if (restoredNote && server) status(restoredNote);
   if (E.silent) { status('静音模式（网址带 ?silent）：一切照常运行，只是不从扬声器出声', true); document.title = '作曲器（静音）'; }
+  try { watchOtherTabs(); } catch (e) { /* 没有 BroadcastChannel 就算了 */ }
   requestAnimationFrame(frame);
   window.__composer = { get S() { return S; }, E, T, TL, audio, exportTruth: () => exportTruth(S), validate: () => validateTruth(exportTruth(S)), processHumBuffer: (pcm, sr, b0) => injectHum(pcm, sr, b0) };
 }

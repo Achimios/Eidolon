@@ -237,6 +237,22 @@ export function notesToBeats(segs, { t0Beat, spb, key, prog, beatsPerBar = 4, sn
   });
 }
 
+// 每一遍往前多读 pre 秒（预读）：只用来看清第一个音的起音（早唱一点点的强拍不再少了头）。
+// segs 的时刻相对预读开头 → 换成相对这一遍开头：预读里就结束了的（上一遍的尾巴）丢掉；跨过开头的从 0 开始，
+// early = 它比这一遍开头早了多少秒（早到预读开头还在响的，是上一遍拖过来的长音，不算抢拍、不标 early）
+export function trimPreroll(segs, pre) {
+  const out = [];
+  for (const s of segs) {
+    const t = s.t - pre, end = t + s.dur;
+    if (end <= 0.02) continue;
+    const curve = s.curve.filter(c => c.t >= pre - 1e-9).map(c => ({ ...c, t: c.t - pre }));
+    if (t >= 0) { out.push({ ...s, t, curve }); continue; }
+    const carried = -t >= pre - 0.02;
+    out.push({ ...s, t: 0, dur: end, curve: curve.length ? curve : s.curve.slice(-1).map(c => ({ ...c, t: 0 })), ...(carried ? {} : { early: +(-t).toFixed(4) }) });
+  }
+  return out;
+}
+
 // 一条哼唱的完整分析
 // 音高上限 3 kHz：口哨常在 1–2.5 kHz。⚠️不能先按人声范围测再看「测不出就放宽」——纯音的周期 2τ 处也是零，
 // 上限太低时 YIN 会稳稳地测成低一个八度，而不是测不出（合成口哨 C7 实测）。人声的高八度误判靠 cleanPitch 折回
