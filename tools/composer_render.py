@@ -230,7 +230,7 @@ class Macros:
 def audible(J, layer, t):
     """层在 t 进不进成片：mute + 场景（= 页面 state.js 的 inMixAt）。
     音符 / 打击不用它：页面导出时已算好每个事件的 audible 字段，直接读（逻辑只有一份，在页面）。
-    这里只剩两处用：clips（一段录音可能跨场景，页面不导出逐段结果）和没有 audible 字段的旧导出（v1.2 及以前，会打日志）。"""
+    clips 同理读 audible_spans。这里只给没有这些字段的旧导出（v1.2 及以前）现算，会打日志。"""
     if layer.get("mute"):
         return False
     cur = None
@@ -326,8 +326,17 @@ def render(J, work_dir, master=True, log=print):
         gain = float(db2a(L["params"].get("rawGainDb", 0))) if L["kind"] == "voice" else 1.0
         if gain < 0.01:
             continue
-        for a, z in zip(scene_cuts(J, c["t"], c["t"] + c["dur"])[:-1], scene_cuts(J, c["t"], c["t"] + c["dur"])[1:]):
-            if not audible(J, L, a + 1e-6):
+        if "audible_spans" in c:                               # 页面导出的真值（按场景 + mute 切好、相邻已合并）
+            spans = c["audible_spans"]
+        else:
+            if not old_export:
+                old_export.append(1)
+                log("⚠ 旧导出：clips 没有 audible_spans，按 mute + 场景现算")
+            cuts = scene_cuts(J, c["t"], c["t"] + c["dur"])
+            spans = [(a, z) for a, z in zip(cuts[:-1], cuts[1:]) if audible(J, L, a + 1e-6)]
+        for a, z in spans:
+            a, z = max(a, c["t"]), min(z, c["t"] + c["dur"])
+            if z <= a:
                 continue
             i0 = int((a - c["t"] + off) * SR)
             put(L["id"], x[i0:i0 + int((z - a) * SR)] * gain, a)

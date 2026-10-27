@@ -96,6 +96,16 @@ class TestComposerRender(unittest.TestCase):
         self.assertLess(float(np.abs(stems["贝斯"]).max()), 1e-6)
         self.assertGreater(float(np.abs(stems["鼓"]).max()), 0.01)
 
+    def test_reads_clip_spans(self):
+        # clips.audible_spans 是真值：只渲 span 里那一段（录音 1.0–1.5 s，只放 1.2–1.3）
+        J = dict(self.J)
+        J["notes"] = [dict(n, audible=(n["layer"] != "voice")) for n in self.J["notes"]]
+        J["clips"] = [dict(c, audible_spans=[[1.2, 1.3]]) for c in self.J["clips"]]
+        _, stems, _ = cr.render(J, self.work, master=True, log=lambda s: None)
+        v = np.abs(stems["哼唱"]).max(1)
+        self.assertLess(float(v[int(1.05 * cr.SR):int(1.18 * cr.SR)].max()), 1e-6)
+        self.assertGreater(float(v[int(1.22 * cr.SR):int(1.28 * cr.SR)].max()), 0.01)
+
     def test_deterministic(self):
         mix2, _, _ = cr.render(self.J, self.work, master=True, log=lambda s: None)
         self.assertTrue(np.allclose(self.mix, mix2))
