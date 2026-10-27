@@ -228,6 +228,9 @@ class Macros:
 
 # ====================================================================== 场景
 def audible(J, layer, t):
+    """层在 t 进不进成片：mute + 场景（= 页面 state.js 的 inMixAt）。
+    音符 / 打击不用它：页面导出时已算好每个事件的 audible 字段，直接读（逻辑只有一份，在页面）。
+    这里只剩两处用：clips（一段录音可能跨场景，页面不导出逐段结果）和没有 audible 字段的旧导出（v1.2 及以前，会打日志）。"""
     if layer.get("mute"):
         return False
     cur = None
@@ -275,10 +278,19 @@ def render(J, work_dir, master=True, log=print):
         m = min(len(sig), n - i)
         bus[lid][i + a:i + m] += sig[a:m]
 
+    def heard(ev, L):
+        if "audible" in ev:
+            return bool(ev["audible"])
+        if not old_export:
+            old_export.append(1)
+            log("⚠ 旧导出：notes / hits 没有 audible 字段，按 mute + 场景现算（页面 v1.3 起导出这个字段）")
+        return audible(J, L, ev["t"])
+
+    old_export = []
     # 音符
     for k, nt in enumerate(J.get("notes") or []):
         L = layers.get(nt["layer"])
-        if not L or not audible(J, L, nt["t"]):
+        if not L or not heard(nt, L):
             continue
         if L["kind"] == "synth":
             p = {**PRESETS.get(L.get("preset"), PRESETS["lead"]), **L["params"]}
@@ -293,7 +305,7 @@ def render(J, work_dir, master=True, log=print):
     kicks = []
     for k, h in enumerate(J.get("hits") or []):
         L = layers.get(h["layer"])
-        if not L or not audible(J, L, h["t"]):
+        if not L or not heard(h, L):
             continue
         put(L["id"], drum(h["sound"], h.get("vel", 0.8), seed=k), h["t"])
         if h["sound"] == "kick":

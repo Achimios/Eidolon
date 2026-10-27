@@ -61,7 +61,7 @@ Dune 预告片 → Billie MV；Ash Thorp 式纯 2D motion design（PCB 素材，
 - ✅👤选 A → **Remix 示波器 demo v4**（ReadScreen 过审、已 Cortana 告诉 👤）：`Projekt_Visual/MV_Cant_Kill_Us/样片/Remix_示波器/demo_Remix示波器_25.95-57.98_v4.mp4` + A/B `AB_原曲同段_同LUFS_v4.wav`，分镜 / 改动 `分镜_v4.md`。工具 `tools/remix_cku.py audio|board|render --ver`；径向饱和反馈环 `synthkit.feedback_delay_sat_xy`。**等 👤耳朵判好不好听。**
 - 输入方式定了（作曲器 §四½：锁调电脑键盘 / 哼唱 / 拍 / XY 推子 / 挑变体，HTML）→ 👤另开会话「HTML composer」在做。
 - 待办（不开工、不推给👤）：她的 SDF 切片 → x / y / z 三路音频 → 三维投影，第四路接四维切片（理念 §九）。
-- 📌给 Fable（2026-10-27，它离线没转到）：HTML composer 的 `作曲.json` 的 notes / hits 新增 `"audible"`（按 mute + 场景算，独奏不参与）→ `tools/composer_render.py` 改成直接读它，删掉自己的 audibleAt 判断。新层会自动加入已有场景。
+- ✅（2026-10-28 已改：notes / hits 读 audible；clips 跨场景仍按 mute + 场景逐段算，旧导出没字段时现算并打日志）给 Fable（2026-10-27，它离线没转到）：HTML composer 的 `作曲.json` 的 notes / hits 新增 `"audible"`（按 mute + 场景算，独奏不参与）→ `tools/composer_render.py` 改成直接读它，删掉自己的 audibleAt 判断。新层会自动加入已有场景。
 - ⭐👤2026-10-27 放慢：一次只递给👤一件要看的东西，他回了再递下一件。现在排第一 = Remix demo v4；词表 v3、作曲器草案已审过，排队。
 
 ## 🌙 2026-10-24 深夜：Fable 三条 MV（另一个会话「Music video project」做，我交叉审）

@@ -87,6 +87,15 @@ class TestComposerRender(unittest.TestCase):
         v = self.stems["哼唱"]
         self.assertGreater(float(np.abs(v[int(1.05 * cr.SR):int(1.4 * cr.SR)]).max()), 0.01)
 
+    def test_reads_audible_field(self):
+        # 页面导出的 audible 是真值：标成 False 的音不渲，哪怕场景里有这一层
+        J = dict(self.J)
+        J["notes"] = [dict(n, audible=(n["layer"] != "bass")) for n in self.J["notes"]]
+        J["hits"] = [dict(h, audible=True) for h in self.J["hits"]]
+        _, stems, _ = cr.render(J, self.work, master=True, log=lambda s: None)
+        self.assertLess(float(np.abs(stems["贝斯"]).max()), 1e-6)
+        self.assertGreater(float(np.abs(stems["鼓"]).max()), 0.01)
+
     def test_deterministic(self):
         mix2, _, _ = cr.render(self.J, self.work, master=True, log=lambda s: None)
         self.assertTrue(np.allclose(self.mix, mix2))
