@@ -158,7 +158,7 @@ export function segment(frames, mode = 'hum', { tuneCents = 0 } = {}) {
     // 起点 = 第一个浊音帧往前半帧；录音开头之前没有东西 → 不早于 0（终点不动）
     const t0 = fr.length ? Math.max(0, fr[0].t - hop / 2) : 0;
     const dur = fr.length ? fr[fr.length - 1].t + hop / 2 - t0 : 0;
-    if (dur < P.minNote) return;
+    if (dur < P.minNote - 1e-6) return;          // 浮点：正好 minNote 长的（帧数 × 帧距算出来差 1e-16）也算
     const body = fr.length > scoopN + 3 ? fr.slice(scoopN) : fr;
     notes.push({ t: t0, dur, pitchRaw: median(body.map(corr)), db: median(fr.map(f => f.db)), zcr: median(fr.map(f => f.zcr)), curve: fr.map(f => ({ t: f.t, m: corr(f) })) });
   };

@@ -46,21 +46,32 @@ const mod = (a, n) => ((a % n) + n) % n;
 // 解释用的上下文；loop = 录音时的循环区（吸附落到循环尾巴上 / 之后的绕回循环头，见 interp.js）
 const curLoop = () => (S.loop.on ? loopRange(S) : null);
 const ctxObj = (loop = curLoop()) => ({ key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, tensionAt: b => curveAt(S.curves.tension, b, 0.5), groove, loop });
-function snapshot() { undoStack.push(JSON.stringify(S)); if (undoStack.length > 150) undoStack.shift(); redoStack = []; }
+// 状态写成字符串（撤销点 / 自动存档）：音色变体还在试听时写试听之前的音色（没挑的不算数）
+function serial(obj = S) {
+  const L = variants?.kind === 'timbre' ? layerById(S, variants.layer) : null;
+  if (!L) return JSON.stringify(obj);
+  const p = L.params; L.params = variants.orig;
+  try { return JSON.stringify(obj); } finally { L.params = p; }
+}
+function snapshot() { undoStack.push(serial()); if (undoStack.length > 150) undoStack.shift(); redoStack = []; }
 // 一遍循环结束的撤销点：和栈顶一样就不推（不然 Ctrl+Z 要按两下才动一次）
-function pushUndo() { const s = JSON.stringify(S); if (undoStack[undoStack.length - 1] === s) return; undoStack.push(s); if (undoStack.length > 150) undoStack.shift(); }
-// 撤销 / 重做：变体面板一律关掉（试听中的音色先还原）；播放中速度变了 → 从排到的那一拍按新速度接着走
+function pushUndo() { const s = serial(); if (undoStack[undoStack.length - 1] === s) return; undoStack.push(s); if (undoStack.length > 150) undoStack.shift(); }
+// 撤销 / 重做：变体面板一律关掉（试听中的音色先还原）；播放中速度变了 → 从排到的那一拍按新速度接着走。
+// 不随撤销走的：作品（存到哪个文件夹）、麦克风延迟（量的是设备）；录音中的循环区（录音锁着它）
 function restore(str) {
   closeVariants();
   const cur = S, front = playFront();
   S = JSON.parse(str); S.sel = layerById(S, cur.sel) ? cur.sel : S.layers[0]?.id;
+  S.work = cur.work; S._sense = cur._sense;
+  S.settings.latencyMs = cur.settings.latencyMs; S.settings.latencyCal = cur.settings.latencyCal;
+  if (rec.on) S.loop = { ...cur.loop };
   tempoChanged(cur.bpm, front);
   syncAll();
 }
 // 和现在一模一样的撤销点跳过（空的一遍、重复推的）：每按一次都真的变
-function undo() { const cur = JSON.stringify(S); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
-function redo() { const cur = JSON.stringify(S); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
-function autosave() { try { localStorage.setItem(AUTOSAVE, JSON.stringify({ ...S, clips: [] })); } catch (e) { /* 满了 / 不可用 */ } }
+function undo() { const cur = serial(); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
+function redo() { const cur = serial(); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
+function autosave() { try { localStorage.setItem(AUTOSAVE, serial({ ...S, clips: [] })); } catch (e) { /* 满了 / 不可用 */ } }
 setInterval(autosave, 4000);
 // 播放中改了速度：从已经排到的那一拍按新速度重新起（不回跳；已经排进去的音不再排一遍）
 const playFront = () => (T && T.playing ? T.nextB : null);
@@ -250,10 +261,11 @@ function humPassEnd(ctxEnd, partial = false) {
   if (bEnd - p.b0 < S.beatsPerBar * 0.5) return;
   const t0 = p.ctx0 + lat, t1 = p.ctx0 + (bEnd - p.b0) * spb(S) + lat;
   // 等麦克风的数据到齐（再晚 lat + 0.15 s）；取样本之前缓冲不裁（见 micOn），分析完之前不开挑选面板（见 maybePick）
-  const job = { t0 }, sess = hum.sessionTakes;
+  const job = { t0 }, sess = hum.sessionTakes, gen = sessionGen;   // 会话号在这一遍结束时就定下（之后再「打开…」，这一遍不进新会话）
+  const isPartial = partial && bEnd < p.b1 - 1e-6;
   hum.waiting.push(job); hum.pending++;
   setTimeout(() => {
-    const pr = processHumTake(L.id, p.b0, t0, t1, sess);      // 取样本是同步的；分析在后台线程
+    const pr = processHumTake(L.id, p.b0, t0, t1, sess, gen, isPartial);      // 取样本是同步的；分析在后台线程
     hum.waiting = hum.waiting.filter(w => w !== job);
     pr.catch(e => status('这一遍分析失败：' + e.message)).finally(() => { hum.pending--; maybePick(); });
   }, (lat + 0.2) * 1000 + Math.max(0, (t1 - E.now) * 1000));
@@ -266,8 +278,10 @@ function maybePick() {
   if (hum.afterPick) { status(hum.afterPick, true); hum.afterPick = null; }
 }
 // sess = 这次录音的那几遍（toggleRec 换新的；晚到的旧遍不会混进新一次录音）
-async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes) {
-  const pcm = micExtract(t0, t1), sr = mic.sr, gen = sessionGen;
+// partial = 停在一遍中间的残段：同一位置已经有整遍时它不当默认（不顶掉整遍，挑的时候也不默认选它）
+async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen = sessionGen, partial = false) {
+  const pcm = micExtract(t0, t1), sr = mic.sr;
+  if (gen !== sessionGen) return;
   let peak = 0; for (const v of pcm) peak = Math.max(peak, Math.abs(v));
   const L0 = layerById(S, layerId); if (!L0) return;
   const opts = { mode: L0.params.mode, snap: L0.params.snap }, takeNo = ++hum.takeNo;
@@ -277,8 +291,10 @@ async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes) {
   snapshot();
   const buf = E.ctx.createBuffer(1, pcm.length || 1, sr); buf.copyToChannel(pcm, 0);
   const aid = addAudio(buf, { pcm });
-  const clip = { id: uid('C'), layer: layerId, b: b0, dur: pcm.length / sr, audio: aid, input: 'hum', take: takeNo, active: true, src: 'mic' };
-  for (const c of S.clips) if (sameTakeSlot(c, clip)) c.active = false;
+  const clip = { id: uid('C'), layer: layerId, b: b0, dur: pcm.length / sr, audio: aid, input: 'hum', take: takeNo, active: true, src: 'mic', ...(partial ? { partial: true } : {}) };
+  const keepFull = partial && S.clips.some(c => sameTakeSlot(c, clip) && c.active && !c.partial);
+  if (keepFull) clip.active = false;
+  else for (const c of S.clips) if (sameTakeSlot(c, clip)) c.active = false;
   clip.analysis = { mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1), stats: an.guess.stats, peak: +peak.toFixed(3) };
   S.clips.push(clip);
   const notes = notesToBeats(an.segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
@@ -305,6 +321,7 @@ function playedBeat(ev) {
 // 录到的拍放到哪（真按下的那一拍留在 raw）：
 // 开循环 = 对循环长度取模放进 [循环头, 循环尾)（抢拍落在循环尾巴上，听起来就在下一遍的头前面；吸附时再绕回循环头），
 // 预备拍里早于循环头半拍以上的不算；关循环 = 早于开始录的那一拍半拍以上的不算（预备拍里随手按的），不早于第 0 拍
+const ANTICIPATE = 0.2;    // 拍：循环头前这么近（150 BPM 约 80 ms，比最后一个 1/16 近）按下并按住过循环头的，算循环头那一拍（见 noteUp）
 function placeRecBeat(b) {
   if (S.loop.on) {
     const [ls, le] = loopRange(S);
@@ -361,13 +378,20 @@ function noteUp(ev) {
   const when = E.now;
   h.voice?.release(when);
   if (h.arp) return arpRelease(h, ev);
+  recordHeld(h, ev);
+}
+// 把一个按完的音记进这次录音（松键时；停录音那一刻还按着的也走这里，见 stopRec）
+function recordHeld(h, ev) {
   // 只记这一次录音里按下的、录音那一层的
-  if (!rec.on || h.recId !== rec.pass || h.b === null || !T.playing) return;
+  if (!rec.on || h.recId !== rec.pass || h.b === null) return;
   const L = layerById(S, h.layer); if (!L || L.id !== rec.layer) return;
-  const b = placeRecBeat(h.b); if (b === null) return;
+  let b = placeRecBeat(h.b); if (b === null) return;
   const holdSec = Math.max(0, ctxTimeOfEvent(ev) - h.t);
   const dRaw = Math.max(0.05, holdSec / spb(S));
-  const le = S.loop.on ? loopRange(S)[1] : Infinity;
+  const [ls, le] = S.loop.on ? loopRange(S) : [0, Infinity];
+  // 抢拍（音符；鼓是一下一下的不算）：循环头前 0.2 拍以内按下、而且按住过了循环头 = 想弹的就是循环头那一拍 → 放在循环头、时长照按住的
+  // （不然会被截成循环尾巴上一个 10 ms 的「咔」）。只是轻轻点一下的（没按过循环头）还留在尾巴上。raw 照记真时刻
+  if (S.loop.on && !h.sound && le - b < ANTICIPATE && dRaw > le - b) b = ls;
   const d = Math.min(dRaw, le - b);                  // 拖过循环尾巴的截在循环尾巴（不拆成两个音）；raw 留真按住的时长
   const vel = S.settings.velMode === 'hold' ? holdVelocity(holdSec) : h.vel;
   const input = L.input === 'tap' ? 'tap' : 'keyboard';
@@ -464,6 +488,9 @@ async function toggleRec() {
   }
 }
 function stopRec() {
+  // 停的那一刻还按着的键：按到现在为止记下（声音照响，松键时不再记第二次）
+  const nowEv = { timeStamp: performance.now() };
+  for (const h of held.values()) if (!h.arp && h.recId === rec.pass) { recordHeld(h, nowEv); h.recId = null; }
   rec.on = false; clearTimeout(rec.autoStop); rec.autoStop = null;
   $('rec').classList.remove('rec-on');
   const wasHum = hum.active;
@@ -485,6 +512,7 @@ const LOOP_LOCKED = '录音中不能挪循环区（这一遍会对不上）：�
 // ---------- 变体 ----------
 // loop = 录音时的循环区：吸附到循环尾巴上的绕回循环头（再来一组也用同一个）
 function openNoteVariants(layerId, ids, reroll = 0, loop = curLoop()) {
+  if (variants?.kind === 'timbre') closeVariants();             // 试听中的音色先还原（新面板不能把它顶成「挑中了」）
   const L = layerById(S, layerId); if (!L) return;
   const idSet = new Set(ids);
   const src = S.notes.filter(n => idSet.has(n.id));
@@ -498,18 +526,22 @@ function openNoteVariants(layerId, ids, reroll = 0, loop = curLoop()) {
   else if (off.consistent) status(`你这一段平均${off.offset < 0 ? '提前' : '拖后'} ${Math.abs(off.offset * spb(S) * 1000).toFixed(0)} ms（很稳，多半是延迟）：吸附的变体里已经扣掉`, true);
 }
 function openTakeVariants(layerId) {
+  if (variants?.kind === 'timbre') closeVariants();
   const takes = hum.sessionTakes.map(id => S.clips.find(c => c.id === id)).filter(Boolean);
   if (!takes.length) return;
   if (takes.length === 1) return openHumInterp(layerId, takes[0]);
   const last = takes.slice(-4);
+  // 默认 = 现在激活的那一遍（停在一遍中间的残段不顶掉整遍，也不默认选它）
+  const act = last.findIndex(c => c.active), def = act >= 0 ? act : last.length - 1;
   variants = {
-    kind: 'takes', layer: layerId, takeIds: last.map(c => c.id), removeIds: new Set(), idx: last.length - 1, playIdx: last.length - 1,
-    options: last.map(c => ({ label: `第 ${c.take} 遍`, desc: `${MODE_PARAMS[c.analysis?.mode]?.label ?? '?'} · ${S.notes.filter(n => n.take === c.id).length} 个音`, clipId: c.id, notes: null })),
+    kind: 'takes', layer: layerId, takeIds: last.map(c => c.id), removeIds: new Set(), idx: def, playIdx: def,
+    options: last.map(c => ({ label: `第 ${c.take} 遍${c.partial ? '（没唱完）' : ''}`, desc: `${MODE_PARAMS[c.analysis?.mode]?.label ?? '?'} · ${S.notes.filter(n => n.take === c.id).length} 个音`, clipId: c.id, notes: null })),
   };
   renderVariants();
 }
 // 一条哼唱的几种解释：不吸附 / 吸到调 / 吸到调 + 节拍 60% / 100%
 function openHumInterp(layerId, clip, loop = curLoop()) {
+  if (variants?.kind === 'timbre') closeVariants();
   const src = S.notes.filter(n => n.take === clip.id);
   if (!src.length) { status('这一遍没认出音符（太轻？太短？）'); return; }
   const mk = (label, desc, f) => ({ label, desc, notes: f(cloneNotes(src)) });
@@ -532,6 +564,7 @@ function openHumInterp(layerId, clip, loop = curLoop()) {
 }
 function openTimbreVariants() {
   const L = sel(); if (!L || L.kind !== 'synth') return status('音色变体只给合成层');
+  if (variants) closeVariants();                                  // 上一个面板（含试听中的音色）先还原
   variants = { kind: 'timbre', layer: L.id, removeIds: new Set(), idx: 0, orig: { ...L.params }, options: [{ label: '原样', desc: '现在的音色', params: { ...L.params } }, ...TIMBRE_VARIANTS.slice(0, 4).map(v => ({ label: v.label, desc: v.desc, params: v.patch({ ...L.params }) }))] };
   renderVariants();
 }
@@ -557,14 +590,16 @@ function commitVariant(action) {
   if (!L) { closeVariants(false); return status('这一层已经不在了，变体关掉了'); }
   if (v.kind === 'takes' && !S.clips.some(c => c.id === o.clipId)) { closeVariants(false); return status('这一遍已经撤销了，变体关掉了'); }
   if (v.kind === 'notes' && v.removeIds.size && ![...v.removeIds].some(id => S.notes.some(n => n.id === id))) { closeVariants(false); return status('这些音已经撤销了，变体关掉了'); }
-  // 音色：撤销点要是试听之前的音色（试听改的是 L.params）
+  // 叠成新层只对音符变体有意义；挑哪一遍 / 音色按「用这个」处理
+  if (action === 'overlay' && v.kind !== 'notes') { action = 'replace'; status('这种变体不能叠成新层，按「用这个」处理'); }
+  // 音色：撤销点要是试听之前的音色（试听改的是 L.params）；用这个 = 试听时的音色 + 试听时拧过的旋钮
+  const chosen = v.kind === 'timbre' ? { ...L.params } : null;
   if (v.kind === 'timbre') L.params = { ...v.orig };
   snapshot();
   const [ls] = loopRange(S);
   S.picks.push({ at: new Date().toISOString(), t: +(S.anchor + ls * spb(S)).toFixed(3), layer: v.layer, kind: v.kind, options: v.options.map(x => x.label), chose: o.label, action, input: 'pick' });
   if (v.kind === 'timbre') {
-    if (action === 'discard') L.params = { ...v.orig };
-    else L.params = { ...o.params };
+    L.params = action === 'discard' ? { ...v.orig } : chosen;
     E.updateLayer(L, true);
   } else if (v.kind === 'takes') {
     // 同一层同一起点的哼唱只留挑中的这一遍（晚到的那遍也算在里面）
@@ -912,11 +947,13 @@ function jumpScene(i) {
 
 // ---------- 时间线编辑：删 / 复制 / 粘贴 ----------
 function deleteSel() {
+  // 删音以后开着的变体面板就过期了（它会把删掉的音加回来）→ 关掉
+  if ((TL.sel.size || TL.range) && variants && variants.kind !== 'timbre') closeVariants(false);
   if (TL.sel.size) { snapshot(); S.notes = S.notes.filter(n => !TL.sel.has(n.id)); TL.sel.clear(); status('删了'); return syncAll(); }
   if (TL.range) {
     snapshot(); const [a, z] = TL.range;
-    // 只删看得见的（没在用的那几遍哼唱的音不动，换回那一遍时它还在）
-    const act = new Set(S.clips.filter(c => c.active).map(c => c.id));
+    // 只删看得见的（没在用的那几遍哼唱的音不动，换回那一遍时它还在；挑哪一遍试听时按正在试听的那一遍算）
+    const act = new Set(clipsNow().filter(c => c.active).map(c => c.id));
     S.notes = S.notes.filter(n => n.b < a || n.b >= z || (n.take && !act.has(n.take)));
     for (const k of Object.keys(S.curves)) S.curves[k] = S.curves[k].filter(p => p[0] < a || p[0] > z);
     status(`删了第 ${(a / S.beatsPerBar + 1).toFixed(2)}–${(z / S.beatsPerBar + 1).toFixed(2)} 小节里的音符和曲线（录音 / 分轨的声音不动）`); syncAll();
@@ -1015,7 +1052,7 @@ async function reloadStems() {
   const stems = S.clips.filter(c => c.input === 'stem' && c.src && c.src.includes('@'));
   if (!stems.length) return;
   if (!server) return status('⚠️起点 / 速度变了，但没连上 serve.py：分轨没重新切，和格子对不上了', true);
-  const t0 = S.anchor, t1 = S.anchor + songBeats(S) * spb(S), want = `${S.work}|${t0}|${t1}`, gen = sessionGen;
+  const t0 = S.anchor, t1 = S.anchor + songBeats(S) * spb(S), want = `${S.work}|${t0}|${t1}`, gen = sessionGen, S0 = S;
   stemWant = want;
   const got = [];
   for (const c of stems) {
@@ -1026,6 +1063,8 @@ async function reloadStems() {
     } catch (e) { return status(`⚠️分轨 ${nm} 没重新切成（${e.message}）：分轨和格子对不上了，改回原来的起点或重新「载入原曲分轨」`, true); }
   }
   if (gen !== sessionGen || stemWant !== want) return;      // 等的时候又改了 / 换了会话：以最后那次为准
+  // 等的时候撤销 / 重做了（S 换了一个）：起点 / 速度可能已经回去了 → 按现在的状态再切一次，不把旧的切片贴上去
+  if (S !== S0) { if (`${S.work}|${S.anchor}|${S.anchor + songBeats(S) * spb(S)}` !== want) reloadStems(); return; }
   const msgs = [];
   for (const g of got) {
     const c = S.clips.find(x => x.id === g.id); if (!c) continue;
@@ -1087,6 +1126,10 @@ const audioChannels = a => a.pcm ? [a.pcm] : Array.from({ length: a.buffer.numbe
 // b64 = 第 1 个声道（旧的 serve.py 只认它）；extra_channels = 第 2 个起的声道，serve.py 叠成多声道 wav
 function wavPayload(name, a) { const ch = audioChannels(a); return { name, sr: a.sr, b64: f32ToB64(ch[0]), ...(ch.length > 1 ? { extra_channels: ch.slice(1).map(f32ToB64) } : {}) }; }
 async function save() {
+  // 刚停的哼唱还在分析（最后一遍还没进来）→ 等它，最多 8 秒；音色还在试听 → 先还原（没挑的不存）
+  for (let i = 0; i < 80 && hum.pending > 0; i++) { if (!i) status('最后一遍哼唱还在分析，等它进来再存…', true); await new Promise(r => setTimeout(r, 100)); }
+  if (hum.pending > 0) return status('最后一遍哼唱还没分析完，没存：过一会儿再按保存');
+  if (variants?.kind === 'timbre') { closeVariants(); status('音色变体还在试听：先还原了再存（要用它请先按 Enter）', true); }
   const errs = validateTruth(exportTruth(S));
   if (errs.length) { status('自检没过，没存：' + errs.join('；')); return; }
   if (!server) return downloadAll();
@@ -1179,7 +1222,9 @@ function moveAudioToWork() {
 }
 async function loadSession(name) {
   $('sessBox').classList.add('hidden');
-  if ((hasUnsavedAudio() || hum.pending) && !confirm('有还没存的录音：打开别的会话会把它们丢掉（撤销也找不回来）。\n确定 = 丢掉、打开；取消 = 先回去存（Ctrl+S）')) return;
+  const unsavedEdits = (S.notes.length || S.clips.length) && !(lastSaved && lastSaved.snap === serial());
+  if ((hasUnsavedAudio() || hum.pending || unsavedEdits) && !confirm('有还没存的录音 / 改动：打开别的会话会把它们丢掉（撤销也找不回来）。\n确定 = 丢掉、打开；取消 = 先回去存（Ctrl+S）')) return;
+  const keep = { latencyMs: S.settings.latencyMs, latencyCal: S.settings.latencyCal };   // 麦克风延迟量的是这台设备，不跟会话走
   try {
     const j = await (await api(`/api/file?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(name)}`)).json();
     T.stop(true); abortRec(); closeVariants();
@@ -1205,7 +1250,15 @@ async function loadSession(name) {
       } catch (e) { status(`有一条音频没读到：${fn || c.src}`); }
     }
     hum.takeNo = Math.max(hum.takeNo, ...S.clips.map(c => c.take || 0));
-    status(`打开了 ${name}（撤销记录从这里重新开始）`); syncAll();
+    Object.assign(S.settings, keep);
+    // 旧版存的会话循环区可能跑到歌外面：拉回歌里
+    S.loop.bars = Math.max(1, Math.min(S.loop.bars, S.songBars)); S.loop.start = Math.max(0, Math.min(S.loop.start, S.songBars - S.loop.bars));
+    await loadSense();                         // 原曲重拍 / 速度的缓存（会话里不存，见 exportSession）
+    syncAll();
+    // 打开的这一版就是存好的那一版：马上「定稿」不用再存一份
+    const m = /^(作曲_v\d+)_会话\.json$/.exec(name);
+    lastSaved = m ? { truth: `${m[1]}.json`, snap: serial() } : null;
+    status(`打开了 ${name}（撤销记录从这里重新开始）`);
   } catch (e) { status('打开失败：' + e.message); }
 }
 
@@ -1237,7 +1290,10 @@ function bindHeader() {
   const setBpm = bpm => { const front = playFront(), old = S.bpm; S.bpm = bpm; retimeHum(old); tempoChanged(old, front); return old !== S.bpm; };
   $('bpm').onchange = () => {
     if (rec.on) { $('bpm').value = S.bpm; return status('录音中不能改速度：先按 ` 停'); }
+    // 开着的变体面板是按旧速度算的（哼唱的拍位）→ 先关掉，免得 Enter 把音放回旧的拍上
+    closeVariants();
     snapshot(); const ch = setBpm(Math.max(40, Math.min(240, +$('bpm').value || 120))); syncAll(); if (ch) reloadStems();
+    const w = checkGridDrift(); if (w) status(w, true);
   };
   $('root').onchange = () => { snapshot(); S.key.root = +$('root').value; syncAll(); };
   $('mode').onchange = () => { snapshot(); S.key.mode = $('mode').value; syncAll(); };
@@ -1258,7 +1314,7 @@ function bindHeader() {
   $('anchorSel').onchange = () => {
     const v = $('anchorSel').value; if (v === '') return;
     if (rec.on && S._sense?.bpm && S._sense.bpm !== S.bpm) { $('anchorSel').value = ''; return status('录音中不能改速度：先按 ` 停'); }
-    snapshot(); S.anchor = +v; if (S._sense?.bpm) setBpm(S._sense.bpm); syncAll();
+    closeVariants(); snapshot(); S.anchor = +v; if (S._sense?.bpm) setBpm(S._sense.bpm); syncAll();
     status([`起点 = ${(+v).toFixed(2)} s（第 1 小节对齐原曲这个重拍）`, checkGridDrift()].filter(Boolean).join('\n'), true);
     reloadStems();
   };
@@ -1271,7 +1327,8 @@ function bindHeader() {
     S.work = nw; lastSaved = null; await loadSense(); refreshFinal(); status(`作品：${S.work}${warn ? '\n' + warn : ''}`, !!warn);
   };
   $('play').onclick = togglePlay; $('rec').onclick = toggleRec;
-  $('loopOn').onclick = () => { if (rec.on) return status(LOOP_LOCKED); S.loop.on = !S.loop.on; syncHeader(); };
+  // 播放中开关循环：从排到的那一拍按新的循环状态重新接（不然还在跑旧的循环段，关了循环也会在旧循环尾绕回去）
+  $('loopOn').onclick = () => { if (rec.on) return status(LOOP_LOCKED); S.loop.on = !S.loop.on; const f = playFront(); if (f !== null) T.start(f); syncHeader(); };
   $('metro').onclick = () => { S.settings.metro = !S.settings.metro; syncHeader(); };
   $('countIn').onclick = () => { S.settings.countIn = !S.settings.countIn; syncHeader(); };
   $('undo').onclick = undo; $('redo').onclick = redo; $('save').onclick = save; $('load').onclick = openSessions; $('final').onclick = finalize;
@@ -1281,7 +1338,7 @@ function bindHeader() {
   $('tapPat').onchange = () => { S.settings.tapPattern = $('tapPat').value; };
   $('tParent').onchange = () => { S.settings.tensionParent = $('tParent').checked; };
   $('snapEdit').onchange = () => { S.settings.snapEdit = +$('snapEdit').value; };
-  $('inputSeg').onclick = ev => { const v = ev.target.dataset.v; if (!v || ev.target.disabled) return; sel().input = v; renderKeys(); };
+  $('inputSeg').onclick = ev => { const v = ev.target.dataset.v; if (!v || ev.target.disabled) return; if (rec.on) return status('录音中不能换输入方式：先按 ` 停'); sel().input = v; renderKeys(); };
   $('addLayer').onchange = () => {
     const [kind, preset] = $('addLayer').value.split(':'); $('addLayer').value = '';
     if (!kind) return;
@@ -1316,7 +1373,9 @@ function togglePlay() {
 function onKeyDown(ev) {
   const tag = ev.target.tagName;
   // 输入框里：Esc 退出；数字框 / 单行框里按 Enter = 确定（触发 change）并把焦点还给页面
-  if ((tag === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.code === 'Escape' || (ev.code === 'Enter' && tag === 'INPUT')) ev.target.blur(); return; }
+  // 下拉框：点开又没改也会留着焦点 → 字母 / 数字 / 空格会偷偷改掉调、调式、作品。只留方向键 / Tab / Enter / Esc 给它，其余还给页面
+  if (tag === 'SELECT' && !['Tab', 'ArrowUp', 'ArrowDown', 'Enter', 'NumpadEnter', 'Escape'].includes(ev.code) && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { ev.preventDefault(); ev.target.blur(); }
+  else if ((tag === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.code === 'Escape' || (ev.code === 'Enter' && tag === 'INPUT')) ev.target.blur(); return; }
   if (!E) return;
   const ctrl = ev.ctrlKey || ev.metaKey;
   if (ctrl) {
@@ -1333,6 +1392,7 @@ function onKeyDown(ev) {
   if (ev.code === 'Backquote' || ev.key === '`' || ev.key === '·') { ev.preventDefault(); if (!ev.repeat) toggleRec(); return; }
   if (ev.code === 'Tab') {
     ev.preventDefault(); const L = sel();
+    if (rec.on) return status('录音中不能换输入方式（哼唱 / 键盘 / 拍）：先按 ` 停');
     const order = L.kind === 'voice' ? ['hum', 'keyboard', 'tap'] : L.kind === 'synth' ? ['keyboard', 'tap'] : [L.input];
     L.input = order[(order.indexOf(L.input) + 1) % order.length]; renderKeys(); status(`输入方式：${{ keyboard: '键盘', tap: '拍', hum: '哼唱' }[L.input]}`); return;
   }
