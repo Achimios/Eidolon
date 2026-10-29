@@ -5,6 +5,7 @@ import { Transport, heardCtxTime } from './transport.js';
 import { Timeline } from './timeline.js';
 import { MACROS, MACRO_BY_ID, effectiveMacros, curveAt, curveWrite, makeState, makeLayer, uid, spb, loopRange, songBeats, layerById, exportTruth, exportSession, validateTruth, clipOpen } from './state.js';
 import { analyzeHum, notesToBeats, trimPreroll, yin, decimate, MODE_PARAMS } from './pitch.js';
+import { paintKeycaps } from './keycaps.js';
 import { makeVariants, TIMBRE_VARIANTS, holdVelocity, tapPitch, detectOnsets, grooveFromOnsets, meanOffset, quantize, cloneNotes } from './interp.js';
 
 const $ = id => document.getElementById(id);
@@ -1495,7 +1496,13 @@ function bindHeader() {
   $('metro').onclick = () => { S.settings.metro = !S.settings.metro; syncHeader(); };
   $('countIn').onclick = () => { S.settings.countIn = !S.settings.countIn; syncHeader(); };
   $('undo').onclick = undo; $('redo').onclick = redo; $('save').onclick = save; $('load').onclick = openSessions; $('final').onclick = finalize;
-  $('help').onclick = () => $('helpBox').classList.remove('hidden'); $('helpClose').onclick = () => $('helpBox').classList.add('hidden');
+  paintKeycaps();
+  $('help').onclick = () => toggleHelp(true); $('helpClose').onclick = () => toggleHelp(false);
+  $('helpBox').onclick = ev => { if (ev.target === $('helpBox')) toggleHelp(false); };
+  for (const b of $('helpTabs').children) b.onclick = () => {
+    for (const x of $('helpTabs').children) x.classList.toggle('on', x === b);
+    for (const g of document.querySelectorAll('#helpBox .helpgrid')) g.classList.toggle('hidden', g.dataset.p !== b.dataset.p);
+  };
   $('sessClose').onclick = () => $('sessBox').classList.add('hidden');
   $('velMode').onchange = () => { S.settings.velMode = $('velMode').value; };
   $('tapPat').onchange = () => { S.settings.tapPattern = $('tapPat').value; };
@@ -1532,12 +1539,20 @@ function togglePlay() {
 }
 
 // ---------- 全局键盘 ----------
+// 键位页（F1 / 「? 键位」）：照 Synapsis 快捷页，彩色键帽 + 分组卡片
+let helpOpen = false;
+function toggleHelp(on = !helpOpen) {
+  helpOpen = on; $('helpBox').classList.toggle('hidden', !on);
+}
+
 function onKeyDown(ev) {
   const tag = ev.target.tagName;
   // 输入框里：Esc 退出；数字框 / 单行框里按 Enter = 确定（触发 change）并把焦点还给页面
   // 下拉框：点开又没改也会留着焦点 → 字母 / 数字 / 空格会偷偷改掉调、调式、作品。只留方向键 / Tab / Enter / Esc 给它，其余还给页面
   if (tag === 'SELECT' && !['Tab', 'ArrowUp', 'ArrowDown', 'Enter', 'NumpadEnter', 'Escape'].includes(ev.code) && !ev.ctrlKey && !ev.metaKey && !ev.altKey) { ev.preventDefault(); ev.target.blur(); }
   else if ((tag === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox') || tag === 'TEXTAREA' || tag === 'SELECT') { if (ev.code === 'Escape' || (ev.code === 'Enter' && tag === 'INPUT')) ev.target.blur(); return; }
+  if (ev.code === 'F1') { ev.preventDefault(); return toggleHelp(); }
+  if (helpOpen) { if (ev.code === 'Escape') toggleHelp(false); return; } // 看键位时不弹音
   if (!E) return;
   const ctrl = ev.ctrlKey || ev.metaKey;
   if (ctrl) {

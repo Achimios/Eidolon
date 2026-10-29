@@ -113,7 +113,7 @@ function makeWorkerClass(w) {
 }
 
 // ---------- 一个世界 = 一份全新的 main.js ----------
-const MODS = { theory: Th, engine: { ...En, Engine: FakeEngine }, transport: Tr, timeline: { Timeline: FakeTimeline }, state: St, pitch: Pi, interp: In };
+const MODS = { theory: Th, engine: { ...En, Engine: FakeEngine }, transport: Tr, timeline: { Timeline: FakeTimeline }, state: St, pitch: Pi, interp: In, keycaps: { paintKeycaps() {} } };
 // 没有的名字给 undefined（拿旧版 main.js 跑同一个场景做对照时用：opts.src = 旧源码）
 const NAMES = ['mic', 'hum', 'rec', 'held', 'xy', 'audio',
   'boot', 'frame', 'onKeyDown', 'noteDown', 'noteUp', 'arpTick', 'toggleRec', 'stopRec', 'processHumTake', 'analyzeAsync', 'openTakeVariants', 'openNoteVariants', 'openHumInterp',

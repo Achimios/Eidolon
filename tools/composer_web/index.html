@@ -28,7 +28,7 @@
     <button id="countIn" class="on" title="录音前先数一小节">预备拍</button>
     <button id="undo" title="Ctrl+Z">撤销</button><button id="redo" title="Ctrl+Shift+Z">重做</button>
     <button id="save" class="accent">保存</button><button id="final" title="把存好的这一版定为下游（感受器、剪辑、画面）读的那一版">定稿</button><span id="finalInfo" class="dim"></span><button id="load">打开…</button>
-    <button id="help">? 键位</button>
+    <button id="help" title="F1">? 键位</button>
   </div>
 </header>
 
@@ -57,11 +57,11 @@
       <div id="kbOpts">
         <label>力度 <select id="velMode"><option value="flat">等力度</option><option value="shift">Shift = 重音</option><option value="hold">按住时长</option></select></label>
         <label id="tapPatWrap">拍的音高 <select id="tapPat"><option value="position">跟着键的左右</option><option value="arp">上行琶音</option><option value="root">根音</option><option value="random">随机和弦音</option></select></label>
-        <span class="dim">↑↓ 八度 · Tab 换输入方式 · 原始演奏一律原样记下，吸附在「变体」里挑</span>
+        <span class="dim"><span class="kx">↑ / ↓</span> 八度 · <span class="kx">Tab</span> 换输入方式 · 原样记下，录完再挑</span>
       </div>
 
       <div id="variants" class="hidden">
-        <div class="hd">挑一个 <span class="dim" id="varHint">←→ 试听 · Enter 用这个 · Shift+Enter 叠成新层 · Esc 放弃</span>
+        <div class="hd">挑一个 <span class="dim" id="varHint"><span class="kx">← / →</span> 试听 · <span class="kx">Enter</span> 用 · <span class="kx">Shift+Enter</span> 叠成新层 · <span class="kx">Esc</span> 放弃</span>
           <button id="reroll">再来一组</button><button id="timbreVar">音色变体</button></div>
         <div id="varCards"></div>
       </div>
@@ -95,7 +95,7 @@
     <button id="fitSong">全曲</button><button id="fitLoop">循环区</button>
     <label>编辑吸附 <select id="snapEdit"><option value="1">1 拍</option><option value="0.5">1/8</option><option value="0.25" selected>1/16</option><option value="0.125">1/32</option><option value="0">自由</option></select></label>
     <button id="copy" title="Ctrl+C">复制</button><button id="paste" title="Ctrl+V：贴到光标">粘贴</button><button id="dup" title="Ctrl+D">复制一份到后面</button><button id="del" title="Delete">删除</button>
-    <span class="dim">拖音符 = 移（上下 = 调内走级，Alt = 不吸附）· 空白处拖 = 框选 · 双击空白 = 加音 · 标尺上条拖 = 循环区 · 下条拖 = 选一段、单击 / 拖小三角 = 播放头 · 拖录音的头条 = 挪 · 录音文件拖到哼唱层 = 识别 · 曲线道直接画（右键拖 = 擦）· 滚轮 上下 · Alt+滚轮 左右 · Ctrl+滚轮 缩放（以播放头为中心）· 拖层的底边 = 改高度</span>
+    <span class="dim tlhint"><span class="kx">Alt+滚轮</span> 左右 · <span class="kx">Ctrl+滚轮</span> 缩放 · <span class="kx">双击</span> 加音 · 鼠标全部操作见 <span class="kx">F1</span></span>
     <span class="lanes" id="laneChecks"></span>
   </div>
   <div id="tlWrap"><canvas id="tl"></canvas></div>
@@ -105,23 +105,86 @@
 </section>
 
 <div id="helpBox" class="hidden"><div>
-  <h2>键位</h2>
-  <table>
-    <tr><td>A S D F G H J K L ; '</td><td>当前调式的音阶（本八度），按哪个都不会错音</td></tr>
-    <tr><td>Q W E R T Y U I O P [ ]</td><td>同一列高一个八度</td></tr>
-    <tr><td>Z X C V B N M , . /</td><td>同一列低一个八度（给贝斯）</td></tr>
-    <tr><td>鼓层</td><td>A 底鼓 · S 军鼓 · D 拍手 · F 闭镲 · G 开镲 · H 边击 · J 通鼓 · K 冲击（Q 排同样、更重）</td></tr>
-    <tr><td>拍</td><td>任意字母键 = 一下；音高自动填当前和弦的音（默认：越靠右越高）</td></tr>
-    <tr><td>空格 / `</td><td>播放 · 停 / 录音开关（循环不停，叠录）</td></tr>
-    <tr><td>1–9 / Shift+1–9</td><td>选层 / 跳到场景</td></tr>
-    <tr><td>↑ ↓ / Tab</td><td>八度 / 换输入方式（键盘 → 拍 → 哼唱）</td></tr>
-    <tr><td>← → Enter Esc</td><td>变体：试听 / 用这个（Shift+Enter 叠成新层）/ 放弃</td></tr>
-    <tr><td>- =</td><td>循环区往前 / 往后挪</td></tr>
-    <tr><td>0</td><td>节拍器</td></tr>
-    <tr><td>Ctrl+Z / C / V / D, Delete</td><td>撤销 / 复制 / 粘贴到光标 / 复制一份到后面 / 删除</td></tr>
-  </table>
-  <p class="dim">原始演奏（时刻、音高、按住时长）永远原样记进真值的 raw；吸附、力度规则都是「解释」，在变体里挑，可撤。页面里的声音只是预览，最终音质由 Python 读 作曲.json 渲染。</p>
-  <button id="helpClose">关</button>
+  <div class="helphd"><span class="seg" id="helpTabs"><button data-p="keys" class="on">键位</button><button data-p="usage">第一次怎么玩</button></span><span class="dim"><span class="kx">F1</span> 开关 · <span class="kx">Esc</span> 关</span><button id="helpClose">关</button></div>
+  <div class="helpgrid" data-p="keys">
+    <section style="--hue:#4dff7c"><h4>播放 · 录音</h4><table>
+      <tr><td><span class="kx">Space</span></td><td>放 / 停（从播放头）</td></tr>
+      <tr><td><span class="kx">`</span></td><td>录 / 停（1 左边那个；循环不停，叠录）</td></tr>
+      <tr><td><span class="kx">- / =</span></td><td>循环区往前 / 往后</td></tr>
+      <tr><td><span class="kx">0</span></td><td>节拍器</td></tr>
+    </table></section>
+    <section style="--hue:#3d8bff"><h4>弹（锁调，不会错音）</h4><table>
+      <tr><td><span class="kx">A S D F … L</span></td><td>本八度（一排都是调内音）</td></tr>
+      <tr><td><span class="kx">Q W E R … O</span></td><td>同一列高八度</td></tr>
+      <tr><td><span class="kx">Z X C V … M</span></td><td>同一列低八度（贝斯）</td></tr>
+      <tr><td><span class="kx">↑ / ↓</span></td><td>八度</td></tr>
+      <tr><td><span class="kx">Tab</span></td><td>键盘 → 拍 → 哼唱</td></tr>
+      <tr><td><span class="kx">Shift+A</span></td><td>重音（力度选「Shift = 重音」时）</td></tr>
+    </table></section>
+    <section style="--hue:#e0b020"><h4>鼓层</h4><table>
+      <tr><td><span class="kx">A S D F</span></td><td>底鼓 · 军鼓 · 拍手 · 闭镲</td></tr>
+      <tr><td><span class="kx">G H J K</span></td><td>开镲 · 边击 · 通鼓 · 冲击</td></tr>
+      <tr><td><span class="kx">Q W E R</span></td><td>同一列，更重</td></tr>
+    </table></section>
+    <section style="--hue:#ff8a4c"><h4>挑一个（录完弹出）</h4><table>
+      <tr><td><span class="kx">← / →</span></td><td>试听</td></tr>
+      <tr><td><span class="kx">Enter</span></td><td>用这个</td></tr>
+      <tr><td><span class="kx">Shift+Enter</span></td><td>叠成新层</td></tr>
+      <tr><td><span class="kx">Esc</span></td><td>放弃</td></tr>
+    </table></section>
+    <section style="--hue:#a070e8"><h4>层 · 场景</h4><table>
+      <tr><td><span class="kx">1 – 9</span></td><td>选层</td></tr>
+      <tr><td><span class="kx">Shift+1 – 9</span></td><td>跳到场景</td></tr>
+    </table></section>
+    <section style="--hue:#2bb3c0"><h4>编辑</h4><table>
+      <tr><td><span class="kx">Ctrl+Z</span></td><td>撤销</td></tr>
+      <tr><td><span class="kx">Ctrl+Shift+Z</span></td><td>重做</td></tr>
+      <tr><td><span class="kx">Ctrl+C / Ctrl+V</span></td><td>复制 / 贴到播放头</td></tr>
+      <tr><td><span class="kx">Ctrl+D</span></td><td>复制一份到后面</td></tr>
+      <tr><td><span class="kx">Delete</span></td><td>删选中的</td></tr>
+      <tr><td><span class="kx">Esc</span></td><td>取消选择</td></tr>
+      <tr><td><span class="kx">Ctrl+S</span></td><td>保存（新版本，不覆盖）</td></tr>
+    </table></section>
+    <section style="--hue:#e0483a"><h4>时间线（鼠标）</h4><table>
+      <tr><td><span class="kx">滚轮</span></td><td>上下滚</td></tr>
+      <tr><td><span class="kx">Alt+滚轮</span></td><td>左右滚</td></tr>
+      <tr><td><span class="kx">Ctrl+滚轮</span></td><td>缩放（以播放头为中心）</td></tr>
+      <tr><td><span class="kx">拖音符</span></td><td>移；上下 = 调内走一级</td></tr>
+      <tr><td><span class="kx">Alt+拖</span></td><td>不吸格子</td></tr>
+      <tr><td><span class="kx">拖空白</span></td><td>框选</td></tr>
+      <tr><td><span class="kx">双击空白</span></td><td>加一个音</td></tr>
+      <tr><td><span class="kx">拖标尺上条</span></td><td>循环区</td></tr>
+      <tr><td><span class="kx">单击标尺下条 / 拖▲</span></td><td>播放头（放着 = 从那接着放）</td></tr>
+      <tr><td><span class="kx">拖录音头条</span></td><td>挪这段录音（音跟着走）</td></tr>
+      <tr><td><span class="kx">拖层底边</span></td><td>改这一层的高度</td></tr>
+      <tr><td><span class="kx">右键拖</span></td><td>曲线道里擦</td></tr>
+    </table></section>
+    <section style="--hue:#d6e6da"><h4>拖文件进来</h4><table>
+      <tr><td><span class="kx">拖到哼唱层</span></td><td>识别成音符，落在哪拍放哪</td></tr>
+      <tr><td><span class="kx">拖到别处</span></td><td>新的一层伴奏</td></tr>
+    </table></section>
+  </div>
+  <div class="helpgrid usage hidden" data-p="usage">
+    <section style="--hue:#4dff7c"><h4>先找手感（不录）</h4><ol>
+      <li>按 <span class="kx">Space</span> 播放，循环一直转</li>
+      <li>在 <span class="kx">A S D F</span> 那排乱按：锁了调，不会错音</li>
+      <li><span class="kx">↑ / ↓</span> 换八度，左边换层（贝斯、铺底……）</li>
+    </ol></section>
+    <section style="--hue:#ff8a4c"><h4>录一段</h4><ol>
+      <li>按 <span class="kx">`</span>：先数一小节，然后边转边叠</li>
+      <li>再按 <span class="kx">`</span> 停 → 弹出 4 个版本</li>
+      <li><span class="kx">← / →</span> 听，<span class="kx">Enter</span> 用，不满意 <span class="kx">Ctrl+Z</span></li>
+    </ol></section>
+    <section style="--hue:#3d8bff"><h4>哼唱</h4><ol>
+      <li>戴耳机；第一次先「校准延迟」</li>
+      <li>选「哼唱」层，开麦，按 <span class="kx">`</span> 录</li>
+      <li>或者：把一段干净的单人声 wav 拖到哼唱层上</li>
+    </ol></section>
+    <section style="--hue:#a070e8"><h4>存</h4><ol>
+      <li><span class="kx">Ctrl+S</span>：存成新版本，从不覆盖</li>
+      <li>觉得这一版可以了 →「定稿」</li>
+    </ol></section>
+  </div>
 </div></div>
 <div id="sessBox" class="hidden"><div><h2>打开会话</h2><div id="sessList"></div><button id="sessClose">关</button></div></div>
 <input type="file" id="fileIn" accept="audio/*" class="hidden">

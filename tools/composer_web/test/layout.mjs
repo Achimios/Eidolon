@@ -3,6 +3,7 @@
 // 真正的像素检查（1440×900 键盘和时间线同屏、1100×800 XY 不放大）要在浏览器里量，这里只守住规则别被改丢（C39 / C42）。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { keycapHTML } from '../js/keycaps.js';
 
 const here = new URL('..', import.meta.url);
 const html = readFileSync(new URL('index.html', here), 'utf8');
@@ -54,6 +55,18 @@ t('窄 / 矮屏退回整页滚，但画布照样封顶', () => {
   assert.match(q, /body\s*\{[^}]*height:\s*auto[^}]*overflow:\s*visible/);
   assert.match(q, /#xy\s*\{[^}]*max-width:\s*280px/);
   assert.match(q, /#right\s*\{[^}]*container-type:\s*normal/);
+});
+t('键帽（照 Synapsis）：修饰键各有颜色、鼠标动作是虚线框、「/」是「或」；键位页的每个键都能画', () => {
+  const h = keycapHTML('Ctrl+Shift+Z');
+  assert.match(h, /class="k ctrl">Ctrl<[\s\S]*class="k shift">Shift<[\s\S]*class="k ">Z</);
+  assert.match(keycapHTML('Alt+滚轮'), /class="k alt">Alt<[\s\S]*class="k mouse">滚轮</);
+  assert.match(keycapHTML('← / →'), /class="k arrow">←<\/kbd><span class="ksp"><\/span><span class="kor">\/<\/span>/);
+  assert.match(keycapHTML('Space'), /class="k space"/); assert.match(keycapHTML('Tab'), /class="k tab"/);
+  assert.match(keycapHTML('A S D F … L'), /<span class="kop">…<\/span>/);
+  assert.match(keycapHTML('<b>'), /&lt;b&gt;/);
+  const kx = [...html.matchAll(/class="kx">([^<]+)</g)];
+  assert.ok(kx.length > 40, `键位页只找到 ${kx.length} 个键`);
+  for (const css of ['.kcombo .k.ctrl', '.kcombo .k.shift', '.kcombo .k.alt', '.kcombo .k.tab', '.kcombo .k.space']) assert.ok(top.includes(css), `缺 ${css}`);
 });
 
 console.log(`${n - failed}/${n} 通过`);

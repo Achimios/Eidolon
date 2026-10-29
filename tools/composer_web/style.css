@@ -132,8 +132,28 @@ main { --side: clamp(240px, 21vw, 300px); flex: 1 1 0; min-height: 32vh; display
 #gate > div, #helpBox > div, #sessBox > div { background: var(--panel); border: 1px solid var(--line2); border-radius: 8px; padding: 22px 26px; max-width: min(760px, calc(100vw - 24px)); max-height: calc(100vh - 24px); overflow-y: auto; }
 #gate h1 small { font-size: 14px; color: var(--dim); font-weight: 400; margin-left: 8px; }
 #gate button { font-size: 16px; padding: 6px 22px; margin-top: 8px; }
-#helpBox td { padding: 3px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
-#helpBox td:first-child { font-family: Consolas, monospace; color: var(--g); white-space: nowrap; }
+/* 键位页：照 Synapsis 快捷页（两列瀑布，每组一张带色卡片） */
+#helpBox > div { max-width: min(980px, calc(100vw - 24px)); padding: 14px 18px 16px; }
+.helphd { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.helphd #helpClose { margin-left: auto; }
+.helpgrid { columns: 2; column-gap: 14px; }
+.helpgrid section { break-inside: avoid; margin-bottom: 12px; background: color-mix(in srgb, var(--hue) 7%, var(--panel)); border: 1px solid color-mix(in srgb, var(--hue) 22%, var(--line)); border-radius: 6px; padding: 4px 10px 8px; }
+.helpgrid h4 { margin: 4px 0 6px; font-size: 14px; color: color-mix(in srgb, var(--hue) 60%, var(--ink)); }
+.helpgrid table { border-collapse: collapse; width: 100%; }
+.helpgrid td { padding: 3px 4px; border-top: 1px solid var(--line); vertical-align: middle; font-size: 13px; }
+.helpgrid td:first-child { width: 48%; line-height: 1.8; }
+.helpgrid ol { margin: 2px 0 0; padding-left: 20px; } .helpgrid li { margin: 5px 0; line-height: 1.7; font-size: 13px; }
+@media (max-width: 720px) { .helpgrid { columns: 1; } }
+/* 键帽（js/keycaps.js）：Ctrl 蓝 · Shift 黄 · Alt 红 · Tab 绿 · Space 粉 · 方向键青 · Enter/Esc/Delete 橙 · 鼠标动作虚线 */
+.kcombo { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px; vertical-align: middle; }
+.kcombo .k { --kc: var(--line2); font: 400 13px Consolas, monospace; min-width: 1.4em; text-align: center; padding: 0 5px; border: 1px solid var(--kc); border-bottom-width: 2px; border-radius: 4px; background: color-mix(in srgb, var(--kc) 14%, var(--panel2)); color: #eef6f0; white-space: nowrap; }
+.kcombo .k.ctrl { --kc: #3d8bff; } .kcombo .k.shift { --kc: #e0b020; } .kcombo .k.alt { --kc: #e0483a; } .kcombo .k.tab { --kc: #3fb35a; }
+.kcombo .k.space { --kc: #d070c8; } .kcombo .k.arrow { --kc: #2bb3c0; } .kcombo .k.act { --kc: #ff8a4c; }
+.kcombo .k.mouse { --kc: #9fb3a8; font: 12px system-ui, sans-serif; border-style: dashed; border-bottom-width: 1px; background: color-mix(in srgb, var(--kc) 6%, transparent); color: var(--ink); }
+.kcombo .kop { color: var(--dim); font-size: 11px; padding: 0 1px; } .kcombo .kor { color: var(--dim); padding: 0 4px; } .kcombo .ksp { width: 2px; }
+.helpgrid .kcombo .k { font-size: 14px; } .helpgrid .kcombo .k.mouse { font-size: 12.5px; }
+/* 页面里零散的提示条：小一号，别抢 */
+.dim .kcombo .k { font-size: 11px; padding: 0 3px; border-color: color-mix(in srgb, var(--kc) 55%, var(--line)); background: color-mix(in srgb, var(--kc) 6%, var(--panel2)); color: var(--ink); }
 #sessList button { display: block; margin: 4px 0; text-align: left; width: 100%; }
 
 /* 矮屏：层行收紧，左栏多露几层 */
