@@ -12,7 +12,7 @@ from pathlib import Path
 
 ROOT = Path("C:/Users/Administrator/Desktop/Projekt_Visual")
 OUT = ROOT / "_样片总览.md"
-SCAN = ["MV_Cant_Kill_Us/样片", "MotionDesign", "MV_Cant_Kill_Us/生成", "MV_Cant_Kill_Us/素材", "MV_Between_Two_Points"]
+SCAN = ["MV_Cant_Kill_Us/样片", "MV_Cant_Kill_Us/生成", "MV_Cant_Kill_Us/素材"]
 VER = re.compile(r"_v(\d+)([a-z]?)")
 TAIL = re.compile(r"(_v\d+[a-z]?)|(_(bwr|acid|黑白红|酸性|酸绿|冷灰))", re.I)
 

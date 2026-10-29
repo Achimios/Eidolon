@@ -26,13 +26,13 @@
      剩下 39 = π(169) 个素数；声音 = 筛的声化（场景自带 audio()）。
 
 两版输出（👤2026-10-22）：A 版绑《Can't Kill Us》（countdown / matrix，读感官.json）→ MV_Cant_Kill_Us/样片/几何符号/；
-  B 版独立 motion design（sieve）→ Projekt_Visual/MotionDesign/几何符号/。配色 --palette：cold（冷灰白 + 一个红点）/
+  B 版独立 motion design（sieve）→ Projekt_Visual/MV_Cant_Kill_Us/样片/几何符号/。配色 --palette：cold（冷灰白 + 一个红点）/
   bwr（黑白红，「此刻」整个是红）/ acid（紫黑 + 荧光酸橙）。版本号决定行为（旧版本号复现旧参数，见 build / main）。
 
 用法（Python 用 4_Eidolon/.venv）：
   python tools/geo_symbols.py countdown --ver v8 --scale 1.5  # 憋住段 192.36–198.76 的拍数倒数（1080p 信息版；默认提前 1 拍起）
   python tools/geo_symbols.py matrix --ver v3                 # 吸收段 128.36–141.14 的字阵吸收
-  python tools/geo_symbols.py sieve --ver v6 --scale 1.5 --palette bwr   # 独立版：筛（1080p 信息版，输出到 MotionDesign/）
+  python tools/geo_symbols.py sieve --ver v6 --scale 1.5 --palette bwr   # 独立版：筛（1080p 信息版，输出到 样片/几何符号/）
   python tools/geo_symbols.py countdown --still 195.0         # 只出一帧 png（看构图）
   python tools/geo_symbols.py countdown --scale 0.5 --no-audio # 低分辨率小样
   公共参数：--start / --end（播放时间）、--ver v1、--scale、--ss（超采样倍数）、--out 目录
@@ -56,7 +56,7 @@ FPS = 24
 W, H = 1280, 720
 FONT = S.FONT
 OUT_DIR = S.MV / "样片" / "几何符号"                  # A 版（绑《Can't Kill Us》）
-MD_DIR = S.PROJ / "MotionDesign" / "几何符号"          # B 版（独立 motion design）
+MD_DIR = S.PROJ / "MV_Cant_Kill_Us" / "样片" / "几何符号"          # B 版（独立 motion design）
 BG = (7, 8, 9)
 GREY = tuple(int(255 * c) for c in S.GREY)          # 冷灰白（主色）
 DIM = tuple(int(255 * 0.30 * c) for c in S.GREY)    # 暗灰（刻度、网格、次要）
@@ -1351,7 +1351,7 @@ def main():
     set_palette(a.palette)
     if a.palette != "cold" and not a.tag:
         a.tag = {"bwr": "_黑白红", "acid": "_酸性"}[a.palette]
-    if a.kind == "sieve":                                           # 独立版：不读感官.json，输出到 MotionDesign/
+    if a.kind == "sieve":                                           # 独立版：不读感官.json，输出到 样片/几何符号/
         sc = Sieve(scale=a.scale, v={"v1": 1, "v2": 2, "v3": 3, "v4": 4, "v5": 5}.get(a.ver, 6))
         a.start = 0.0 if a.start is None else a.start
         a.end = sc.T if a.end is None else a.end
