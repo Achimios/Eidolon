@@ -119,7 +119,7 @@ const NAMES = ['mic', 'hum', 'rec', 'held', 'xy', 'audio',
   'boot', 'frame', 'onKeyDown', 'noteDown', 'noteUp', 'arpTick', 'toggleRec', 'stopRec', 'processHumTake', 'analyzeAsync', 'openTakeVariants', 'openNoteVariants', 'openHumInterp',
   'openTimbreVariants', 'previewVariant', 'commitVariant', 'closeVariants', 'undo', 'redo', 'snapshot', 'copySel', 'pasteAt', 'duplicate', 'deleteSel', 'reanalyze', 'copyHumToSynth',
   'save', 'loadSession', 'xyWrite', 'xyPos', 'xyApply', 'injectHum', 'events', 'clipsNow', 'clipsForPlay', 'placeRecBeat', 'selectLayer', 'reloadStems', 'retimeHum', 'hasUnsavedAudio', 'micOn',
-  'addFileLayer', 'loadStems', 'joinScenes', 'micExtract', 'humPassEnd'];
+  'addFileLayer', 'loadStems', 'joinScenes', 'micExtract', 'humPassEnd', 'humFromFile', 'clipGroup', 'dropFiles', 'togglePlay', 'followLoop'];
 const EXPOSE = `return {
   get S() { return S; }, set S(v) { S = v; }, get E() { return E; }, get T() { return T; }, get TL() { return TL; },
   get variants() { return variants; }, set variants(v) { variants = v; }, get clipboard() { return clipboard; }, get undoStack() { return undoStack; }, get redoStack() { return redoStack; },
@@ -1079,6 +1079,70 @@ t('C4 哼唱分析走后台线程（hum-worker.js，消息协议真跑）；开�
   assert.deepEqual(a.ps, [64, 67, 71]); assert.deepEqual(b.ps, a.ps); assert.deepEqual(c.ps, a.ps);
   const d = await notesOf('crash');                      // worker 跑一半崩了：手上的活改成同步算
   assert.deepEqual(d.ps, a.ps);
+});
+
+// ====================== 👤2026-10-29：拖播放头 / 挪录音片段 / 拖文件进哼唱层识别 ======================
+t('拖文件落在哼唱层上 = 当一遍哼唱识别：放在落下的那一拍、单声道、音挂在这一遍上、开「怎么理解它」；能撤、能存', async () => {
+  const w = await world({ worker: 'real' }), M = w.M;
+  const sig = voiceLike([{ midi: 64, dur: 0.5 }, { midi: 67, dur: 0.5 }, { midi: 71, dur: 0.6 }]);
+  M.E.ctx.decodeAudioData = async () => { const b = fakeBuffer(2, sig.length, 48000); b.getChannelData(0).set(sig); b.getChannelData(1).set(sig); return b; };
+  const L = M.S.layers.find(l => l.id === 'voice');
+  M.TL.dropAt = () => ({ layer: L, b: 8 });
+  M.dropFiles({ clientX: 0, clientY: 0, dataTransfer: { files: [{ name: 'me.wav', type: 'audio/wav', arrayBuffer: async () => ({}) }] } });
+  for (let i = 0; i < 40 && !M.S.clips.length; i++) { await flush(); await w.advance(0.01); }
+  const c = M.S.clips.find(q => q.src === 'file:me.wav');
+  assert.ok(c, '识别完放进去了'); assert.equal(c.input, 'hum'); assert.equal(c.b, 8); assert.equal(c.layer, 'voice');
+  assert.equal(M.audio.get(c.audio).buffer.numberOfChannels, 1, '混成单声道');
+  const ns = M.S.notes.filter(n => n.take === c.id);
+  assert.ok(ns.length >= 2, '认出了音'); assert.ok(ns.every(n => n.b >= 8 - 0.5));
+  assert.equal(M.variants?.layer, 'voice', '开了「怎么理解它」');
+  assert.deepEqual(St.validateTruth(truthOf(M)), []);
+  M.closeVariants(); M.undo();
+  assert.equal(M.S.clips.length, 0, '一下撤掉');
+  // 落在别处（不是哼唱层）= 新的一层伴奏，从落下的那一拍放
+  M.TL.dropAt = () => ({ layer: null, b: 12 });
+  M.E.ctx.decodeAudioData = async () => fakeBuffer(2, 48000, 48000);
+  M.dropFiles({ clientX: 0, clientY: 0, dataTransfer: { files: [{ name: 'pad.wav', type: 'audio/wav', arrayBuffer: async () => ({}) }] } });
+  await flush();
+  const f = M.S.clips.find(q => q.src === 'pad.wav');
+  assert.ok(f); assert.equal(f.b, 12); assert.equal(f.input, 'file');
+  w.restoreTimers();
+});
+t('挪录音片段：同一位置的几遍一起走、它们的音（含贴出来跟着它的）和 raw、剪掉的段都跟着；原曲分轨 / 录音中不让挪', async () => {
+  const w = await world(), M = w.M;
+  M.S.clips.push(
+    { id: 'C1', layer: 'voice', b: 4, dur: 2, audio: 'a', input: 'hum', take: 1, active: true, gaps: [[4.5, 5]] },
+    { id: 'C2', layer: 'voice', b: 4, dur: 2, audio: 'b', input: 'hum', take: 2, active: false },
+    { id: 'C3', layer: 'voice', b: 20, dur: 2, audio: 'a', input: 'hum', take: 3, active: true },
+    { id: 'P1', layer: 'voice', b: 30, dur: 1, audio: 'a', input: 'paste', active: true },
+    { id: 'S1', layer: 'voice', b: 0, dur: 9, audio: 'c', input: 'stem', active: true });
+  M.S.notes.push(
+    { id: 'n1', layer: 'voice', b: 4.5, d: 1, pitch: 64, take: 'C1', raw: { b: 4.52, d: 1 } },
+    { id: 'n2', layer: 'voice', b: 4, d: 1, pitch: 66, take: 'C2', raw: { b: 4, d: 1 } },
+    { id: 'n3', layer: 'voice', b: 20, d: 1, pitch: 67, take: 'C3', raw: { b: 20, d: 1 } },
+    { id: 'n4', layer: 'voice', b: 30, d: 1, pitch: 69, rideClip: 'P1', raw: { b: 30, d: 1 } });
+  const g = M.clipGroup({ id: 'C1' });
+  assert.deepEqual(g.clips.map(c => c.id), ['C1', 'C2']); assert.deepEqual(g.notes.map(n => n.id).sort(), ['n1', 'n2']);
+  assert.deepEqual(M.clipGroup({ id: 'P1' }).notes.map(n => n.id), ['n4'], '贴出来的音跟着贴出来的那段');
+  assert.match(M.clipGroup({ id: 'S1' }).err, /原曲分轨/);
+  M.rec.on = true; assert.match(M.clipGroup({ id: 'C1' }).err, /录音中/); M.rec.on = false;
+  w.restoreTimers();
+});
+t('播放头：空格从播放头放；放着的时候点标尺 = 从那里接着放（录音中不跳）；挪循环区 = 播放头跟到循环起点', async () => {
+  const w = await world(), M = w.M;
+  M.S.loop.on = false; M.TL.cursor = 8;
+  M.togglePlay(); assert.equal(M.T.segs[0].b0, 8, '从播放头放');
+  M.TL.cursor = 20; M.TL.api.changed('cursor');
+  assert.equal(M.T.playing, true); assert.equal(M.T.segs[0].b0, 20, '跳过去接着放');
+  M.rec.on = true; M.TL.cursor = 2; M.TL.api.changed('cursor');
+  assert.equal(M.T.segs[0].b0, 20, '录音中不跳'); assert.match(w.status(), /录音中不能跳/); M.rec.on = false;
+  M.T.stop();
+  M.S.loop.on = true; M.S.loop.start = 0; M.followLoop();
+  M.TL.cursor = 3; M.followLoop(); assert.equal(M.TL.cursor, 3, '循环没动：播放头不动');
+  M.S.loop.start = 4; M.followLoop(); assert.equal(M.TL.cursor, 4 * M.S.beatsPerBar, '挪了循环区：跟到循环起点');
+  M.togglePlay(); assert.equal(M.T.segs[0].b0, 16);
+  M.T.stop();
+  w.restoreTimers();
 });
 t('C4 等分析的时候打开了别的会话：晚到的那一遍不塞进新会话', async () => {
   const w = await world({ worker: 'real' }), M = w.M;

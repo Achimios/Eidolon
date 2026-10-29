@@ -1202,19 +1202,63 @@ function checkGridDrift() {
   }
   return Math.abs(worst) > 0.05 ? `⚠️格子是匀速 ${S.bpm} BPM，原曲第 ${at + 1} 小节的重拍差 ${(worst * 1000).toFixed(0)} ms（先在「原曲从第几小节开始」里选起点；感官.json 里有的小节不是整 4 拍）` : '';
 }
-async function addFileLayer(file) {
+// 拖进来的文件：落在哼唱层上 = 当一遍哼唱识别（放在落下的那一拍）；别处 = 新的一层伴奏
+function dropFiles(e) {
+  const at = TL.dropAt(e.clientX, e.clientY);
+  for (const f of e.dataTransfer.files) {
+    if (!(/^audio\//.test(f.type) || /\.(wav|mp3|flac|ogg|m4a)$/i.test(f.name))) continue;
+    if (at?.layer?.kind === 'voice') humFromFile(f, at.layer, at.b); else addFileLayer(f, at?.b);
+  }
+}
+async function humFromFile(file, L0, b0) {
+  if (rec.on) return status('录音中不能拖文件进哼唱层：先按 ` 停');
+  try {
+    const buf = await E.ctx.decodeAudioData(await file.arrayBuffer());
+    // 混成单声道；最长和一条哼唱一样（10 分钟）
+    const sr = buf.sampleRate, n = Math.min(buf.length, Math.round(HUM_MAX_SEC * sr)), nc = buf.numberOfChannels, pcm = new Float32Array(n);
+    for (let ch = 0; ch < nc; ch++) { const d = buf.getChannelData(ch); for (let i = 0; i < n; i++) pcm[i] += d[i] / nc; }
+    const opts = { mode: L0.params.mode, snap: L0.params.snap }, gen = sessionGen, ug = undoGen;
+    status(`识别 ${file.name}（${(n / sr).toFixed(1)} s）…`, true);
+    const an = await analyzeAsync(pcm.slice(), sr, opts);
+    if (gen !== sessionGen || ug !== undoGen) return;
+    const L = layerById(S, L0.id); if (!L) return status(`${file.name} 没放进去：哼唱层不见了`);
+    snapshot();
+    const mono = E.ctx.createBuffer(1, n || 1, sr); mono.copyToChannel(pcm, 0);
+    const aid = addAudio(mono, { pcm }), takeNo = ++hum.takeNo;
+    const clip = { id: uid('C'), layer: L.id, b: b0, dur: n / sr, audio: aid, input: 'hum', take: takeNo, active: true, src: 'file:' + file.name };
+    for (const c of S.clips) if (sameTakeSlot(c, clip)) c.active = false;
+    clip.analysis = { mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1), stats: an.guess.stats };
+    S.clips.push(clip);
+    const notes = notesToBeats(an.segs, { t0Beat: b0, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
+    for (const nt of notes) S.notes.push({ id: uid(), layer: L.id, input: 'hum', take: clip.id, ...nt, raw: { b: nt.b, d: nt.d, ...nt.raw } });
+    const cut = buf.length > n ? `；超过 ${HUM_MAX_SEC / 60} 分钟，后面没要` : '';
+    status(`${file.name}：${MODE_PARAMS[an.mode]?.label ?? an.mode}（${an.guess.why}）· ${notes.length} 个音，放在第 ${(b0 / S.beatsPerBar + 1).toFixed(2)} 小节${cut}。拖它顶上的头条可以挪位置`, true);
+    syncAll();
+    openHumInterp(L.id, clip);
+  } catch (e) { status('读不了这个文件：' + e.message); }
+}
+// 拖录音片段的头条：一起挪的片段（同一位置的几遍哼唱一起走，不然「挑哪一遍」就散了）+ 跟着它们的音
+function clipGroup(c0) {
+  const c = S.clips.find(q => q.id === c0.id);
+  if (!c) return { err: '这段录音已经不在了' };
+  if (rec.on) return { err: '录音中不能挪录音片段：先按 ` 停' };
+  if (c.input === 'stem') return { err: '原曲分轨跟着「原曲从第几小节开始」走，不能单独挪：要换就换起点' };
+  const clips = [c, ...(c.input === 'hum' ? S.clips.filter(q => q !== c && sameTakeSlot(q, c)) : [])], ids = new Set(clips.map(q => q.id));
+  return { clips, notes: S.notes.filter(n => ids.has(n.take) || ids.has(n.rideClip)) };
+}
+async function addFileLayer(file, at) {
   try {
     const buf = await E.ctx.decodeAudioData(await file.arrayBuffer());
     snapshot();
     const aid = addAudio(buf, { file: null });
     const L = makeLayer('stem', 'stem', file.name.replace(/\.[^.]+$/, ''), S.layers.length);
     S.layers.push(L); joinScenes(L.id);
-    const [ls] = loopRange(S);
+    const [ls] = loopRange(S), b = at ?? ls;
     // fileOffset 0：存下来的就是这个文件本身，从头放（文件名里碰巧有「@128-」也不当切片号）
-    S.clips.push({ id: uid('C'), layer: L.id, b: ls, dur: buf.duration, audio: aid, input: 'file', active: true, fileOffset: 0, src: file.name });
+    S.clips.push({ id: uid('C'), layer: L.id, b, dur: buf.duration, audio: aid, input: 'file', active: true, fileOffset: 0, src: file.name });
     const gm = /drum|鼓/i.test(file.name) ? '\n' + buildGroove(buf, false) : '';
     const long = buf.duration > FILE_KEEP_SEC ? `\n⚠️超过 ${FILE_KEEP_SEC} s：保存时不会把它存进会话（重新打开时这层没声音）。长伴奏请放进作品的 分轨/ 再「载入原曲分轨」` : '';
-    status(`拖进来：${file.name}（${buf.duration.toFixed(1)} s，${buf.numberOfChannels} 声道，从循环起点开始放）${gm}${long}`, !!(gm || long));
+    status(`拖进来：${file.name}（${buf.duration.toFixed(1)} s，${buf.numberOfChannels} 声道，从第 ${(b / S.beatsPerBar + 1).toFixed(2)} 小节开始放；拖它顶上的头条可以挪）${gm}${long}`, !!(gm || long));
     syncAll();
   } catch (e) { status('读不了这个文件：' + e.message); }
 }
@@ -1480,12 +1524,11 @@ function bindHeader() {
   // 改完顶栏 / 旋钮的下拉框、数字框：焦点也还给页面（不然字母键会去下拉框里跳选项，空格 / ` 没反应）
   document.addEventListener('change', e => { const t = e.target; if (t && (t.tagName === 'SELECT' || (t.tagName === 'INPUT' && t.type !== 'range'))) t.blur(); });
   document.addEventListener('dragover', e => e.preventDefault());
-  document.addEventListener('drop', e => { e.preventDefault(); for (const f of e.dataTransfer.files) if (/^audio\//.test(f.type) || /\.(wav|mp3|flac|ogg|m4a)$/i.test(f.name)) addFileLayer(f); });
+  document.addEventListener('drop', e => { e.preventDefault(); dropFiles(e); });
 }
 function togglePlay() {
   if (T.playing) { T.stop(); return; }
-  const [ls] = loopRange(S);
-  T.start(S.loop.on ? ls : TL.cursor || 0);
+  T.start(TL.cursor || 0);                        // 从播放头放（挪循环区时播放头跟到循环起点，见 changed(loop)）
 }
 
 // ---------- 全局键盘 ----------
@@ -1533,8 +1576,15 @@ function onKeyDown(ev) {
 }
 
 // ---------- 主循环 ----------
-let lastKeysBar = -1;
+let lastKeysBar = -1, lastLoopKey = null;
+// 循环区挪了 / 循环打开了（标尺、- =、顶栏、打开会话……哪条路都算）：播放头跟到循环起点
+function followLoop() {
+  const key = S.loop.on ? `${S.loop.start}:${S.loop.bars}` : 'off';
+  if (lastLoopKey !== null && key !== lastLoopKey && S.loop.on && TL.drag?.kind !== 'scrub') TL.cursor = loopRange(S)[0];
+  lastLoopKey = key;
+}
 function frame() {
+  followLoop();
   const b = T.playing ? T.beatNow : null;
   if (xy.down) xyWrite();                        // 录音中按住 XY 不动：值照样一帧一帧写进曲线
   const eff = renderMacroBars(b ?? TL.cursor ?? 0);
@@ -1576,11 +1626,15 @@ async function boot() {
   });
   TL = new Timeline($('tl'), {
     getState: () => S, events, clips: clipsNow, peaks: peaksOf, shownLanes: () => shownLanes,
-    snapshot, changed: k => {
+    snapshot, changed: (k, arg) => {
       // 录音中在标尺上拖循环区：拖不动（这一遍会对不上），还原成开始录时的
       if (k === 'loop' && rec.on && rec.loop0 && JSON.stringify(S.loop) !== JSON.stringify(rec.loop0)) { S.loop = { ...rec.loop0 }; status(LOOP_LOCKED); }
       if (k === 'loop') syncHeader(); if (k === 'notes-done' || k === 'curve') renderLaneChecks();
+      // 放着的时候点标尺 / 拖播放头 = 从那里接着放（录音中不跳：这一遍会对不上）
+      if (k === 'cursor' && T.playing) { if (rec.on) status('录音中不能跳：先按 ` 停'); else T.start(TL.cursor); }
+      if (k === 'clips-done') { if (T.playing) T.reclip(); status(`录音片段挪了 ${(arg / S.beatsPerBar).toFixed(2)} 小节（音符跟着走）`); syncAll(); }
     },
+    clipGroup, say: m => status(m),
     selectLayer: (id, quiet) => { if (S.sel !== id) selectLayer(id, quiet); },
     addNote: n => { S.notes.push({ id: uid(), ...n, raw: { b: n.b, d: n.d } }); },
   });

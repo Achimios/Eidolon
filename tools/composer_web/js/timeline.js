@@ -1,12 +1,13 @@
 // >v<🎛作曲器-时间线-全部层（音符块 / 鼓点 / 录音波形）+ 旋钮曲线。拖动 = 移、框选、删、复制一段；曲线道上直接画。
-// 标尺上半条拖 = 设循环区；下半条拖 = 选一段时间（复制整段用），单击 = 放光标（粘贴的位置）。
+// 标尺上半条拖 = 设循环区；下半条拖 = 选一段时间（复制整段用），单击 = 放播放头（放着 = 从那里接着放）；拖标尺上的小三角 = 拖播放头。
+// 每层顶上的头条 = 录音片段：拖它挪位置（同一位置的几遍哼唱和它们的音一起走；原曲分轨不能挪）。
 // 滚轮（👤2026-10-29）：滚轮 = 上下滚 · Alt / Shift+滚轮 = 左右滚 · Ctrl+滚轮 = 以播放头（停着 = 光标）为中心缩放。
 // 每一层拖底边 = 改这一层的高度（L.h，只是看，不进真值）。
 import { MACROS, curveAt, curveWrite, loopRange, songBeats, spb } from './state.js';
 import { DRUM_SOUNDS } from './engine.js';
 import { inScale, chordName, chordAtBar } from './theory.js';
 
-const GUT = 112, RULER = 38, ROW = 50, LANE = 34, ROW_MIN = 28, ROW_MAX = 260, EDGE = 3;
+const GUT = 112, RULER = 38, ROW = 50, LANE = 34, ROW_MIN = 28, ROW_MAX = 260, EDGE = 3, CLIPBAR = 13;
 export const rowH = L => Math.max(ROW_MIN, Math.min(ROW_MAX, L.h || ROW));
 
 export class Timeline {
@@ -62,15 +63,17 @@ export class Timeline {
     if (hi - lo < 14) { const m = (hi + lo) / 2; lo = m - 7; hi = m + 7; }
     return [lo - 1, hi + 1];
   }
+  // 音符区从哪儿开始：这一层有录音片段 = 让出顶上的头条（拖片段用）
+  _top(layer, cache) { const k = 'clip:' + layer.id; if (!(k in cache)) cache[k] = this._clipsOf(layer).length > 0; return cache[k] ? 4 + CLIPBAR : 4; }
   _noteRect(n, layer, y0, notes, cache) {
-    const x0 = this.bx(n.b), x1 = Math.max(x0 + 3, this.bx(n.b + (n.sound ? 0.12 : n.d))), rh = rowH(layer);
+    const x0 = this.bx(n.b), x1 = Math.max(x0 + 3, this.bx(n.b + (n.sound ? 0.12 : n.d))), rh = rowH(layer), top = this._top(layer, cache), ih = rh - top - 4;
     if (n.sound) {
-      const k = Math.max(0, DRUM_SOUNDS.indexOf(n.sound)), h = (rh - 8) / DRUM_SOUNDS.length;
-      return [x0, y0 + 4 + k * h, Math.max(4, x1 - x0), Math.max(3, h - 1)];
+      const k = Math.max(0, DRUM_SOUNDS.indexOf(n.sound)), h = ih / DRUM_SOUNDS.length;
+      return [x0, y0 + top + k * h, Math.max(4, x1 - x0), Math.max(3, h - 1)];
     }
     const [lo, hi] = cache[layer.id] || (cache[layer.id] = this._pitchRange(layer, notes));
-    const h = Math.max(2.5, (rh - 8) / (hi - lo));
-    const y = y0 + 4 + (hi - n.pitch) / (hi - lo) * (rh - 8) - h / 2;
+    const h = Math.max(2.5, ih / (hi - lo));
+    const y = y0 + top + (hi - n.pitch) / (hi - lo) * ih - h / 2;
     return [x0, y, x1 - x0, h];
   }
   hitNote(x, y) {
@@ -91,7 +94,29 @@ export class Timeline {
     for (const L of this.S.layers) { y0 += rowH(L); if (Math.abs(y - y0) <= EDGE) return L; }
     return null;
   }
-  _hover(e) { if (this.drag) return; const [, y] = this._xy(e); this.cv.style.cursor = this._edgeRow(y) ? 'ns-resize' : ''; }
+  // 播放头：放着 = 正在放的那一拍，停着 = 光标（空格从这里放）
+  head() { return this.play ?? this.cursor ?? 0; }
+  _onHead(x, row) { return row.kind === 'ruler' && !row.top && Math.abs(x - this.bx(this.head())) <= 7; }
+  // 录音片段的头条（每层顶上 CLIPBAR 高）：拖它 = 挪这段录音（跟着它的音一起走）
+  _clipsOf(L) { return (this.api.clips ? this.api.clips() : this.S.clips).filter(c => c.layer === L.id && c.active); }
+  hitClip(x, y) {
+    const row = this.rowOf(y);
+    if (row.kind !== 'layer' || y < row.y0 + 1 || y > row.y0 + 1 + CLIPBAR || x < GUT) return null;
+    const sp = spb(this.S);
+    return this._clipsOf(row.layer).reverse().find(c => x >= this.bx(c.b) && x <= this.bx(c.b + c.dur / sp)) || null;
+  }
+  // 拖进来的文件落在哪一层、哪一拍（不在层上 = 只给拍）
+  dropAt(clientX, clientY) {
+    const r = this.cv.getBoundingClientRect(), x = clientX - r.left, y = clientY - r.top;
+    if (x < 0 || y < 0 || x > this.W || y > this.H) return null;
+    const row = this.rowOf(y), b = Math.max(0, this.snap(this.xb(Math.max(GUT, x))));
+    return { layer: row.kind === 'layer' ? row.layer : null, b };
+  }
+  _hover(e) {
+    if (this.drag) return;
+    const [x, y] = this._xy(e), row = this.rowOf(y);
+    this.cv.style.cursor = this._edgeRow(y) ? 'ns-resize' : this._onHead(x, row) ? 'ew-resize' : this.hitClip(x, y) ? 'grab' : '';
+  }
 
   _down(e) {
     const [x, y] = this._xy(e), S = this.S, row = this.rowOf(y);
@@ -101,7 +126,21 @@ export class Timeline {
     const b = this.xb(x);
     if (row.kind === 'ruler') {
       if (row.top) { this.drag = { kind: 'loop', b0: Math.floor(b / S.beatsPerBar) }; }
+      else if (this._onHead(x, row)) { this.drag = { kind: 'scrub' }; this.cursor = this.head(); }
       else { this.drag = { kind: 'range', b0: this.snap(b) }; this.range = null; }
+      return;
+    }
+    const c = e.button === 0 && this.hitClip(x, y);
+    if (c) {
+      this.api.selectLayer(c.layer, true);
+      const g = this.api.clipGroup(c);
+      if (g.err) { this.api.say(g.err); return; }
+      this.drag = {
+        kind: 'clip', x0: x, b0: b, started: false, main: g.clips[0].b,
+        clips: g.clips.map(q => ({ q, b: q.b, gaps: q.gaps?.map(p => [...p]) })),
+        notes: g.notes.map(n => ({ n, b: n.b, rb: n.raw?.b })),
+      };
+      this.cv.style.cursor = 'grabbing';
       return;
     }
     if (row.kind === 'lane') {
@@ -135,6 +174,17 @@ export class Timeline {
     if (d.kind === 'rowh') {
       d.L.h = Math.round(Math.max(ROW_MIN, Math.min(ROW_MAX, d.h0 + y - d.y0)));
       if (d.L.h === ROW) delete d.L.h;
+      return;
+    }
+    if (d.kind === 'scrub') { this.cursor = Math.max(0, Math.min(songBeats(S), this.snap(b, e.altKey))); d.moved = true; return; }
+    if (d.kind === 'clip') {
+      if (!d.started && Math.abs(x - d.x0) < 4) return;
+      if (!d.started) { this.api.snapshot(); d.started = true; }
+      // 片段起点吸到编辑格子（Alt = 不吸），不能挪到 0 拍前面
+      const db = Math.max(0, this.snap(d.main + b - d.b0, e.altKey)) - d.main;
+      for (const o of d.clips) { o.q.b = o.b + db; if (o.gaps) o.q.gaps = o.gaps.map(([p, q]) => [p + db, q + db]); }
+      for (const o of d.notes) { o.n.b = o.b + db; if (Number.isFinite(o.rb)) o.n.raw.b = o.rb + db; }
+      d.db = db;
       return;
     }
     if (d.kind === 'loop') {
@@ -173,7 +223,10 @@ export class Timeline {
     this.drag = null;
     const S = this.S;
     if (d.kind === 'loop' && !d.moved) { S.loop.start = Math.max(0, Math.min(S.songBars - S.loop.bars, d.b0)); this.api.changed('loop'); }
+    // 标尺下半条单击 / 拖播放头 = 放播放头（正在放 = 从那里接着放）
     if (d.kind === 'range' && !d.moved) { this.cursor = d.b0; this.range = null; this.api.changed('cursor'); }
+    if (d.kind === 'scrub') this.api.changed('cursor');
+    if (d.kind === 'clip') { this.cv.style.cursor = ''; if (d.started) this.api.changed('clips-done', d.db || 0); }
     if (d.kind === 'erase' && d.b1 !== undefined) {
       this.api.snapshot();
       const [a, z] = [Math.min(d.b0, d.b1), Math.max(d.b0, d.b1)];
@@ -204,13 +257,13 @@ export class Timeline {
       // 双击空白 = 加一个音（调内 / 鼓的那一行）
       this.api.snapshot();
       const b = this.snap(this.xb(x));
-      const notes = this.api.events();
+      const notes = this.api.events(), top = this._top(row.layer, {});
       if (row.layer.kind === 'drums') {
-        const k = Math.floor((y - row.y0 - 4) / ((row.h - 8) / DRUM_SOUNDS.length));
+        const k = Math.floor((y - row.y0 - top) / ((row.h - top - 4) / DRUM_SOUNDS.length));
         this.api.addNote({ layer: row.layer.id, b, d: 0.25, sound: DRUM_SOUNDS[Math.max(0, Math.min(7, k))], vel: 0.8, input: 'draw' });
       } else {
         const [lo, hi] = this._pitchRange(row.layer, notes);
-        let p = Math.round(hi - (y - row.y0 - 4) / (row.h - 8) * (hi - lo));
+        let p = Math.round(hi - (y - row.y0 - top) / (row.h - top - 4) * (hi - lo));
         while (!inScale(S.key, p)) p--;
         this.api.addNote({ layer: row.layer.id, b, d: this.snapQ() || 0.25, pitch: p, vel: 0.8, input: 'draw' });   // 自由时音长默认 1/16
       }
@@ -282,8 +335,17 @@ export class Timeline {
       // 录音波形（挑 take 时画正在试听的那一条，和音符对得上）
       for (const c of (this.api.clips ? this.api.clips() : S.clips)) {
         if (c.layer !== L.id || !c.active) continue;
-        const pk = peaks(c.audio); if (!pk) continue;
         const x0 = this.bx(c.b), x1 = this.bx(c.b + c.dur / spb(S));
+        // 头条（拖它挪这段录音）：原曲分轨跟着起点走，画暗、带锁
+        if (x1 > GUT && x0 < W) {
+          const hx = Math.max(GUT, x0), hw = Math.min(W, x1) - hx, lock = c.input === 'stem';
+          g.fillStyle = L.color; g.globalAlpha = lock ? 0.25 : 0.6; g.fillRect(hx, y0 + 1, hw, CLIPBAR); g.globalAlpha = 1;
+          g.save(); g.beginPath(); g.rect(hx, y0 + 1, hw, CLIPBAR); g.clip();
+          g.fillStyle = C('--bg'); g.font = '10px "Microsoft YaHei", sans-serif';
+          const nm = c.input === 'hum' ? `第 ${c.take} 遍${c.src && c.src !== 'mic' ? ' · ' + c.src.replace(/^file:/, '') : ''}` : c.input === 'paste' ? '贴的' : (c.src || '').replace(/@.*$/, '');
+          g.fillText((lock ? '🔒' : '') + nm, hx + 3, y0 + 1 + CLIPBAR / 2 + 1); g.restore();
+        }
+        const pk = peaks(c.audio); if (!pk) continue;
         g.fillStyle = L.color; g.globalAlpha = 0.22;
         // 贴出来的片段从录音中间开始（offset）；剪掉的那几段（gaps）空着
         const n = pk.length, mid = y0 + RH / 2, bufDur = pk.dur || c.dur, off = c.offset || 0, gaps = c.gaps || [];
@@ -333,9 +395,15 @@ export class Timeline {
       const d = this.drag; g.strokeStyle = C('--ink'); g.setLineDash([4, 3]);
       g.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0)); g.setLineDash([]);
     }
-    // 光标（粘贴位置）+ 播放头
+    // 光标（停着时的播放头 / 粘贴位置）+ 正在放的播放头；标尺下半条上的小三角 = 抓手
+    const scrub = this.drag?.kind === 'scrub';
     g.fillStyle = C('--dim'); g.fillRect(this.bx(this.cursor), RULER / 2, 1, H);
-    if (play !== null && play !== undefined) { g.fillStyle = C('--ink'); g.fillRect(this.bx(play), 0, 1.5, H); }
+    if (play !== null && play !== undefined && !scrub) { g.fillStyle = C('--ink'); g.fillRect(this.bx(play), 0, 1.5, H); }
+    const hx = this.bx(scrub ? this.cursor : this.head());
+    if (hx >= GUT - 1) {
+      g.fillStyle = C('--ink'); g.beginPath(); g.moveTo(hx - 6, RULER / 2 + 2); g.lineTo(hx + 6, RULER / 2 + 2); g.lineTo(hx, RULER - 2); g.closePath(); g.fill();
+      if (scrub) g.fillRect(hx, RULER / 2, 1.5, H);
+    }
   }
 }
 
