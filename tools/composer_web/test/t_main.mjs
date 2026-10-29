@@ -785,6 +785,100 @@ t('G14 范围复制 / 粘贴带上录音：贴出来的片段指着同一段声�
   w.restoreTimers();
 });
 
+// ====================== v1.6 交叉审（4 agent）复现的 12 条 ======================
+t('审 1 放着的时候撤销 / 重做剪录音、贴录音：马上按撤销后的放（不等下一遍）', async () => {
+  const w = await world(), M = w.M;
+  M.audio.set('a1', { buffer: fakeBuffer(1, 48000 * 7, 48000), pcm: null, sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 6.4, audio: 'a1', input: 'hum', take: 1, active: true });
+  M.T.start(0); await w.advance(0.3);
+  M.TL.range = [4, 8]; M.deleteSel();
+  const n0 = M.E.clipsStarted.length;
+  M.undo();
+  const st = M.E.clipsStarted.slice(n0).filter(c => c.layer === 'voice');
+  assert.equal(st.length, 1, '撤销后重排成一整段'); assert.ok(st[0].dur > 5.5);
+  M.TL.range = [0, 4]; M.copySel(); M.pasteAt(8);
+  const live = () => M.T.live.filter(c => c.layer === 'voice').length;
+  const withPaste = live();
+  M.undo();
+  assert.ok(live() < withPaste, '撤掉的贴片不再放');
+  M.T.stop(true); w.restoreTimers();
+});
+t('审 2 载入分轨等下载时撤销 / 改了东西：撤销点按真载入那一刻记（不翻出撤掉的改动，也不把下载时的改动一起撤）', async () => {
+  const w = await world({ stems: ['bass.wav'] }), M = w.M;
+  let release; const gate = new Promise(r => { release = r; });
+  const dec = M.E.ctx.decodeAudioData; M.E.ctx.decodeAudioData = async ab => { await gate; return dec(ab); };
+  M.snapshot(); M.S.notes.push({ id: 'A', layer: 'lead', b: 0, d: 1, pitch: 64, vel: 0.8, input: 'keyboard' });
+  const p = M.loadStems(); await flush();
+  M.undo();                                                  // 等下载时撤掉 A
+  assert.equal(M.S.notes.length, 0);
+  release(); await p; await flush();
+  M.undo();                                                  // 撤掉分轨
+  assert.equal(M.S.notes.length, 0, 'A 不会回来');
+  assert.equal(M.S.clips.length, 0);
+  w.restoreTimers();
+});
+t('审 3/4 还在分析时：第二下 Ctrl+Z 接着往回撤；重做不丢撤销以后唱的那一遍', async () => {
+  const w = await world(), M = w.M;
+  M.S.loop.bars = 1; w.sel('voice');
+  await M.toggleRec(); await flush();
+  await w.until(() => M.hum.sessionTakes.length >= 2, 20);
+  await w.until(() => M.T.beatNow > 2.6, 5);
+  M.toggleRec();
+  const ids = M.S.clips.map(c => c.id);
+  M.undo(); M.undo();
+  await w.advance(2);
+  assert.deepEqual(M.S.clips.map(c => c.id), ids.slice(0, -1), '第二下撤掉了前一遍');
+  M.redo(); assert.deepEqual(M.S.clips.map(c => c.id), ids);
+  w.restoreTimers();
+});
+t('审 5 放弃变体以后重做不会把放弃的 pick 记录撤掉', async () => {
+  const w = await world(), M = w.M;
+  M.snapshot(); M.S.notes.push({ id: 'A', layer: 'lead', b: 0, d: 1, pitch: 64, vel: 0.8, input: 'keyboard' });
+  M.undo();
+  M.openTimbreVariants(); M.commitVariant('discard');
+  assert.equal(M.S.picks.length, 1);
+  M.redo();
+  assert.equal(M.S.picks.length, 1);
+  w.restoreTimers();
+});
+t('审 6 没存的录音超过 400 MB：页面先量，说清楚（不误走离线下载）', async () => {
+  const w = await world(), M = w.M;
+  const big = new Float32Array(80e6);                        // ~430 MB 的 base64
+  M.audio.set('a1', { buffer: fakeBuffer(1, 10, 48000), pcm: big, sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 1, audio: 'a1', input: 'hum', take: 1, active: true });
+  let dl = 0; const mk = w.doc.createElement; w.doc.createElement = tag => { const e = mk(tag); if (tag === 'a') e.click = () => dl++; return e; };
+  await M.save();
+  assert.equal(dl, 0); assert.equal(w.saves.length, 0);
+  assert.match(w.status(), /一次发不过去/);
+  w.restoreTimers();
+});
+t('审 7/8 拖进来的鼓文件不管原曲起点（照做律动模板）；打开会话时先读感官再判断分轨的起点', async () => {
+  const w = await world({ sense: { bpm: 150, downbeats: [0.36, 1.96] } }), M = w.M;
+  await M.addFileLayer({ name: 'my_drums.wav', arrayBuffer: async () => ({ dur: 6, ch: 1 }) });
+  assert.ok(M.groove, '拖进来的照做');
+  w.sessions['作曲_v1_会话.json'] = { ...St.makeState(), work: 'MV_T', anchor: 0, clips: [{ id: 'C9', layer: 'st', b: 0, dur: 6, audio: 'z', input: 'stem', active: true, src: '分轨/drums.wav@0.000-6.400' }], layers: [...St.makeState().layers, St.makeLayer('stem', 'stem', 'd', 4, { id: 'st' })], audioFiles: {} };
+  await M.loadSession('作曲_v1_会话.json'); await flush();
+  assert.equal(M.groove, null, '起点 0 没对上 0.36 的重拍：不做');
+  w.restoreTimers();
+});
+t('审 11/12 剪掉的那段重新识别不回来；贴出来的哼唱音改速度时跟着贴出来的那段录音走', async () => {
+  const w = await world(), M = w.M;
+  M.audio.set('a1', { buffer: fakeBuffer(1, 48000 * 2, 48000), pcm: new Float32Array(48000 * 2), sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 2, audio: 'a1', input: 'hum', take: 1, active: true, analysis: { mode: 'hum' }, gaps: [[0, 2.5]] });
+  const mel = [{ midi: 64, dur: 0.5 }, { midi: 67, dur: 0.5 }, { midi: 69, dur: 0.5 }, { midi: 71, dur: 0.5 }];
+  M.audio.get('a1').pcm = voiceLike(mel);
+  await M.reanalyze(M.S.layers.find(l => l.id === 'voice')); await w.advance(0.05);
+  assert.ok(M.S.notes.length > 0 && M.S.notes.every(n => n.b >= 2.5 - 1e-6), '剪掉的那段里认出来的音不要：' + M.S.notes.map(n => n.b.toFixed(2)));
+  M.S.clips[0].gaps = undefined;
+  M.S.notes = [{ id: 'h1', layer: 'voice', b: 2, d: 1, pitch: 64, vel: 0.8, input: 'hum', take: 'C1', raw: { b: 2, d: 1 } }];
+  M.TL.range = [0, 4]; M.copySel(); M.pasteAt(8);
+  const pc = M.S.clips.find(c => c.input === 'paste'), pn = M.S.notes.find(n => n.b === 10);
+  assert.equal(pn.rideClip, pc.id);
+  w.$('bpm').value = 120; w.$('bpm').onchange();
+  assert.ok(near(pn.b, 8 + 2 * (120 / 150)), `贴出来的音跟着录音换算 ${pn.b}`);
+  w.restoreTimers();
+});
+
 // ====================== C26 / D8：新层进场景 ======================
 t('D8/C26 场景建好以后才加的层：加一层 / 叠成新层 / 复制成合成层 / 拖进来的文件都进每个场景', async () => {
   const w = await world(), M = w.M;
@@ -911,7 +1005,8 @@ t('G8 离线下载：24 bit、文件名带版本（再存一次不撞名），�
   const s0 = ab.getUint8(44) | (ab.getUint8(45) << 8) | (ab.getUint8(46) << 16);
   assert.equal(s0, Math.round(0.5 * 8388607));
   const truth = JSON.parse(await js.blob.text());
-  assert.equal(truth.clips[0].file, wav.name);
+  assert.equal(truth.clips[0].file, '作曲/' + wav.name, '和存进作品时一样相对作品文件夹（挪进 作曲/ 就能打开 / 渲染）');
+  assert.match(w.status(), /挪进作品的 作曲\//);
   assert.match(w.status(), /允许下载多个文件/);
   w.restoreTimers();
 });

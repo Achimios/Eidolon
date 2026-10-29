@@ -64,7 +64,6 @@ function pushUndo() { const s = serial(); if (undoStack[undoStack.length - 1] ==
 // 不随撤销走的：作品（存到哪个文件夹）、麦克风延迟（量的是设备）；录音中的循环区（录音锁着它）
 function restore(str) {
   closeVariants();
-  undoGen++;
   const cur = S, front = playFront();
   S = JSON.parse(str); S.sel = layerById(S, cur.sel) ? cur.sel : S.layers[0]?.id;
   S.work = cur.work; S._sense = cur._sense;
@@ -72,11 +71,12 @@ function restore(str) {
   if (rec.on) S.loop = { ...cur.loop };
   tempoChanged(cur.bpm, front);
   syncAll();
+  if (T && T.playing) T.reclip();            // 撤回来的录音 / 剪掉的那段 / 贴出来的片段：马上按撤销后的放
 }
 // 和现在一模一样的撤销点跳过（空的一遍、重复推的）：每按一次都真的变
 // 还有唱完了、还在分析的那一遍：它才是最新的一步 → 这一下只撤它（不再往回撤一步）
 function undo() {
-  if (hum.pending > 0) { undoGen++; return status(`撤销：还在分析的那一遍不要了${rec.on ? '（正在唱的这一遍照收）' : ''}`); }
+  if (hum.pendingUg.includes(undoGen)) { undoGen++; return status(`撤销：还在分析的那一遍不要了${rec.on ? '（正在唱的这一遍照收）' : ''}`); }
   const cur = serial(); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
 function redo() { const cur = serial(); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
 // 自动存档只有一个格子：两个标签页都开着作曲器会互相盖掉 → 后开的那个停写并提示；存不进去（满了 / 被禁用）提示一次
@@ -270,7 +270,8 @@ function analyzeAsync(pcm, sr, opts) {
 const HUM_MAX_SEC = 600;
 const HUM_PREROLL = 0.15;  // 秒：每一遍往前多读这么多，只给分析看第一个音的起音（早唱的强拍不再少了头）
 // pending = 排了还没分析完的遍数；waiting = 还没从麦克风缓冲里取样本的那几遍；pickFor = 停了以后等它们都完了再开「挑哪一遍」
-const hum = { active: false, pass: null, takeNo: 0, sessionTakes: [], pending: 0, waiting: [], pickFor: null, afterPick: null };
+// pendingUg = 在分析的那几遍结束时的撤销号（撤销只撤还算数的那一遍：撤过一次就不再挡住下一次撤销）
+const hum = { active: false, pass: null, takeNo: 0, sessionTakes: [], pending: 0, pendingUg: [], waiting: [], pickFor: null, afterPick: null };
 // 录音锁在开始录的那一层（中途选别的层不影响这一遍存到哪）
 function humPassStart(seg) { hum.pass = { ctx0: seg.ctx0, b0: seg.b0, b1: seg.b1, layer: rec.layer }; }
 // 关着循环录哼唱：从 b0 到停（或歌尾）是一条；10 分钟自动停
@@ -298,11 +299,11 @@ function humPassEnd(ctxEnd, partial = false) {
   // 等麦克风的数据到齐（再晚 lat + 0.15 s）；取样本之前缓冲不裁（见 micOn），分析完之前不开挑选面板（见 maybePick）
   const job = { t0 }, sess = hum.sessionTakes, gen = sessionGen, ug = undoGen;   // 会话号在这一遍结束时就定下（之后再「打开…」，这一遍不进新会话）
   const isPartial = partial && bEnd < p.b1 - 1e-6;
-  hum.waiting.push(job); hum.pending++;
+  hum.waiting.push(job); hum.pending++; hum.pendingUg.push(ug);
   setTimeout(() => {
     const pr = processHumTake(L.id, p.b0, t0, t1, sess, gen, isPartial, ug);      // 取样本是同步的；分析在后台线程
     hum.waiting = hum.waiting.filter(w => w !== job);
-    pr.catch(e => status('这一遍分析失败：' + e.message)).finally(() => { hum.pending--; maybePick(); });
+    pr.catch(e => status('这一遍分析失败：' + e.message)).finally(() => { hum.pending--; hum.pendingUg.splice(hum.pendingUg.indexOf(ug), 1); maybePick(); });
   }, (lat + 0.2) * 1000 + Math.max(0, (t1 - E.now) * 1000));
 }
 // 停了以后：等每一遍都分析完再开「挑哪一遍」（固定等多久不行：延迟大时最后一遍会来不及）
@@ -644,7 +645,7 @@ function commitVariant(action) {
   const chosen = v.kind === 'timbre' ? { ...L.params } : null;
   if (v.kind === 'timbre') L.params = { ...v.orig };
   // 放弃 = 什么都没变（只多一条 pick 记录）：不记撤销点，不然放弃以后第一下 Ctrl+Z 看不出变化（撤掉的只是那条记录）
-  if (action !== 'discard') snapshot();
+  if (action !== 'discard') snapshot(); else redoStack = [];       // pick 记录变了：旧的重做不能再用（会把这条记录撤掉）
   const [ls] = loopRange(S);
   S.picks.push({ at: new Date().toISOString(), t: +(S.anchor + ls * spb(S)).toFixed(3), layer: v.layer, kind: v.kind, options: v.options.map(x => x.label), chose: o.label, action, input: 'pick' });
   if (v.kind === 'timbre') {
@@ -914,7 +915,8 @@ async function reanalyze(L0) {
     const an = res[i];
     S.notes = S.notes.filter(n => n.take !== c.id);
     const notes = notesToBeats(an.segs, { t0Beat: c.b, spb: spb(S), key: S.key, prog: S.prog, beatsPerBar: S.beatsPerBar, snap: opts.snap });
-    for (const n of notes) S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: c.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
+    // 剪掉的那几段（gaps）里认出来的音不要（声音已经剪了）
+    for (const n of notes) if (clipOpen(c, n.b, n.b + 1e-6).length) S.notes.push({ id: uid(), layer: layerId, input: 'hum', take: c.id, ...n, raw: { b: n.b, d: n.d, ...n.raw } });
     c.analysis = { ...c.analysis, mode: an.mode, guess: an.guess.mode, why: an.guess.why, tune_cents: +an.tuneCents.toFixed(1) };
     n0++;
   });
@@ -1033,7 +1035,8 @@ function mergeGaps(gs) {
 // 复制出去的音：拍和原始拍位都相对复制起点；不再挂在哪一遍哼唱上（贴出来 = 普通音符：换一遍 / 重新识别都不动它）
 function relNote(n, a) {
   const c = { ...n, b: n.b - a, ...(n.raw ? { raw: { ...n.raw, b: (n.raw.b ?? n.b) - a } } : {}) };
-  delete c.take; delete c._preview;
+  if (n.take || n.rideClip) c.fromHum = true;      // 贴的时候跟着一起贴的那段录音走（见 pasteAt）
+  delete c.take; delete c._preview; delete c.rideClip;
   return c;
 }
 // 复制成了返回 true；什么都没选 / 选的已经不在了 → 只提示，剪贴板不动
@@ -1063,20 +1066,26 @@ function pasteAt(b) {
   if (!clipboard) return status('剪贴板是空的');
   if (!Number.isFinite(b)) return status('贴到哪？先在标尺下半条点一下放光标');
   snapshot();
+  // 录音片段：叠在原有的上面（和音符一样不替换），不算哪一遍哼唱（input = paste，挑哪一遍不管它）
+  const sp = spb(S), pasted = [];
+  for (const p of clipboard.clips || []) {
+    if (!layerById(S, p.layer) || !audio.get(p.audio)) continue;
+    const c = { id: uid('C'), layer: p.layer, b: p.rel + b, dur: p.dur, audio: p.audio, input: 'paste', srcInput: p.srcInput, offset: p.offset, active: true, src: `复制自 ${p.from}` };
+    S.clips.push(c); pasted.push(c);
+  }
+  const nc = pasted.length;
+  // 哼唱的音贴出来以后跟着一起贴的那段录音（rideClip）：改速度时和那段声音一起换算（见 retimeHum）
   const ids = [];
-  for (const n of clipboard.notes) { const id = uid(); ids.push(id); S.notes.push({ ...n, id, b: n.b + b, ...(n.raw ? { raw: { ...n.raw, b: n.raw.b + b } } : {}) }); }
+  for (const n0 of clipboard.notes) {
+    const { fromHum, ...n } = n0, id = uid(), nb = n.b + b; ids.push(id);
+    const ride = fromHum && pasted.find(c => c.layer === n.layer && nb >= c.b - 1e-9 && nb < c.b + c.dur / sp);
+    S.notes.push({ ...n, id, b: nb, ...(n.raw ? { raw: { ...n.raw, b: n.raw.b + b } } : {}), ...(ride ? { rideClip: ride.id } : {}) });
+  }
   for (const [k, pts] of Object.entries(clipboard.curves)) {
     if (!pts.length) continue;
     let cur = (S.curves[k] || []).filter(p => p[0] < b || p[0] > b + clipboard.span);
     cur = cur.concat(pts.map(([pb, v]) => [pb + b, v])).sort((p, q) => p[0] - q[0]);
     S.curves[k] = cur;
-  }
-  // 录音片段：叠在原有的上面（和音符一样不替换），不算哪一遍哼唱（input = paste，挑哪一遍不管它）
-  let nc = 0;
-  for (const p of clipboard.clips || []) {
-    if (!layerById(S, p.layer) || !audio.get(p.audio)) continue;
-    S.clips.push({ id: uid('C'), layer: p.layer, b: p.rel + b, dur: p.dur, audio: p.audio, input: 'paste', srcInput: p.srcInput, offset: p.offset, active: true, src: `复制自 ${p.from}` });
-    nc++;
   }
   TL.sel = new Set(ids);
   status(`贴到第 ${(b / S.beatsPerBar + 1).toFixed(2)} 小节${nc ? `（含 ${nc} 段录音）` : ''}`); syncAll();
@@ -1112,14 +1121,13 @@ async function loadStems() {
   status(`载入 ${names.length} 条分轨（${t0.toFixed(2)}–${t1.toFixed(2)} s）…`, true);
   const msgs = [];
   let ok = 0;
-  const S0 = serial();                       // 撤销点等真载入了一条再记（一条都没载入就不留一个没变化的撤销点）
   for (const nm of names) {
     let buf;
     try {
       const r = await api(`/api/stem?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(nm)}&t0=${t0}&t1=${t1}`);
       buf = await E.ctx.decodeAudioData(await r.arrayBuffer());
     } catch (e) { msgs.push(`⚠️${nm} 没载入：${e.message}`); continue; }
-    if (!ok) { undoStack.push(S0); trimUndo(); redoStack = []; }
+    if (!ok) snapshot();                     // 撤销点等真载入了一条再记（按这一刻的状态：等下载时做的改动 / 撤销都算数）
     const aid = addAudio(buf, { file: `分轨/${nm}` });
     const L = makeLayer('stem', 'stem', '原曲·' + nm.replace(/\.wav$/i, ''), S.layers.length);
     S.layers.push(L); joinScenes(L.id);
@@ -1165,18 +1173,19 @@ function retimeHum(oldBpm) {
   if (oldBpm === S.bpm) return;
   const k = (60 / oldBpm) / spb(S), clips = new Map(S.clips.map(c => [c.id, c]));
   for (const n of S.notes) {
-    const c = n.take && clips.get(n.take); if (!c) continue;
+    const c = clips.get(n.take || n.rideClip); if (!c) continue;     // 哼唱的音 + 跟着贴出来那段录音的音
     n.b = c.b + (n.b - c.b) * k; n.d *= k;
     if (n.raw) { if (Number.isFinite(n.raw.b)) n.raw.b = c.b + (n.raw.b - c.b) * k; if (Number.isFinite(n.raw.d)) n.raw.d *= k; }
   }
   // 剪掉的几段（gaps，拍）也跟着录音走
   for (const c of S.clips) if (c.gaps) c.gaps = c.gaps.map(([p, q]) => [c.b + (p - c.b) * k, c.b + (q - c.b) * k]);
 }
-function buildGroove(buf) {
+// checkAnchor：原曲分轨要对上原曲重拍才做；拖进来的鼓文件不管原曲（做不成也不清掉已有的模板）
+function buildGroove(buf, checkAnchor = true) {
   const ch = buf.getChannelData(0);
   // 起点没对上原曲的重拍：格子的相位是错的，模板只会把音乱挪几十 ms → 不做，先让人选起点
   const db = S._sense?.downbeats || [];
-  if (db.length && !db.some(t => Math.abs(t - S.anchor) < 0.03)) { groove = null; return '律动模板没做：起点没对在原曲的重拍上（先在「原曲从第几小节开始」里选一个），对上以后重新载入分轨'; }
+  if (checkAnchor && db.length && !db.some(t => Math.abs(t - S.anchor) < 0.03)) { groove = null; return '律动模板没做：起点没对在原曲的重拍上（先在「原曲从第几小节开始」里选一个），对上以后重新载入分轨'; }
   const ons = detectOnsets(ch, buf.sampleRate);
   groove = grooveFromOnsets(ons.map(t => t / spb(S)), { beatsPerBar: S.beatsPerBar, spb: spb(S) });
   const ms = groove.offsets.map(o => Math.round(o * spb(S) * 1000));
@@ -1203,7 +1212,7 @@ async function addFileLayer(file) {
     const [ls] = loopRange(S);
     // fileOffset 0：存下来的就是这个文件本身，从头放（文件名里碰巧有「@128-」也不当切片号）
     S.clips.push({ id: uid('C'), layer: L.id, b: ls, dur: buf.duration, audio: aid, input: 'file', active: true, fileOffset: 0, src: file.name });
-    const gm = /drum|鼓/i.test(file.name) ? '\n' + buildGroove(buf) : '';
+    const gm = /drum|鼓/i.test(file.name) ? '\n' + buildGroove(buf, false) : '';
     const long = buf.duration > FILE_KEEP_SEC ? `\n⚠️超过 ${FILE_KEEP_SEC} s：保存时不会把它存进会话（重新打开时这层没声音）。长伴奏请放进作品的 分轨/ 再「载入原曲分轨」` : '';
     status(`拖进来：${file.name}（${buf.duration.toFixed(1)} s，${buf.numberOfChannels} 声道，从循环起点开始放）${gm}${long}`, !!(gm || long));
     syncAll();
@@ -1241,7 +1250,10 @@ async function save() {
       }
       // 会话里的片段也记上文件名（重新打开以后 exportTruth 和存下来的那份一样）
       const truth = exportTruth(S, { audioFiles: files }), session = exportSession({ ...S, clips: S.clips.map(c => files[c.audio] ? { ...c, file: files[c.audio] } : c) }, files);
-      const r = await netFetch(`/api/save?work=${encodeURIComponent(S.work)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ver, truth, session, audio: toSave }) });
+      const body = JSON.stringify({ ver, truth, session, audio: toSave });
+      // 太大服务器会直接断开（浏览器看到的是「连不上」，会误走离线下载）：先在这边量
+      if (body.length > 400 * 1024 * 1024) return status('保存失败：没存的录音太多，一次发不过去（服务器上限 400 MB ≈ 27 分钟）。删掉不要的那几遍（或那几层）再存', true);
+      const r = await netFetch(`/api/save?work=${encodeURIComponent(S.work)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
       if (r.status === 409) continue;
       if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
       const j = await r.json();
@@ -1270,12 +1282,12 @@ function downloadAll() {
   for (const c of S.clips) {
     const a = audio.get(c.audio); if (!a || a.file || files[c.audio]) continue;
     const nm = c.input === 'hum' ? `哼唱_${ver}_第${c.take ?? c.id}遍.wav` : `素材_${ver}_${c.id}.wav`;
-    files[c.audio] = nm; dl(nm, wavBlob(audioChannels(a), a.sr));
+    files[c.audio] = `作曲/${nm}`; dl(nm, wavBlob(audioChannels(a), a.sr));
   }
   dl(`作曲_${ver}.json`, new Blob([JSON.stringify(exportTruth(S, { audioFiles: files }), null, 1)], { type: 'application/json' }));
   dl(`作曲_${ver}_会话.json`, new Blob([JSON.stringify(exportSession(S, files))], { type: 'application/json' }));
   const n = Object.keys(files).length + 2;
-  const msg = `下载了 ${n} 个文件（作曲_${ver}…）到浏览器的下载文件夹${n > 2 ? '。浏览器问「允许下载多个文件」时点允许，不然只有第一个' : ''}`;
+  const msg = `下载了 ${n} 个文件（作曲_${ver}…）到浏览器的下载文件夹（要接着用：全部挪进作品的 作曲/ 文件夹）${n > 2 ? '。浏览器问「允许下载多个文件」时点允许，不然只有第一个' : ''}`;
   status('没连上 serve.py：' + msg, true);
   return msg;
 }
@@ -1340,6 +1352,7 @@ async function loadSession(name) {
     // 撤销记录清空：旧会话的录音音频下面就清掉了，撤回去只会剩没声音的空壳（存的时候还会丢）
     undoStack = []; redoStack = []; lastSaved = null; groove = null;
     audio.clear(); peaksCache.clear(); hum.sessionTakes = [];
+    await loadSense();                         // 先读原曲重拍 / 速度（会话里不存，见 exportSession）：下面做律动模板要用它判断起点
     for (const c of S.clips) {
       const fn = audioFiles[c.audio] || c.file;
       if (fn) c.file = fn;                    // 片段上也记着文件名：exportTruth 不靠 audioFiles 也对
@@ -1360,7 +1373,6 @@ async function loadSession(name) {
     Object.assign(S.settings, keep);
     // 旧版存的会话循环区可能跑到歌外面：拉回歌里
     S.loop.bars = Math.max(1, Math.min(S.loop.bars, S.songBars)); S.loop.start = Math.max(0, Math.min(S.loop.start, S.songBars - S.loop.bars));
-    await loadSense();                         // 原曲重拍 / 速度的缓存（会话里不存，见 exportSession）
     syncAll();
     // 打开的这一版就是存好的那一版：马上「定稿」不用再存一份
     const m = /^(作曲_v\d+)_会话\.json$/.exec(name);
