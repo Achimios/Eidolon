@@ -56,11 +56,11 @@ Dune 预告片 → Billie MV；Ash Thorp 式纯 2D motion design（PCB 素材，
 - ⭐新方向：自己的 **soft composer**（Nirvana 胜过 Mozart，能玩的乐器）+ Suno（👤网页端）。理念、处理器家族、生长算法、FIR/IIR 生长 = 极点即情绪：`_设计/理念_示波器与处理器.md`。
 - ✅示波器模拟器 `tools/scope_sim.py`（GPU，比实时快；光束亮度 ∝ 1/速度 + 余辉 + 辉光），用 Triple Hit 的 192 kHz 无损原曲对照作者视频：留出的 4 帧相关系数 0.89–0.98。样片 `Projekt_Visual/样片_示波器/`。差距：特亮点的光晕偏小；满屏噪声偏密。
 - 参考：Triple Hit（CC BY-NC-SA，`Assets/BUS ERROR Collective - Triple Hit/`）；osci-render（GPL，可当乐器）；mg-styles-15 clone 在 `Vault_Automata/_外部仓库/`（没跑）。
-- ✅合成器词表 v3（ReadScreen 过审，2026-10-27；v3 修了频谱缺泛音、加了左右声道波形；排队等👤看，不催）：`-给人类的解释/合成器词表.html`，素材 `Projekt_Visual/样片_示波器/词表/v3/`（每词：示波器用 wav + 听的 listen.wav + 带声 mp4 + 四格 + 频谱）；积木 `src/synthkit.py`，生成 `tools/synth_vocab.py` / `synth_vocab_page.py`。.venv 新装 pedalboard 0.9.25、pyloudnorm 0.2.0（👤允许下载）。
+- ✅合成器词表 v3（ReadScreen 过审，2026-10-27；v3 修了频谱缺泛音、加了左右声道波形）：`-给人类的解释/合成器词表.html`，素材 `Projekt_Visual/样片_示波器/词表/v3/`（现在页面指向 v4）（每词：示波器用 wav + 听的 listen.wav + 带声 mp4 + 四格 + 频谱）；积木 `src/synthkit.py`，生成 `tools/synth_vocab.py` / `synth_vocab_page.py`。.venv 新装 pedalboard 0.9.25、pyloudnorm 0.2.0（👤允许下载）。
 - 📝作曲器草案 `_设计/设计_作曲器.md`（层 / 场景 / 旋钮 / take / 显影；事件轨 `作曲.json` = 真值并进感官.json；三个选项 A Remix Can't Kill Us / B Suno / C 全自合成），⭐**八个开放问题等 👤**，拍板前不写代码。
 - ✅👤选 A → **Remix 示波器 demo v4**（ReadScreen 过审、已 Cortana 告诉 👤）：`Projekt_Visual/MV_Cant_Kill_Us/样片/Remix_示波器/demo_Remix示波器_25.95-57.98_v4.mp4` + A/B `AB_原曲同段_同LUFS_v4.wav`，分镜 / 改动 `分镜_v4.md`。工具 `tools/remix_cku.py audio|board|render --ver`；径向饱和反馈环 `synthkit.feedback_delay_sat_xy`。**等 👤耳朵判好不好听。**
 - 输入方式定了（作曲器 §四½：锁调电脑键盘 / 哼唱 / 拍 / XY 推子 / 挑变体，HTML）→ 👤另开会话「HTML composer」在做。
-- 待办（👤2026-10-29 问，不开工）：词表视频的音轨换成「听的版本」（画面照旧按延迟嵌入画），页面上的警告随之删掉；出 v4 等👤点头。
+- ✅词表 v4（👤2026-10-29「现在换」，ReadScreen 过审）：视频音轨 = 听的版本，画面照旧按延迟嵌入画（scope_sim.render_clip 的 sound_path）；页面指向 v4；根目录有「合成器词表.lnk」。
 - 待办（👤2026-10-29 问，不开工）：示波器实时嵌进作曲器——WebAudio 的 ChannelSplitter → 两个 AnalyserNode（或 AudioWorklet）取左右样本 → WebGL 画 XY 线 + 余辉；单声道层用 DelayNode 做延迟嵌入（τ = 1/4 周期）。归 HTML composer 做。离线 scope_sim 留着出成片。
 - 待办（不开工、不推给👤）：她的 SDF 切片 → x / y / z 三路音频 → 三维投影，第四路接四维切片（理念 §九）。
 - ✅（2026-10-28 已改：notes / hits 读 audible；clips 跨场景仍按 mute + 场景逐段算，旧导出没字段时现算并打日志）给 Fable（2026-10-27，它离线没转到）：HTML composer 的 `作曲.json` 的 notes / hits 新增 `"audible"`（按 mute + 场景算，独奏不参与）→ `tools/composer_render.py` 改成直接读它，删掉自己的 audibleAt 判断。新层会自动加入已有场景。

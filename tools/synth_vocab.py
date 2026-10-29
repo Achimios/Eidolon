@@ -523,7 +523,8 @@ def build(term, outdir, video=True):
     if video:
         from scope_sim import Params, render_clip
         p = Params(W=960, H=720, scale=scale)
-        render_clip(str(wav), outdir / f"{num}_{slug}_scope.mp4", 0.0, len(st) / SR, p, duty=0.9, log=lambda s: None)
+        render_clip(str(wav), outdir / f"{num}_{slug}_scope.mp4", 0.0, len(st) / SR, p, duty=0.9, log=lambda s: None,
+                    sound_path=str(outdir / f"{num}_{slug}_listen.wav"))   # 视频里的音轨 = 听的版本（v4 起；画面照旧按嵌入版画）
     return dict(num=num, slug=slug, cn=cn, en=en, mode=r["mode"], scale=round(scale, 3), embedded=embedded,
                 dur=round(len(st) / SR, 2), frames=[[t, h] for t, h in r["frames"]])
 

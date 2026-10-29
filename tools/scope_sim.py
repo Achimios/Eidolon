@@ -286,7 +286,8 @@ def render_frame(audio_path, t, p: Params, device=None):
     return sc.display(buf, int(round(t * p.fps)))
 
 
-def render_clip(audio_path, out, t0, t1, p: Params, device=None, duty=1.0, log=print):
+def render_clip(audio_path, out, t0, t1, p: Params, device=None, duty=1.0, log=print, sound_path=None):
+    """画面按 audio_path 画；视频里的音轨默认也是它，给了 sound_path 就换成它（如延迟嵌入：画用嵌入版，听用原声）"""
     import imageio_ffmpeg
     out = Path(out)
     if out.exists():
@@ -298,7 +299,7 @@ def render_clip(audio_path, out, t0, t1, p: Params, device=None, duty=1.0, log=p
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [ff, "-y", "-loglevel", "error",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{p.W}x{p.H}", "-r", str(p.fps), "-i", "-",
-           "-ss", f"{t0:.6f}", "-t", f"{n / p.fps:.6f}", "-i", str(audio_path),
+           "-ss", f"{t0:.6f}", "-t", f"{n / p.fps:.6f}", "-i", str(sound_path or audio_path),
            "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "320k", "-ar", "48000", "-shortest", str(out)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)

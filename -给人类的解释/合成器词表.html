@@ -30,12 +30,12 @@ img{width:100%;display:block;border-radius:4px;margin-top:12px}
 .foot b{color:var(--ink)}
 @media (max-width:820px){.row{grid-template-columns:1fr}.how{grid-template-columns:1fr}}
 </style></head><body><div class="wrap">
-<h1>合成器词表<small>15 个词 · 听 + 看 · v3</small></h1>
+<h1>合成器词表<small>15 个词 · 听 + 看 · v4</small></h1>
 <p class="lead">够用来指挥的 15 个词。每个词一句人话、一段几秒的声音、它在示波器上的样子。
-示波器画的是一个立体声 wav：左声道推光点左右走，右声道推光点上下走。真立体声的例子，听到的就是画出来的；延迟嵌入的例子，另有一个「听音色」的版本（只有真实的声音）。所有声音都是 numpy 现算的，没有采样，A 小调，120 BPM。</p>
+示波器画的是一个立体声 wav：左声道推光点左右走，右声道推光点上下走。真立体声的例子，听到的就是画出来的；延迟嵌入的例子，画面按嵌入版画，视频里放的是原声。所有声音都是 numpy 现算的，没有采样，A 小调，120 BPM。</p>
 <div class="how">
 <div><b>左 = x，右 = y</b><br>两个声道一样 → 一条 45° 斜线；只有左 → 横线；只有右 → 竖线；左右各走各的 → 一团。</div>
-<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。⚠️这个副本只为画图：外放（两个声道在空气里混成一个）时第 2、6、10… 次泛音会被抵消（戴耳机不会抵消，只是有点相位怪），所以听音色用每格的「听音色」播放器。</div>
+<div><b>延迟嵌入</b><br>单声道的声音，把右声道设成左声道晚 τ（四分之一个周期，几毫秒）。正弦 → 圆；任何稳定的音 → 一个闭环；乱的声音 → 乱结构。这个副本只用来画图，视频和播放器里放的都是原声（「示波器用 wav」链接里才是嵌入版：外放会抵消第 2、6、10… 次泛音）。</div>
 <div><b>亮 = 慢</b><br>光束走得慢的地方亮，快跳的地方暗。所以方波只剩四个亮点，失真的方块四个角最亮。每个例子的放大倍数单独调过（= 示波器的 V/div 旋钮）。</div>
 </div>
 <p class="lead">每格最下面那张图：最上两条是<b>左、右声道各自的波形</b>（绿 = 左 = x，红 = 右 = y），能直接看到右声道比左声道晚了多少；下面是<b>频谱图</b>：横轴时间，纵轴频率，越亮那个频率越响，一条横的亮线就是一个泛音。频谱画的是「听到的声音」，不是给示波器的副本。</p>
@@ -58,124 +58,124 @@ img{width:100%;display:block;border-radius:4px;margin-top:12px}
 </nav>
 <section id="t01"><div class="hd"><span class="num">01</span><h2>振荡器<span>Oscillator</span></h2></div>
 <p class="one">发声的源头：一个每秒重复几百次的形状。重复的次数就是音高。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×4.024 · 4.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×4.024 · 4.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>一个干净、没表情的低音 A。</p><p><b>看</b>一个圆。每秒被重画 110 次，所以看起来不动。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator_scope.jpg" alt="振荡器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/01_oscillator_spec.jpg" alt="振荡器 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator_scope.jpg" alt="振荡器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/01_oscillator_spec.jpg" alt="振荡器 波形和频谱"></section>
 <section id="t02"><div class="hd"><span class="num">02</span><h2>波形<span>Waveform</span></h2></div>
 <p class="one">振荡器重复的那个形状。四种基本形：正弦、三角、方波、锯齿，越尖的越亮、越吵。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×3.476 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×3.476 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>同一个音高，四次换「衣服」：圆润 → 木 → 空心的电子味 → 最亮的嗡嗡。</p><p><b>看</b>圆 → 菱形 → 四个角的光点（方波只停在两个值上）→ 带一条快跳暗线的斜三角。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform_scope.jpg" alt="波形 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/02_waveform_spec.jpg" alt="波形 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform_scope.jpg" alt="波形 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/02_waveform_spec.jpg" alt="波形 波形和频谱"></section>
 <section id="t03"><div class="hd"><span class="num">03</span><h2>泛音 / 音色<span>Harmonics / Timbre</span></h2></div>
 <p class="one">任何声音 = 基音 + 一串整数倍的泛音。泛音的多少和配比就是「音色」：为什么钢琴和小号弹同一个音听得出不同。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×3.04 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×3.04 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>音高一直没变，但声音一层层变亮，最后接近锯齿波。</p><p><b>看</b>圆上长出越来越多的小圈。泛音越多，形状越复杂。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics_scope.jpg" alt="泛音 / 音色 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/03_harmonics_spec.jpg" alt="泛音 / 音色 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics_scope.jpg" alt="泛音 / 音色 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/03_harmonics_spec.jpg" alt="泛音 / 音色 波形和频谱"></section>
 <section id="t04"><div class="hd"><span class="num">04</span><h2>ADSR 包络<span>ADSR Envelope</span></h2></div>
 <p class="one">一个音的音量怎么随时间走：Attack 起多快 / Decay 落多快 / Sustain 按住时停在多高 / Release 松开后多久消失。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms（按 110 Hz） · 放大 ×1.926 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms（按 110 Hz） · 放大 ×1.926 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前面一下拨弦（快起、立刻落）；后面一个铺底（慢慢浮起、按住、松开后慢慢退）。</p><p><b>看</b>形状大小跟着音量：拨弦是一闪而过的亮团，铺底是慢慢长大又慢慢缩回的环。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr_scope.jpg" alt="ADSR 包络 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/04_adsr_spec.jpg" alt="ADSR 包络 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr_scope.jpg" alt="ADSR 包络 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/04_adsr_spec.jpg" alt="ADSR 包络 波形和频谱"></section>
 <section id="t05"><div class="hd"><span class="num">05</span><h2>滤波器（截止 / 共振）<span>Filter (Cutoff / Resonance)</span></h2></div>
 <p class="one">把一部分频率削掉。低通 = 只放低频过去；截止频率 = 从哪开始削；共振 = 在截止那里鼓起一个尖峰，会「啸」。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×1.949 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×1.949 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>锯齿低音被「捂住 → 打开 → 再捂住」（24 dB/倍频程低通）；后半共振拉高，开合时有一声哨音在扫。</p><p><b>看</b>截止低：近乎一个光滑的环；打开：边缘出现锯齿和尖刺；共振高：环上缠了一圈高频的小波纹。频谱图里橙线（截止）以上的泛音变暗，共振时橙线附近亮一条。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter_scope.jpg" alt="滤波器（截止 / 共振） 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/05_filter_spec.jpg" alt="滤波器（截止 / 共振） 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter_scope.jpg" alt="滤波器（截止 / 共振） 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/05_filter_spec.jpg" alt="滤波器（截止 / 共振） 波形和频谱"></section>
 <section id="t06"><div class="hd"><span class="num">06</span><h2>LFO<span>LFO (Low-Frequency Oscillator)</span></h2></div>
 <p class="one">一个慢到听不见的振荡器（一般 &lt; 20 Hz），不发声，只用来推别的旋钮来回动。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×2.888 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms · 放大 ×2.888 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前半：音量每 2 秒呼吸一次；后半：音高每秒颤 6 次（颤音）。</p><p><b>看</b>前半：同一个形状慢慢胀缩；后半：形状在原地抖。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo_scope.jpg" alt="LFO 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/06_lfo_spec.jpg" alt="LFO 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo_scope.jpg" alt="LFO 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/06_lfo_spec.jpg" alt="LFO 波形和频谱"></section>
 <section id="t07"><div class="hd"><span class="num">07</span><h2>调制<span>Modulation</span></h2></div>
 <p class="one">让一个信号去推另一个参数。LFO、包络、键盘力度都可以是「源」；音高、截止、声像都可以是「目标」。连线 = 调制矩阵。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×2.338 · 4.2 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×2.338 · 4.2 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>同一段贝斯弹两遍：第一遍截止固定（闷）；第二遍每个音的包络去推截止（每下都「哇」地张嘴）。</p><p><b>看</b>第一遍形状一直很圆；第二遍每个音刚起来时满是尖刺，然后迅速收成圆。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation_scope.jpg" alt="调制 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/07_modulation_spec.jpg" alt="调制 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation_scope.jpg" alt="调制 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/07_modulation_spec.jpg" alt="调制 波形和频谱"></section>
 <section id="t08"><div class="hd"><span class="num">08</span><h2>FM（调频）<span>FM Synthesis</span></h2></div>
 <p class="one">用一个振荡器去快速推另一个振荡器的相位。两个音的频率比定「哪些泛音」，推的深度定「多亮」。整数比 → 乐音；非整数比 → 钟、金属。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 2.27 ms（按 110 Hz；钟声是 220 Hz 起） · 放大 ×3.212 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 2.27 ms（按 110 Hz；钟声是 220 Hz 起） · 放大 ×3.212 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前半：一个音被慢慢「拧亮」，从长笛变成铜管；后半：三下钟声（比例 3.5）。</p><p><b>看</b>圆被拧成越来越多瓣的花（深度越大瓣越多）；钟声是不闭合、一直在转的花纹。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm_scope.jpg" alt="FM（调频） 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/08_fm_spec.jpg" alt="FM（调频） 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm_scope.jpg" alt="FM（调频） 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/08_fm_spec.jpg" alt="FM（调频） 波形和频谱"></section>
 <section id="t09"><div class="hd"><span class="num">09</span><h2>失谐<span>Detune</span></h2></div>
 <p class="one">两个振荡器的音高故意差一点点。差出来的那一点会变成「拍」：一种慢慢起伏的摇摆感。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune_listen.wav"></audio></div>
-<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>
-<div class="meta">真立体声：左 110 Hz，右 110 + Δ Hz · 放大 ×4.316 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune_listen.wav"></audio></div>
+<p class="warn ok">这一格是真立体声：视频里的声音就是画出来的声音。</p>
+<div class="meta">真立体声：左 110 Hz，右 110 + Δ Hz · 放大 ×4.316 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前半：声音像在慢慢转（每 2 秒一次）；后半差得多，变成很快的颤动。</p><p><b>看</b>左右差一点 → 李萨如椭圆在圆和斜线之间慢慢翻转。转一圈的时间 = 差的那几 Hz 的倒数。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune_scope.jpg" alt="失谐 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/09_detune_spec.jpg" alt="失谐 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune_scope.jpg" alt="失谐 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/09_detune_spec.jpg" alt="失谐 波形和频谱"></section>
 <section id="t10"><div class="hd"><span class="num">10</span><h2>齐奏<span>Unison (Supersaw)</span></h2></div>
 <p class="one">同一个音用好几个略微失谐的振荡器同时弹，再左右铺开。trance、EDM 那种又宽又厚的「墙」就是它。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison_listen.wav"></audio></div>
-<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>
-<div class="meta">真立体声（齐奏声部左右铺开） · 放大 ×2.272 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison_listen.wav"></audio></div>
+<p class="warn ok">这一格是真立体声：视频里的声音就是画出来的声音。</p>
+<div class="meta">真立体声（齐奏声部左右铺开） · 放大 ×2.272 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前 2.8 秒：一个声部弹 A 小三和弦（窄、薄）；后半：每个音 7 个声部（突然变宽、变厚、在流动）。</p><p><b>看</b>一个声部、居中 = 一条斜线；齐奏后左右不再相等，斜线炸成一团在翻滚的云。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison_scope.jpg" alt="齐奏 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/10_unison_spec.jpg" alt="齐奏 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison_scope.jpg" alt="齐奏 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/10_unison_spec.jpg" alt="齐奏 波形和频谱"></section>
 <section id="t11"><div class="hd"><span class="num">11</span><h2>失真 / 饱和<span>Distortion / Saturation</span></h2></div>
 <p class="one">把声音推得太猛，波形的顶被压平。轻的叫饱和（温暖、变肥），重的叫失真（毛、凶）。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×5.127 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 4.54 ms（55 Hz） · 放大 ×5.127 · 6.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>一个圆润的低音，越推越粗、越凶，最后像吉他音箱。</p><p><b>看</b>圆慢慢被压成圆角方块：顶被削平的地方，光束停留得久，所以四个角最亮。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion_scope.jpg" alt="失真 / 饱和 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/11_distortion_spec.jpg" alt="失真 / 饱和 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion_scope.jpg" alt="失真 / 饱和 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/11_distortion_spec.jpg" alt="失真 / 饱和 波形和频谱"></section>
 <section id="t12"><div class="hd"><span class="num">12</span><h2>延迟 / 混响<span>Delay / Reverb</span></h2></div>
 <p class="one">延迟 = 回声，一下一下清楚地重复；混响 = 成千上万次回声糊在一起，变成「空间」。反馈 g 决定回声多久消失：g &lt; 1 会散，g → 1 永远不停（这就是 IIR 的极点）。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb_listen.wav"></audio></div>
-<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>
-<div class="meta">真立体声（乒乓：回声一左一右；混响：左右不一样的衰减） · 放大 ×1.976 · 7.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb_listen.wav"></audio></div>
+<p class="warn ok">这一格是真立体声：视频里的声音就是画出来的声音。</p>
+<div class="meta">真立体声（乒乓：回声一左一右；混响：左右不一样的衰减） · 放大 ×1.976 · 7.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>前半：一下拨弦，回声左右左右地弹走、越来越暗；后半：三个音进了一个大厅。</p><p><b>看</b>干声在中间是斜线；回声只在一边时变成横线 / 竖线；混响让左右各走各的，变成一团云。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb_scope.jpg" alt="延迟 / 混响 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/12_delay-reverb_spec.jpg" alt="延迟 / 混响 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb_scope.jpg" alt="延迟 / 混响 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/12_delay-reverb_spec.jpg" alt="延迟 / 混响 波形和频谱"></section>
 <section id="t13"><div class="hd"><span class="num">13</span><h2>侧链<span>Sidechain</span></h2></div>
 <p class="one">让 A 的音量被 B 控制：kick 一打，铺底就被压下去再弹回来。舞曲的「抽吸感」就是它。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain_listen.wav"></audio></div>
-<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>
-<div class="meta">真立体声：pad = 左右两个微失谐的正弦（慢转的椭圆），kick 居中（斜线） · 放大 ×2.333 · 4.6 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain_listen.wav"></audio></div>
+<p class="warn ok">这一格是真立体声：视频里的声音就是画出来的声音。</p>
+<div class="meta">真立体声：pad = 左右两个微失谐的正弦（慢转的椭圆），kick 居中（斜线） · 放大 ×2.333 · 4.6 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>第一小节：kick 和一个持续的长音叠在一起；第二小节：每打一下 kick，长音就让开再回来，整体在呼吸。</p><p><b>看</b>长音是一个慢慢转的圆 / 椭圆；开了侧链后，每次 kick 圆缩成一个点（只剩 kick 的一道斜线），150 ms 后再长回来。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain_scope.jpg" alt="侧链 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/13_sidechain_spec.jpg" alt="侧链 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain_scope.jpg" alt="侧链 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/13_sidechain_spec.jpg" alt="侧链 波形和频谱"></section>
 <section id="t14"><div class="hd"><span class="num">14</span><h2>琶音器<span>Arpeggiator</span></h2></div>
 <p class="one">你按住一个和弦，它自动把和弦里的音按节奏一个一个弹出来（往上、往下、来回）。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator_listen.wav"></audio></div>
-<p class="warn ok">这一格是真立体声：视频里的声音就是要听的声音。</p>
-<div class="meta">真立体声：左 = 低音 A (110 Hz)，右 = 琶音 · 放大 ×3.401 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator_listen.wav"></audio></div>
+<p class="warn ok">这一格是真立体声：视频里的声音就是画出来的声音。</p>
+<div class="meta">真立体声：左 = 低音 A (110 Hz)，右 = 琶音 · 放大 ×3.401 · 5.0 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>左耳一个持续的低音 A，右耳琶音 A–C–E–A&#x27;–E–C 按 16 分音符跑。</p><p><b>看</b>左右两个音高的比例 = 音程，画出来是李萨如图：八度 1:2 是 ∞ 字，五度 2:3 是三瓣。越协和的音程图越简单。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator_scope.jpg" alt="琶音器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/14_arpeggiator_spec.jpg" alt="琶音器 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator_scope.jpg" alt="琶音器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/14_arpeggiator_spec.jpg" alt="琶音器 波形和频谱"></section>
 <section id="t15"><div class="hd"><span class="num">15</span><h2>音序器<span>Step Sequencer</span></h2></div>
 <p class="one">一排格子（常见 16 步）循环播放：每一格放不放音、放哪个音。很多电子乐就是几排格子叠出来的。</p>
-<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer_scope.mp4"></video>
-<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer_listen.wav"></audio></div>
-<p class="warn">视频里的声音是给示波器用的：右声道是左声道晚几毫秒的副本，外放时两个声道混在一起会抵消一部分泛音。听音色请点上面这个。</p>
-<div class="meta">延迟嵌入 τ = 1.52 ms（按 E3 165 Hz） · 放大 ×2.792 · 8.5 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer_listen.wav">听的 wav</a></div></div>
+<div class="row"><div><video controls preload="metadata" src="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer_scope.mp4"></video>
+<div class="listen"><span>听音色</span><audio controls preload="none" src="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer_listen.wav"></audio></div>
+<p class="warn ok">视频里的声音是原声；画面按「右声道 = 左声道晚 τ」画（只为画图，不进声音）。</p>
+<div class="meta">延迟嵌入 τ = 1.52 ms（按 E3 165 Hz） · 放大 ×2.792 · 8.5 s · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer.wav">示波器用 wav</a> · <a href="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer_listen.wav">听的 wav</a></div></div>
 <div class="cues"><p><b>听</b>16 格的旋律循环两遍：每一格一个音（A 小调五声），有的格换一种波形，空格就停一下。</p><p><b>看</b>一步一个干净的闭环：音高变 → 环的倾斜和圈数变；波形变 → 圆 / 菱形 / 方 / 锯齿换着来；空格 = 只剩余辉。</p></div></div>
-<img src="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer_scope.jpg" alt="音序器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v3/15_sequencer_spec.jpg" alt="音序器 波形和频谱"></section>
+<img src="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer_scope.jpg" alt="音序器 示波器四格"><img src="../../../Projekt_Visual/样片_示波器/词表/v4/15_sequencer_spec.jpg" alt="音序器 波形和频谱"></section>
 <div class="foot">
 <p><b>和我们的理念接上的三处</b>（<code>_设计/理念_示波器与处理器.md</code>）</p>
 <p>· 延迟的反馈 g 就是 IIR 的极点：g &lt; 1 回声会散，g → 1 永远不停，g &gt; 1 炸开。和「FIR / IIR 生长」是同一个数学。<br>
