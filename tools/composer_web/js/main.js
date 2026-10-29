@@ -117,7 +117,7 @@ function events() {
 }
 // 同一层、同一起点的几遍哼唱 = 互相替换（只能有一遍在用）
 function sameTakeSlot(c, ch) { return c.layer === ch.layer && c.input === 'hum' && Math.abs(c.b - ch.b) < 1e-6; }
-// 挑哪一遍：录音在下一段开头才换（走带每段开头调 clipsForPlay 一次），音符跟着录音一起换（不会第 1 遍的人声配第 3 遍的旋律）
+// 挑哪一遍：音符跟着录音一起换（不会第 1 遍的人声配第 3 遍的旋律）。playIdx = 走带排的是哪一遍（试听时马上换，见 previewVariant）
 function clipsNow() {
   if (variants && variants.kind === 'takes') {
     const o = variants.options[variants.playIdx ?? variants.idx], ch = o && S.clips.find(c => c.id === o.clipId);
@@ -420,8 +420,8 @@ function recordHeld(h, ev) {
   const d = Math.min(dRaw, le - b);                  // 拖过循环尾巴的截在循环尾巴（不拆成两个音）；raw 留真按住的时长
   const vel = S.settings.velMode === 'hold' ? holdVelocity(holdSec) : h.vel;
   const input = L.input === 'tap' ? 'tap' : 'keyboard';
-  // raw.b = 真按下的那一拍（不早于歌的开头：那之前没有时间）
-  const n = { id: uid(), layer: L.id, b, d, vel, input, pass: rec.pass, raw: { b: Math.max(h.b, -S.anchor / spb(S)), d: dRaw, vel, hold_s: +holdSec.toFixed(3) } };
+  // raw.b = 真按下的那一拍（不早于歌的开头：那之前没有时间）；raw.pitch_raw = 真弹的那个音（之后吸和弦音 / 在时间线上改了音高也找得回来；拍的音高是自动填的，不算）
+  const n = { id: uid(), layer: L.id, b, d, vel, input, pass: rec.pass, raw: { b: Math.max(h.b, -S.anchor / spb(S)), d: dRaw, vel, hold_s: +holdSec.toFixed(3), ...(!h.sound && input === 'keyboard' ? { pitch_raw: h.pitch } : {}) } };
   if (h.sound) { n.sound = h.sound; n.d = Math.min(0.25, le - b); } else n.pitch = h.pitch;
   S.notes.push(n);
   rec.added.push(n.id);
@@ -461,7 +461,8 @@ function arpTick() {
       const p = tones[h.n % 3] + (h.n % 6 >= 3 ? 12 : 0);
       h.n++;
       const st = { when, voice: E.note(L, p, h.vel, Math.max(when, E.now), sp * 0.2), id: null };
-      const rb = rec.on && h.recId === rec.pass && L.id === rec.layer ? placeRecBeat(nb) : null;
+      // 关着循环：歌开头之前的格子（从第 0 拍开始录、预备拍里就按住了）不记 —— 记了会全挤到第 0 拍上叠成一团
+      const rb = rec.on && h.recId === rec.pass && L.id === rec.layer && (S.loop.on || nb >= -1e-9) ? placeRecBeat(nb) : null;
       if (rb !== null) {
         const d = S.loop.on ? Math.min(0.2, loopRange(S)[1] - rb) : 0.2;
         const n = { id: uid(), layer: L.id, b: rb, d, pitch: p, vel: h.vel, input: 'keyboard', derived: 'arp', pass: rec.pass, raw: { b: nb, d: 0.2, held_pitch: h.pitch } };
@@ -596,8 +597,8 @@ function openTimbreVariants() {
 function previewVariant() {
   if (!variants) return;
   if (variants.kind === 'timbre') { const L = layerById(S, variants.layer); L.params = { ...variants.options[variants.idx].params }; E.updateLayer(L, true); renderParams(); }
-  // 挑哪一遍：没在放 = 马上换；在放 = 下一段开头录音和音符一起换（clipsForPlay）
-  if (variants.kind === 'takes') { if (!T.playing) variants.playIdx = variants.idx; else if (variants.playIdx !== variants.idx) status('下一遍循环开头换成这一遍（人声和音符一起换）'); }
+  // 挑哪一遍：马上换，人声和音符一起换（在放的话录音从现在这一拍起重排，见 Transport.reclip）
+  if (variants.kind === 'takes' && variants.playIdx !== variants.idx) { variants.playIdx = variants.idx; T.reclip(); }
   renderVariants(); TL && TL.draw(T.beatNow);
 }
 // 变体里挑出来的音：规则生成的（鬼音 / 八度叠 / 三度和声 / 琶音……）来源一律记成 pick、不编 raw；其余没有 raw 的补上
@@ -620,7 +621,8 @@ function commitVariant(action) {
   // 音色：撤销点要是试听之前的音色（试听改的是 L.params）；用这个 = 试听时的音色 + 试听时拧过的旋钮
   const chosen = v.kind === 'timbre' ? { ...L.params } : null;
   if (v.kind === 'timbre') L.params = { ...v.orig };
-  snapshot();
+  // 放弃 = 什么都没变（只多一条 pick 记录）：不记撤销点，不然放弃以后第一下 Ctrl+Z 看不出变化（撤掉的只是那条记录）
+  if (action !== 'discard') snapshot();
   const [ls] = loopRange(S);
   S.picks.push({ at: new Date().toISOString(), t: +(S.anchor + ls * spb(S)).toFixed(3), layer: v.layer, kind: v.kind, options: v.options.map(x => x.label), chose: o.label, action, input: 'pick' });
   if (v.kind === 'timbre') {
@@ -641,11 +643,14 @@ function commitVariant(action) {
   const verb = { replace: '用了', overlay: '叠成新层', discard: '放弃了变体，留原样' }[action];
   status(`${verb}「${o.label}」`);
   variants = null; renderVariants(); syncAll();
+  if (v.kind === 'takes') T.reclip();                // 在放的是试听的那一遍：马上换回定下的那一遍
 }
 function closeVariants(revert = true) {
   if (!variants) return;
   if (revert && variants.kind === 'timbre') { const L = layerById(S, variants.layer); L.params = { ...variants.orig }; E.updateLayer(L, true); }
+  const wasTakes = variants.kind === 'takes';
   variants = null; renderVariants();
+  if (wasTakes && T) T.reclip();
 }
 function renderVariants() {
   const box = $('variants');
@@ -804,8 +809,12 @@ function renderLayers() {
     d.ondblclick = ev => { if (ev.target.dataset.a) return; const nm = prompt('层的名字', L.name); if (nm) { snapshot(); L.name = nm; syncAll(); } };
     box.appendChild(d);
   });
-  // 层列表自己会滚（定高布局）：数字键选的那层要露出来
-  box.querySelector('.layer.sel')?.scrollIntoView?.({ block: 'nearest' });
+  // 层列表自己会滚（定高布局）：数字键选的那层要露出来。只滚列表自己（scrollIntoView 在窄屏退回整页滚动时会让整页跳）
+  const s = box.querySelector('.layer.sel');
+  if (s && box.scrollHeight > box.clientHeight + 1) {
+    const r = s.getBoundingClientRect(), R = box.getBoundingClientRect();
+    if (r.top < R.top) box.scrollTop -= R.top - r.top; else if (r.bottom > R.bottom) box.scrollTop += r.bottom - R.bottom;
+  }
 }
 const P = (label, key, min, max, step, fmt = v => v) => ({ label, key, min, max, step, fmt });
 const SYNTH_GROUPS = [
@@ -896,7 +905,8 @@ function copyHumToSynth(L) {
   snapshot();
   const nl = makeLayer('synth', 'lead', `${L.name}→合成`, S.layers.length);
   S.layers.push(nl); joinScenes(nl.id);
-  for (const n of src) { const c = { ...n, id: uid(), layer: nl.id }; delete c.take; delete c.bend; S.notes.push(c); }
+  // 合成层不带滑音：音高取整（不吸附唱出来的小数只留在 raw.pitch_raw），页面和渲染放的一样
+  for (const n of src) { const c = { ...n, id: uid(), layer: nl.id, pitch: Math.round(n.pitch) }; delete c.take; delete c.bend; S.notes.push(c); }
   S.sel = nl.id; syncAll(); status('复制成了一条合成层（原哼唱层不动）');
 }
 function renderKeys() {
@@ -994,7 +1004,9 @@ function relNote(n, a) {
 function copySel() {
   if (TL.range) {
     const [a, z] = TL.range;
-    const notes = events().filter(n => !n._preview && n.b >= a && n.b < z).map(n => relNote(n, a));
+    // 按存着的音算（变体面板开着时，刚录的音被试听的变体顶掉了，但它们还在：一样复制）；没在用的那几遍哼唱的音不算
+    const act = new Set(clipsNow().filter(c => c.active).map(c => c.id));
+    const notes = S.notes.filter(n => (!n.take || act.has(n.take)) && n.b >= a && n.b < z).map(n => relNote(n, a));
     const curves = Object.fromEntries(Object.entries(S.curves).map(([k, p]) => [k, p.filter(q => q[0] >= a && q[0] <= z).map(q => [q[0] - a, q[1]])]));
     if (!notes.length && !Object.values(curves).some(p => p.length)) { status('这一段里没有音符也没有曲线'); return false; }
     clipboard = { span: z - a, notes, curves };
@@ -1469,11 +1481,16 @@ async function boot() {
       if (prev && prev.b0 <= ls + 1e-9 && prev.b1 >= le - 1e-9) {
         // 一遍循环结束：哼唱这一遍收起来（存的时候自己记撤销点）；键盘 / XY 的这一遍可单独撤销
         if (hum.active) humPassEnd(ng ? ng.ctx0 : E.now);
-        else pushUndo();
+        else {
+          // 撤销点等这一遍真的听完再记（走带排程比听到早约 120 ms + 输出延迟：在排程时刻记，最后那一下会算进下一遍）
+          const gen = sessionGen, heardEnd = (ng ? ng.ctx0 : E.now) + (E.ctx.outputLatency || 0) + (E.ctx.baseLatency || 0);
+          setTimeout(() => { if (gen === sessionGen) pushUndo(); }, Math.max(0, (heardEnd - E.now) * 1000 + 30));
+        }
       }
       if (ng && hum.active && Math.abs(ng.b0 - ls) < 1e-9) humPassStart(ng);
     },
     onStop: () => { if (rec.on) stopRec(); },
+    onSkip: sec => status(`页面被弹窗挡住了 ${sec.toFixed(1)} s：那段没补放（不然那段的音会一起涌出来），从现在接着放`),
   });
   TL = new Timeline($('tl'), {
     getState: () => S, events, clips: clipsNow, peaks: peaksOf, shownLanes: () => shownLanes,

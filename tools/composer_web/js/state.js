@@ -133,7 +133,7 @@ export function exportTruth(s, { audioFiles = {}, macroFps = 60, created = new D
   for (const n of [...live].sort((a, b) => a.b - b.b)) {
     // raw 只导出真弹 / 真唱过的：没有原始拍位就不编一个；凭空生成的（鬼音）没有原始演奏
     const hasRaw = n.raw && Number.isFinite(n.raw.b) && !NO_SOURCE.has(n.derived);
-    const raw = hasRaw ? { t: T(n.raw.b), ...(n.raw.d !== undefined ? { dur: D(n.raw.d) } : {}), ...(n.raw.pitch_raw !== undefined ? { pitch_raw: n.raw.pitch_raw } : {}), ...(n.raw.vel !== undefined ? { vel: n.raw.vel } : {}), ...(n.raw.db !== undefined ? { db: n.raw.db } : {}) } : undefined;
+    const raw = hasRaw ? { t: T(n.raw.b), ...(n.raw.d !== undefined ? { dur: D(n.raw.d) } : {}), ...(n.raw.pitch_raw !== undefined ? { pitch_raw: n.raw.pitch_raw } : {}), ...(n.raw.held_pitch !== undefined ? { held_pitch: n.raw.held_pitch } : {}), ...(n.raw.vel !== undefined ? { vel: n.raw.vel } : {}), ...(n.raw.db !== undefined ? { db: n.raw.db } : {}) } : undefined;
     const input = n.input || (n.derived ? 'pick' : n.input);          // 规则生成的音：来源 = 👤在变体里挑的
     const audible = inMixAt(s, L(n.layer), n.b);
     if (n.sound) hits.push({ t: T(n.b), layer: n.layer, sound: n.sound, vel: r3(n.vel), input, audible, ...(raw ? { raw } : {}), ...(n.derived ? { derived: n.derived } : {}) });
@@ -179,7 +179,7 @@ export function exportTruth(s, { audioFiles = {}, macroFps = 60, created = new D
     file: audioFiles[c.audio] || c.file || null, ...(c.src ? { src: c.src } : {}), ...(c.analysis ? { analysis: c.analysis } : {}),
   }));
   return {
-    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹，clips.offset = 从这个文件开头算的片内起点（秒）；layers.mute 进成片，独奏（solo）只是页面试听、不导出；notes / hits 的 audible 是导出时按 mute + scenes 算的快照，solo 不参与；clips 的 audible_spans = 这段录音在成片里真正发声的时间段（同样按 mute + scenes，solo 不参与）；derived = 规则生成的（不是弹 / 唱出来的），凭空生成的没有 raw；bend.cents 相对导出的整数 pitch；tension 为空 = 全程 0.5。macros：逐帧，第 0 帧在 t0（= grid.anchor，不是 0 秒）；存的是旋钮原值，只列动过的，没列的用 macro_defaults；生效值 = 原值 × (a + b × tension)（a、b 见 macro_rules），没列出的旋钮也照这个随张力变。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
+    _说明: 'HTML 作曲器导出的真值。t = 歌曲播放时间（秒，= grid.anchor + 拍 × 60 / bpm）；raw = 原始演奏（没吸附），其余是解释后的；clips.file 相对作品文件夹，clips.offset = 从这个文件开头算的片内起点（秒）；layers.mute 进成片，独奏（solo）只是页面试听、不导出；notes / hits 的 audible 是导出时按 mute + scenes 算的快照，solo 不参与；clips 的 audible_spans = 这段录音在成片里真正发声的时间段（同样按 mute + scenes，solo 不参与）；derived = 规则生成的（不是弹 / 唱出来的），凭空生成的没有 raw；raw.pitch_raw = 真弹 / 真唱的音高（键盘是整数，哼唱是小数），琶音的 raw.held_pitch = 按住的那个键；bend.cents 相对导出的整数 pitch；tension 为空 = 全程 0.5。macros：逐帧，第 0 帧在 t0（= grid.anchor，不是 0 秒）；存的是旋钮原值，只列动过的，没列的用 macro_defaults；生效值 = 原值 × (a + b × tension)（a、b 见 macro_rules），没列出的旋钮也照这个随张力变。页面里的声音只是预览，最终音质由 Python 读这份渲染。',
     generator: 'composer_web/1',
     created,
     work: s.work,

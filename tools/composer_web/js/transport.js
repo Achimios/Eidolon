@@ -72,10 +72,14 @@ export class Transport {
     if (!this.playing) return;
     const s = this.S(), sp = spb(s);
     const horizon = this.e.now + 0.12;
+    let skipped = 0;
     for (let guard = 0; guard < 8; guard++) {
       const g = this.segs[this.segs.length - 1];
       const gEnd = g.ctx0 + (g.b1 - g.b0) * sp;
       const tEnd = Math.min(horizon, gEnd);
+      // 弹窗（改名 / 定稿确认）挡住了页面、音频时钟照走：醒来时排程落在过去 → 错过的那段不补排（不然那段的音一起涌出来），从现在接着排
+      const late = g.b0 + (this.e.now - 0.02 - g.ctx0) / sp;
+      if (late > this.nextB + 1e-9) { const to = Math.min(late, g.b1); skipped += (to - this.nextB) * sp; this.nextB = to; }
       const bB = g.b0 + (tEnd - g.ctx0) / sp;
       if (bB > this.nextB) this._events(g, this.nextB, bB);
       this.nextB = Math.max(this.nextB, bB);
@@ -103,6 +107,7 @@ export class Transport {
         break;
       }
     }
+    if (skipped > 0.05) this.h.onSkip?.(skipped);
     this._clipGates();
     this._macros();
   }
@@ -127,7 +132,9 @@ export class Transport {
           this.e.hit(L, n.sound, n.vel, when);
           if (n.sound === 'kick') this.e.duck(when, this._macroEff(n.b).sidechain);
         } else if (L.kind === 'synth' || (L.kind === 'voice' && L.params.synthOn)) {
-          this.e.note(L, n.pitch, n.vel, when, Math.max(0.03, n.d * sp), L.kind === 'voice' && L.params.bendOn ? n.bend : null);
+          // 和 Python 渲染一样：只有跟唱带滑音时音高可以是小数（小数并进音分曲线）；别的一律放整数音高
+          const bend = L.kind === 'voice' && L.params.bendOn && n.bend?.cents?.length > 1 ? n.bend : null;
+          this.e.note(L, bend ? n.pitch : Math.round(n.pitch), n.vel, when, Math.max(0.03, n.d * sp), bend);
         }
       } catch (err) {
         if (!this._warned) { this._warned = true; console.warn('有一个音排不进去，跳过', n, err); }
@@ -142,15 +149,17 @@ export class Transport {
   }
   // 录音 / 分轨：按段排；场景边界处切开（每片单独一个增益，场景切点是准的）。
   // 不响的片也排上（增益 0）：静音 / 独奏 / 场景勾选 / 原声音量在播放中改了，_clipGates 下一 tick 就生效，不用等下一遍
+  // 段的开头已经过去了（弹窗挡住以后补排、reclip 中途重排）：只排从现在起的那部分（片内起点跟着往后挪，声音不错位）
   _clips(g) {
     const s = this.S(), sp = spb(s);
     const clips = this.h.clips ? this.h.clips() : s.clips;
+    const nowB = g.b0 + (this.e.now + 0.01 - g.ctx0) / sp;
     for (const c of clips) {
       if (!c.active) continue;
       const L = layerById(s, c.layer); if (!L) continue;
       const buf = this.h.buffer?.(c.audio); if (!buf) continue;
       const cEnd = c.b + c.dur / sp;
-      const a = Math.max(c.b, g.b0), z = Math.min(cEnd, g.b1);
+      const a = Math.max(c.b, g.b0, nowB), z = Math.min(cEnd, g.b1);
       if (!(z > a)) continue;
       const cuts = [a, ...s.scenes.map(sc => sc.bar * s.beatsPerBar).filter(x => x > a && x < z), z];
       for (let i = 0; i < cuts.length - 1; i++) {
@@ -160,6 +169,14 @@ export class Transport {
         if (src) this.live.push({ src, layer: L.id, p0, p1, when, end: when + dur, v });
       }
     }
+  }
+  // 片段换了（挑哪一遍试听 / 挑定了 / 剪了录音）：正在放的录音 / 分轨从现在起按新的重排，不等下一段。旧的淡出 40 ms 再停（不咔一下）
+  reclip() {
+    if (!this.playing) return;
+    const now = this.e.now, sp = spb(this.S());
+    for (const c of this.live) { this.e.clipGain?.(c.src, 0); try { c.src.stop(now + 0.04); } catch (e) { /* 已停 */ } }
+    this.live = [];
+    for (const g of this.segs) if (g.ctx0 + (g.b1 - g.b0) * sp > now) this._clips(g);
   }
   // 每 tick：按片子此刻放到的那一拍重算增益（还没开始的片按它的起点）。场景没改时片内不跨场景，等于按起点算
   _clipGates() {

@@ -461,7 +461,7 @@ t('C13/C31 延迟 300 ms：停了以后等最后一遍也分析完才开挑选�
 });
 
 // ====================== C15：挑哪一遍的试听 ======================
-t('C15 挑哪一遍：音符跟着正在放的那一遍录音（放着的时候到下一段一起换）', async () => {
+t('C15 挑哪一遍：音符跟着正在放的那一遍录音；放着的时候马上换（录音从这一拍起重排、片内起点跟着挪），挑定 / 放弃也马上换回', async () => {
   const w = await world(), M = w.M;
   for (const k of [1, 2, 3]) {
     M.audio.set('a' + k, { buffer: fakeBuffer(1, 48000, 48000), pcm: null, sr: 48000, file: null });
@@ -472,13 +472,41 @@ t('C15 挑哪一遍：音符跟着正在放的那一遍录音（放着的时候�
   M.variants.idx = 0; M.previewVariant();                 // 没在放：马上换
   assert.deepEqual(M.clipsNow().filter(c => c.active).map(c => c.id), ['C1']);
   assert.deepEqual(M.events().filter(x => x.take).map(x => x.id), ['n1']);
-  M.T.start(0); await w.advance(0.2);
-  M.variants.idx = 1; M.previewVariant();                 // 放着：这一段还是第 1 遍
-  assert.deepEqual(M.events().filter(x => x.take).map(x => x.id), ['n1']);
-  await w.until(() => M.T.segs.length >= 2, 10);          // 下一段开头：录音和音符一起换
+  M.T.start(0); await w.advance(1.0);
+  const n0 = M.E.clipsStarted.length;
+  M.variants.idx = 1; M.previewVariant();                 // 放着：马上换成第 2 遍
   assert.deepEqual(M.events().filter(x => x.take).map(x => x.id), ['n2']);
-  const lastStart = M.E.clipsStarted[M.E.clipsStarted.length - 1];
-  assert.equal(lastStart.buf, M.audio.get('a2').buffer);
+  const st = M.E.clipsStarted.slice(n0);
+  assert.equal(st.length, 1, '只重排了一条');
+  assert.equal(st[0].buf, M.audio.get('a2').buffer);
+  assert.ok(st[0].off > 0.8 && st[0].off < 1.1, `片内起点跟着现在这一拍 ${st[0].off}`);
+  assert.ok(st[0].when >= sched.now - 1e-9, '不排在过去');
+  const n1 = M.E.clipsStarted.length;
+  M.variants.idx = 2; M.commitVariant('discard');         // 放弃 = 留原样（第 3 遍）：马上换回
+  assert.equal(M.E.clipsStarted.slice(n1)[0].buf, M.audio.get('a3').buffer);
+  M.T.stop(true);
+  w.restoreTimers();
+});
+t('弹窗挡住播放 2 s：醒来时那段的音不一起涌出来（不排在过去），提示跳过了；录音片段从现在这一拍起接着放', async () => {
+  const w = await world(), M = w.M;
+  M.S.notes = Array.from({ length: 16 }, (_, k) => ({ id: 'm' + k, layer: 'lead', b: k, d: 0.5, pitch: 64, vel: 0.8, input: 'keyboard' }));
+  M.audio.set('a1', { buffer: fakeBuffer(1, 48000 * 7, 48000), pcm: null, sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 6.4, audio: 'a1', input: 'hum', take: 1, active: true });
+  M.T.start(0); await w.advance(0.5);
+  const k0 = M.E.notes.length, c0 = M.E.clipsStarted.length;
+  // 弹窗：定时器都不跑，音频时钟照走 2 s（这一段 6.4 s 里）
+  sched.now += 2;
+  for (const tm of sched.timers) if (tm.at < sched.now) tm.at = sched.now;
+  await w.advance(0.05);
+  const fresh = M.E.notes.slice(k0);
+  assert.ok(fresh.every(v => v.when >= sched.now - 0.06), '没有排在过去的音：' + fresh.map(v => (v.when - sched.now).toFixed(3)));
+  assert.ok(fresh.length <= 2, `只排了马上要响的 ${fresh.length}`);
+  assert.ok(w.statusLog.some(s => /弹窗挡住/.test(s)));
+  // 走到下一遍循环：录音从段头起排（不受影响）
+  await w.until(() => M.T.segs.length >= 2, 10);
+  const cs = M.E.clipsStarted.slice(c0);
+  assert.ok(cs.length >= 1 && near(cs[cs.length - 1].off, 0, 1e-6));
+  M.T.stop(true);
   w.restoreTimers();
 });
 
@@ -622,6 +650,96 @@ t('C40 哼唱录了几遍：每按一次 Ctrl+Z 撤掉一遍（不会隔一次�
   M.closeVariants();
   const k = M.S.clips.length;
   for (let i = 1; i <= k; i++) { M.undo(); assert.equal(M.S.clips.length, k - i, `第 ${i} 下`); }
+  w.restoreTimers();
+});
+
+// ====================== 2026-10-29 第一批：低优先的尾巴 ======================
+t('#9 不吸附的哼唱音：复制成合成层取整；合成层 / 关了滑音的跟唱一律放整数音高（和渲染一样）', async () => {
+  const w = await world(), M = w.M;
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 6.4, audio: 'x', input: 'hum', take: 1, active: true });
+  M.S.notes.push({ id: 'h1', layer: 'voice', b: 0.5, d: 1, pitch: 64.37, vel: 0.8, input: 'hum', take: 'C1', raw: { b: 0.5, d: 1, pitch_raw: 64.37 }, bend: { dt: 0.02, cents: [0, 5, 0] } });
+  M.copyHumToSynth(M.S.layers.find(l => l.id === 'voice'));
+  const c = M.S.notes.find(x => x.layer !== 'voice');
+  assert.equal(c.pitch, 64); assert.equal(c.raw.pitch_raw, 64.37); assert.equal(c.bend, undefined);
+  c.pitch = 64.37;                                           // 万一别的路子塞进来小数
+  const V = M.S.layers.find(l => l.id === 'voice');
+  M.T.start(0); await w.advance(0.6);
+  const played = M.E.notes.filter(v => v.when > 0);
+  assert.ok(played.filter(v => v.layer === c.layer).every(v => v.pitch === 64), '合成层放整数');
+  assert.ok(played.some(v => v.layer === 'voice' && near(v.pitch, 64.37)), '带滑音的跟唱放小数（小数并进音分曲线导出）');
+  M.T.stop(true); V.params.bendOn = false; M.E.notes.length = 0;
+  M.T.start(0); await w.advance(0.6);
+  assert.ok(M.E.notes.filter(v => v.layer === 'voice').every(v => v.pitch === 64), '关了滑音：整数');
+  M.T.stop(true); w.restoreTimers();
+});
+t('#10 变体面板开着（刚录完）：范围复制 / Ctrl+D 也带上刚录的音', async () => {
+  const w = await world(), M = w.M;
+  w.sel('lead');
+  await M.toggleRec(); await w.toBeat(1); await w.tap('KeyA'); await w.toBeat(2); await w.tap('KeyS');
+  M.toggleRec();
+  assert.equal(M.variants?.kind, 'notes');
+  M.TL.range = [0, 4]; assert.equal(M.copySel(), true);
+  assert.equal(M.clipboard.notes.length, 2);
+  w.restoreTimers();
+});
+t('#11 键盘弹的音：raw.pitch_raw = 真弹的音（吸和弦音 / 改音高以后还在）；琶音的 held_pitch 导出', async () => {
+  const w = await world(), M = w.M;
+  w.sel('lead');
+  await M.toggleRec(); await w.toBeat(1); await w.tap('KeyA');
+  M.toggleRec(); M.closeVariants();
+  const nt = M.S.notes[0], p0 = nt.pitch;
+  assert.equal(nt.raw.pitch_raw, p0);
+  nt.pitch = p0 + 3;
+  const ex = truthOf(M).notes[0];
+  assert.equal(ex.raw.pitch_raw, p0); assert.equal(ex.pitch, p0 + 3);
+  M.S.notes.push({ id: 'a1', layer: 'lead', b: 2, d: 0.2, pitch: 67, vel: 0.8, input: 'keyboard', derived: 'arp', raw: { b: 2, d: 0.2, held_pitch: 64 } });
+  assert.equal(truthOf(M).notes.find(x => x.derived === 'arp').raw.held_pitch, 64);
+  assert.deepEqual(St.validateTruth(truthOf(M)), []);
+  w.restoreTimers();
+});
+t('#28 Esc 放弃变体以后：第一下 Ctrl+Z 就撤掉这次录音（看得见）', async () => {
+  const w = await world(), M = w.M;
+  w.sel('lead');
+  await M.toggleRec(); await w.toBeat(1); await w.tap('KeyA');
+  M.toggleRec();
+  w.down('Escape');
+  assert.equal(M.variants, null); assert.equal(M.S.notes.length, 1);
+  M.undo();
+  assert.equal(M.S.notes.length, 0, '第一下就撤掉了');
+  w.restoreTimers();
+});
+t('C8 关循环从第 0 拍录、预备拍里就按住琶音：歌开头之前的格子不记（不挤到第 0 拍叠成一团）', async () => {
+  const w = await world(), M = w.M;
+  M.S.layers.push(St.makeLayer('synth', 'arp', '琶音', 4, { id: 'arp', mute: true }));
+  M.S.loop.on = false; M.TL.cursor = 0; w.sel('arp');
+  await M.toggleRec();
+  const g = M.T.segs[0];
+  await w.until(() => sched.now - w.outLat >= g.ctx0 + (4 - 0.45) * 0.4);    // 第 0 拍前 0.45 拍按下
+  w.down('KeyA');
+  await w.toBeat(1);
+  w.up('KeyA'); M.toggleRec();
+  const bs = M.S.notes.filter(x => x.derived === 'arp').map(x => x.b);
+  assert.equal(bs.filter(b => near(b, 0)).length, 1, `第 0 拍只有一个 ${bs}`);
+  assert.ok(bs.every(b => b >= 0));
+  assert.ok(truthOf(M).notes.every(x => !x.raw || x.raw.t >= 0), 'raw.t 不是负的');
+  w.restoreTimers();
+});
+t('#25 一遍循环的撤销点等这一遍听完再记：最后一拍的音和这一遍一起撤', async () => {
+  const w = await world(), M = w.M;
+  M.S.loop.bars = 1; w.sel('drums');
+  await M.toggleRec();
+  await w.toBeat(0.5); await w.tap('KeyA');                // 第 1 遍
+  const g2 = await (async () => { await w.until(() => M.T.segs.length >= 3); return M.T.segs[M.T.segs.length - 1]; })();
+  // 排程已经进了第 2 遍、但还没听到：这时按的还是第 1 遍的最后一拍
+  await w.until(() => sched.now - w.outLat >= g2.ctx0 - 0.4 * 0.3);
+  await w.tap('KeyS', 0.02);
+  await w.toBeat(0.5); await w.advance(0.3);               // 进了第 2 遍
+  await w.tap('KeyD');
+  M.T.stop();                                              // 停 = 停录
+  M.closeVariants();
+  M.undo();
+  const left = M.S.notes.map(x => x.sound).sort();
+  assert.deepEqual(left, ['kick', 'snare'], `撤掉第 2 遍以后第 1 遍的两下都在：${left}`);
   w.restoreTimers();
 });
 
