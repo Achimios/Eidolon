@@ -98,11 +98,23 @@ t('吸附 100% 落在 1/8 格上；60% 介于原样和格子之间；原始值�
 });
 t('律动模板：从「每个 16 分都晚 20 ms」的起音里学出偏移，并能吸上去', () => {
   const spb = 0.4, late = 0.02 / spb;
-  const ons = []; for (let k = 0; k < 64; k++) ons.push(k * 0.25 + (k % 2 ? late : 0));
-  const g = In.grooveFromOnsets(ons);
-  assert.ok(Math.abs(g.offsets[1] - late) < 1e-6 && Math.abs(g.offsets[0]) < 1e-6);
+  const ons = []; for (let k = 0; k < 64 * 4; k++) ons.push(k * 0.25 + (k % 2 ? late : 0));      // 16 小节：每格 16 个起音
+  const g = In.grooveFromOnsets(ons, { spb });
+  const shrink = 16 / 18;
+  assert.ok(Math.abs(g.offsets[1] - late * shrink) < 1e-6 && Math.abs(g.offsets[0]) < 1e-6);
   const q = In.quantize([{ b: 0.24, d: 0.2 }], { grid: '1/16', strength: 1, groove: g });
-  assert.ok(Math.abs(q[0].b - (0.25 + late)) < 1e-6);
+  assert.ok(Math.abs(q[0].b - (0.25 + late * shrink)) < 1e-6);
+});
+t('律动模板去噪：整体晚 15 ms（起音检测滞后）减掉；起音少的格子往 0 收；不到 4 ms 的当 0', () => {
+  const spb = 0.4, lag = 0.015 / spb, late = 0.02 / spb;
+  const ons = []; for (let k = 0; k < 256; k++) ons.push(k * 0.25 + lag + (k % 4 === 2 ? late : 0) + (k % 4 === 3 ? 0.002 / spb : 0));
+  const g = In.grooveFromOnsets(ons, { spb });
+  assert.ok(Math.abs(g.common - lag) < 1e-6, `整体偏移 ${g.common * spb * 1000} ms`);
+  assert.ok(Math.abs(g.offsets[0]) < 1e-9, '拍点 = 0');
+  assert.ok(Math.abs(g.offsets[2] * spb - 0.02 * 16 / 18) < 1e-4, `第 3 格晚 ${g.offsets[2] * spb * 1000} ms`);
+  assert.equal(g.offsets[3], 0, '2 ms 当噪声');
+  const few = In.grooveFromOnsets([0.25 + late, 4.25 + late, 0, 4, 8, 12], { spb });
+  assert.ok(Math.abs(few.offsets[1] - late * 0.5) < 1e-9, '只有 2 个起音的格子收一半');
 });
 t('变体：第一个永远是原样；再来一组换别的', () => {
   const ctx = { key: Em, prog: [0], beatsPerBar: 4, tensionAt: () => 0.5, groove: null };

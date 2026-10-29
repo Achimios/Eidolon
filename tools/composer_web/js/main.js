@@ -36,6 +36,7 @@ let variants = null;              // { layer, removeIds, options, idx, kind, ran
 let shownLanes = new Set(['cutoff', 'drive']);
 let clipboard = null;
 let sessionGen = 0;               // 打开别的会话 +1：还在分析的哼唱不往新会话里塞
+let undoGen = 0;                  // 撤销 / 重做 +1：撤销之前就唱完、还在分析的那一遍不再塞回来（撤销要撤得掉）
 const FILE_KEEP_SEC = 90;         // 拖进来的文件这么长以内随会话存成 wav；再长只记来源（重开会话时没声音）
 
 // ---------- 小工具 ----------
@@ -53,13 +54,17 @@ function serial(obj = S) {
   const p = L.params; L.params = variants.orig;
   try { return JSON.stringify(obj); } finally { L.params = p; }
 }
-function snapshot() { undoStack.push(serial()); if (undoStack.length > 150) undoStack.shift(); redoStack = []; }
+// 撤销栈最多 150 步、而且总共不超过约 80 MB（哼唱多的会话一步就有几 MB：音分曲线）
+const UNDO_CHARS = 40e6;
+function trimUndo() { if (undoStack.length > 150) undoStack.shift(); let n = 0; for (const x of undoStack) n += x.length; while (n > UNDO_CHARS && undoStack.length > 5) n -= undoStack.shift().length; }
+function snapshot() { undoStack.push(serial()); trimUndo(); redoStack = []; }
 // 一遍循环结束的撤销点：和栈顶一样就不推（不然 Ctrl+Z 要按两下才动一次）
-function pushUndo() { const s = serial(); if (undoStack[undoStack.length - 1] === s) return; undoStack.push(s); if (undoStack.length > 150) undoStack.shift(); }
+function pushUndo() { const s = serial(); if (undoStack[undoStack.length - 1] === s) return; undoStack.push(s); trimUndo(); }
 // 撤销 / 重做：变体面板一律关掉（试听中的音色先还原）；播放中速度变了 → 从排到的那一拍按新速度接着走。
 // 不随撤销走的：作品（存到哪个文件夹）、麦克风延迟（量的是设备）；录音中的循环区（录音锁着它）
 function restore(str) {
   closeVariants();
+  undoGen++;
   const cur = S, front = playFront();
   S = JSON.parse(str); S.sel = layerById(S, cur.sel) ? cur.sel : S.layers[0]?.id;
   S.work = cur.work; S._sense = cur._sense;
@@ -69,13 +74,17 @@ function restore(str) {
   syncAll();
 }
 // 和现在一模一样的撤销点跳过（空的一遍、重复推的）：每按一次都真的变
-function undo() { const cur = serial(); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
+// 还有唱完了、还在分析的那一遍：它才是最新的一步 → 这一下只撤它（不再往回撤一步）
+function undo() {
+  if (hum.pending > 0) { undoGen++; return status(`撤销：还在分析的那一遍不要了${rec.on ? '（正在唱的这一遍照收）' : ''}`); }
+  const cur = serial(); while (undoStack.length && undoStack[undoStack.length - 1] === cur) undoStack.pop(); if (!undoStack.length) return status('没有可撤销的'); redoStack.push(cur); restore(undoStack.pop()); status('撤销'); }
 function redo() { const cur = serial(); while (redoStack.length && redoStack[redoStack.length - 1] === cur) redoStack.pop(); if (!redoStack.length) return; undoStack.push(cur); restore(redoStack.pop()); status('重做'); }
 // 自动存档只有一个格子：两个标签页都开着作曲器会互相盖掉 → 后开的那个停写并提示；存不进去（满了 / 被禁用）提示一次
 const tabLock = { off: false, warned: false, id: Math.random().toString(36).slice(2) };
 function autosave() {
   if (tabLock.off) return;
-  try { localStorage.setItem(AUTOSAVE, serial({ ...S, clips: [] })); }
+  // 挂在某一遍哼唱上的音不存（读回来时那一遍的录音不在，反正丢掉；还占地方）
+  try { localStorage.setItem(AUTOSAVE, serial({ ...S, clips: [], notes: S.notes.filter(n => !n.take) })); }
   catch (e) { if (!tabLock.warned) { tabLock.warned = true; status('⚠️浏览器存不了自动存档（满了 / 被禁用）：记得常按保存（Ctrl+S）', true); } }
 }
 function watchOtherTabs() {
@@ -174,7 +183,7 @@ async function micOn() {
     for (const tr of stream.getAudioTracks()) tr.addEventListener('ended', micLost);
     mic.stream = stream; mic.on = true;
     $('micBtn').classList.add('on'); $('micBtn').textContent = '麦已开';
-    if (S.settings.latencyMs === null) S.settings.latencyMs = Math.round(((E.ctx.baseLatency || 0) + (E.ctx.outputLatency || 0)) * 1000 + 12);
+    if (S.settings.latencyMs === null) S.settings.latencyMs = estLatency();
     showLatency();
     return true;
   } catch (err) {
@@ -201,6 +210,12 @@ function micExtract(t0, t1) {
     out.set(c.x.subarray(a, z), off + a);
   }
   return out;
+}
+// 没校准时的估计：输出（base + output）+ 麦克风输入（浏览器给的话：track.getSettings().latency）+ 12 ms 余量
+function estLatency() {
+  let inLat = 0;
+  try { inLat = mic.stream?.getAudioTracks?.()[0]?.getSettings?.().latency || 0; } catch (e) { /* 老浏览器没有 */ }
+  return Math.round(((E.ctx.baseLatency || 0) + (E.ctx.outputLatency || 0) + (Number.isFinite(inLat) ? inLat : 0)) * 1000 + 12);
 }
 function showLatency() { $('latInfo').textContent = S.settings.latencyMs !== null ? `麦克风延迟补偿 ${S.settings.latencyMs} ms${S.settings.latencyCal ? '（实测）' : '（估计，建议校准）'}` : ''; }
 
@@ -278,11 +293,11 @@ function humPassEnd(ctxEnd, partial = false) {
   if (bEnd - p.b0 < S.beatsPerBar * 0.5) return;
   const t0 = p.ctx0 + lat, t1 = p.ctx0 + (bEnd - p.b0) * spb(S) + lat;
   // 等麦克风的数据到齐（再晚 lat + 0.15 s）；取样本之前缓冲不裁（见 micOn），分析完之前不开挑选面板（见 maybePick）
-  const job = { t0 }, sess = hum.sessionTakes, gen = sessionGen;   // 会话号在这一遍结束时就定下（之后再「打开…」，这一遍不进新会话）
+  const job = { t0 }, sess = hum.sessionTakes, gen = sessionGen, ug = undoGen;   // 会话号在这一遍结束时就定下（之后再「打开…」，这一遍不进新会话）
   const isPartial = partial && bEnd < p.b1 - 1e-6;
   hum.waiting.push(job); hum.pending++;
   setTimeout(() => {
-    const pr = processHumTake(L.id, p.b0, t0, t1, sess, gen, isPartial);      // 取样本是同步的；分析在后台线程
+    const pr = processHumTake(L.id, p.b0, t0, t1, sess, gen, isPartial, ug);      // 取样本是同步的；分析在后台线程
     hum.waiting = hum.waiting.filter(w => w !== job);
     pr.catch(e => status('这一遍分析失败：' + e.message)).finally(() => { hum.pending--; maybePick(); });
   }, (lat + 0.2) * 1000 + Math.max(0, (t1 - E.now) * 1000));
@@ -296,7 +311,7 @@ function maybePick() {
 }
 // sess = 这次录音的那几遍（toggleRec 换新的；晚到的旧遍不会混进新一次录音）
 // partial = 停在一遍中间的残段：同一位置已经有整遍时它不当默认（不顶掉整遍，挑的时候也不默认选它）
-async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen = sessionGen, partial = false) {
+async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen = sessionGen, partial = false, ug = undoGen) {
   // 往前多读 HUM_PREROLL：只给分析看起音（存的 wav 和片段照旧从这一遍开头起）
   const sr = mic.sr, preN = Math.round(HUM_PREROLL * sr);
   const full = micExtract(t0 - preN / sr, t1), pcm = full.slice(preN);
@@ -306,6 +321,7 @@ async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen 
   const opts = { mode: L0.params.mode, snap: L0.params.snap }, takeNo = ++hum.takeNo;
   const an = await analyzeAsync(full, sr, opts);       // full 会被转给后台线程（之后不能再读）；pcm 是另一份
   if (gen !== sessionGen) return;                       // 等分析的时候打开了别的会话
+  if (ug !== undoGen) return;                           // 等分析的时候按了撤销（见 undo）
   const segs = trimPreroll(an.segs, preN / sr);
   const L = layerById(S, layerId); if (!L) { status(`第 ${takeNo} 遍没存：哼唱层不见了（删了 / 撤销了？）`); return; }
   snapshot();
@@ -326,7 +342,10 @@ async function processHumTake(layerId, b0, t0, t1, sess = hum.sessionTakes, gen 
   });
   sess.push(clip.id);
   const tn = Math.abs(an.tuneCents) >= 8 ? `，整体${an.tuneCents > 0 ? '偏高' : '偏低'} ${Math.abs(an.tuneCents).toFixed(0)} 音分（吸附前已扣掉）` : '';
-  status(`第 ${takeNo} 遍：${MODE_PARAMS[an.mode]?.label ?? an.mode}（${an.guess.why}）· ${notes.length} 个音${tn}${peak < 0.02 ? ' · ⚠️几乎没声音，麦克风选对了吗？' : ''}${peak > 0.98 ? ' · ⚠️削波了，离麦远一点' : ''}`, true);
+  // 没存的录音一多，一次保存发不过去（服务器上限 400 MB ≈ 27 分钟单声道）：每多 10 分钟提醒一次
+  const unsavedMin = Math.floor(S.clips.reduce((t, c) => { const a = audio.get(c.audio); return t + (a && !a.file && c.input === 'hum' ? a.buffer.duration : 0); }, 0) / 600) * 10;
+  const big = unsavedMin > (hum.warnedMin || 0) ? (hum.warnedMin = unsavedMin, ` · ⚠️已经有 ${unsavedMin} 分钟的录音没存：按 Ctrl+S 存一下`) : '';
+  status(`第 ${takeNo} 遍：${MODE_PARAMS[an.mode]?.label ?? an.mode}（${an.guess.why}）· ${notes.length} 个音${tn}${peak < 0.02 ? ' · ⚠️几乎没声音，麦克风选对了吗？' : ''}${peak > 0.98 ? ' · ⚠️削波了，离麦远一点' : ''}${big}`, true);
   syncAll();
 }
 
@@ -1062,15 +1081,16 @@ async function loadStems() {
   try { names = await (await api(`/api/stems?work=${encodeURIComponent(S.work)}`)).json(); } catch (e) { return status('读不到分轨：' + e.message); }
   if (!names.length) return status('这个作品的 分轨/ 里没有 wav');
   status(`载入 ${names.length} 条分轨（${t0.toFixed(2)}–${t1.toFixed(2)} s）…`, true);
-  snapshot();
   const msgs = [];
   let ok = 0;
+  const S0 = serial();                       // 撤销点等真载入了一条再记（一条都没载入就不留一个没变化的撤销点）
   for (const nm of names) {
     let buf;
     try {
       const r = await api(`/api/stem?work=${encodeURIComponent(S.work)}&name=${encodeURIComponent(nm)}&t0=${t0}&t1=${t1}`);
       buf = await E.ctx.decodeAudioData(await r.arrayBuffer());
     } catch (e) { msgs.push(`⚠️${nm} 没载入：${e.message}`); continue; }
+    if (!ok) { undoStack.push(S0); trimUndo(); redoStack = []; }
     const aid = addAudio(buf, { file: `分轨/${nm}` });
     const L = makeLayer('stem', 'stem', '原曲·' + nm.replace(/\.wav$/i, ''), S.layers.length);
     S.layers.push(L); joinScenes(L.id);
@@ -1123,10 +1143,13 @@ function retimeHum(oldBpm) {
 }
 function buildGroove(buf) {
   const ch = buf.getChannelData(0);
+  // 起点没对上原曲的重拍：格子的相位是错的，模板只会把音乱挪几十 ms → 不做，先让人选起点
+  const db = S._sense?.downbeats || [];
+  if (db.length && !db.some(t => Math.abs(t - S.anchor) < 0.03)) { groove = null; return '律动模板没做：起点没对在原曲的重拍上（先在「原曲从第几小节开始」里选一个），对上以后重新载入分轨'; }
   const ons = detectOnsets(ch, buf.sampleRate);
-  groove = grooveFromOnsets(ons.map(t => t / spb(S)), { beatsPerBar: S.beatsPerBar });
+  groove = grooveFromOnsets(ons.map(t => t / spb(S)), { beatsPerBar: S.beatsPerBar, spb: spb(S) });
   const ms = groove.offsets.map(o => Math.round(o * spb(S) * 1000));
-  return `律动模板（鼓轨 ${ons.length} 个起音）：16 格偏移 ${ms.join(' ')} ms。变体里的「吸到原曲律动」用它`;
+  return `律动模板（鼓轨 ${ons.length} 个起音，整体偏 ${Math.round(groove.common * spb(S) * 1000)} ms 已减掉）：16 格偏移 ${ms.join(' ')} ms。变体里的「吸到原曲律动」用它`;
 }
 // 我们的格子是匀速的；原曲的重拍不一定：差太多就提醒
 function checkGridDrift() {
@@ -1194,32 +1217,46 @@ async function save() {
       for (const c of S.clips) if (files[c.audio]) c.file = files[c.audio];
       const sk = skipped.length ? `\n⚠️没存声音：${skipped.join('、')}（拖进来的超过 ${FILE_KEEP_SEC} s 只记来源，重新打开会话时这层没声音；长伴奏请放进 分轨/）` : '';
       status(`存好了（${ver}）：${j.dir}\n${j.written.join(' · ')}${sk}`, true);
-      lastSaved = { truth: j.truth, snap: JSON.stringify(S) };
+      lastSaved = { truth: j.truth, snap: JSON.stringify(S) }; hum.warnedMin = 0;
       return j.truth;
     }
     status('保存失败：连续三次撞上已有的版本号');
   } catch (e) {
     // 连不上（serve.py 的窗口关了 / 崩了）：别丢，改成下载
-    if (e.offline) { downloadAll(); status('⚠️连不上 serve.py（窗口关了？）：这次下载到浏览器的下载文件夹了。重新打开 serve.py 后再存一次就回到作品文件夹', true); return; }
+    if (e.offline) { const m = downloadAll(); status(`⚠️连不上 serve.py（窗口关了？）：这次${m}。重新打开 serve.py 后再存一次就回到作品文件夹`, true); return; }
+    if (/^413/.test(e.message)) return status('保存失败：没存的录音太多，一次发不过去（服务器上限 400 MB ≈ 27 分钟）。删掉不要的那几遍（或那几层）再存', true);
     status('保存失败：' + e.message);
   }
 }
 // 服务器那边用同一个 exportTruth 的结果（页面先算好），这里给离线用
+// 文件名带「离线_时间」当版本：再存一次不撞名（浏览器不会改成「(1)」，真值里的文件名和下载下来的对得上）
 function downloadAll() {
   const dl = (name, blob) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 3000); };
+  const d = new Date(), p2 = x => String(x).padStart(2, '0');
+  const ver = `离线_${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
   const files = {};
-  for (const c of S.clips) { const a = audio.get(c.audio); if (!a || a.file) continue; const nm = `哼唱_${c.take ?? c.id}.wav`; files[c.audio] = nm; dl(nm, wavBlob(audioChannels(a), a.sr)); }
-  dl('作曲.json', new Blob([JSON.stringify(exportTruth(S, { audioFiles: files }), null, 1)], { type: 'application/json' }));
-  dl('作曲_会话.json', new Blob([JSON.stringify(exportSession(S, files))], { type: 'application/json' }));
-  status('没连上 serve.py：下载到浏览器的下载文件夹了');
+  for (const c of S.clips) {
+    const a = audio.get(c.audio); if (!a || a.file || files[c.audio]) continue;
+    const nm = c.input === 'hum' ? `哼唱_${ver}_第${c.take ?? c.id}遍.wav` : `素材_${ver}_${c.id}.wav`;
+    files[c.audio] = nm; dl(nm, wavBlob(audioChannels(a), a.sr));
+  }
+  dl(`作曲_${ver}.json`, new Blob([JSON.stringify(exportTruth(S, { audioFiles: files }), null, 1)], { type: 'application/json' }));
+  dl(`作曲_${ver}_会话.json`, new Blob([JSON.stringify(exportSession(S, files))], { type: 'application/json' }));
+  const n = Object.keys(files).length + 2;
+  const msg = `下载了 ${n} 个文件（作曲_${ver}…）到浏览器的下载文件夹${n > 2 ? '。浏览器问「允许下载多个文件」时点允许，不然只有第一个' : ''}`;
+  status('没连上 serve.py：' + msg, true);
+  return msg;
 }
-// 16 bit wav；chans = 每个声道一条（交错写）
+// 24 bit wav（和 serve.py 存的一样）；chans = 每个声道一条（交错写）
 function wavBlob(chans, sr) {
-  const C = chans.length, n = chans[0].length, bytes = n * C * 2, b = new ArrayBuffer(44 + bytes), v = new DataView(b);
+  const C = chans.length, n = chans[0].length, bytes = n * C * 3, b = new ArrayBuffer(44 + bytes), v = new DataView(b);
   const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
   w(0, 'RIFF'); v.setUint32(4, 36 + bytes, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, C, true);
-  v.setUint32(24, sr, true); v.setUint32(28, sr * 2 * C, true); v.setUint16(32, 2 * C, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, bytes, true);
-  for (let i = 0; i < n; i++) for (let k = 0; k < C; k++) v.setInt16(44 + (i * C + k) * 2, Math.max(-1, Math.min(1, chans[k][i])) * 32767, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 3 * C, true); v.setUint16(32, 3 * C, true); v.setUint16(34, 24, true); w(36, 'data'); v.setUint32(40, bytes, true);
+  for (let i = 0, o = 44; i < n; i++) for (let k = 0; k < C; k++, o += 3) {
+    const q = Math.round(Math.max(-1, Math.min(1, chans[k][i])) * 8388607);
+    v.setUint8(o, q & 255); v.setUint8(o + 1, (q >> 8) & 255); v.setUint8(o + 2, (q >> 16) & 255);
+  }
   return new Blob([b], { type: 'audio/wav' });
 }
 // 定稿：写 作曲/当前.txt（下游只读它）。改过还没存 → 先存一版再定
@@ -1521,7 +1558,14 @@ async function boot() {
   // 关页面 / 刷新：还有没存进硬盘的录音（或还在分析的那一遍）就先问一声（浏览器自己的自动存档里没有录音）
   window.addEventListener('beforeunload', e => { if (hasUnsavedAudio() || hum.pending > 0) { e.preventDefault(); e.returnValue = ''; } });
   // 换了耳机 / 声卡：校准过的延迟多半不对了
-  try { navigator.mediaDevices?.addEventListener?.('devicechange', () => { if (S.settings.latencyCal) status('音频设备变了（换了耳机？）：麦克风延迟补偿可能不对了，建议重新「校准延迟」', true); }); } catch (e) { /* 老浏览器 */ }
+  // 没校准过的：按新设备重新估计（输出延迟要等一下才更新）；校准过的：只提醒（实测值不悄悄换掉）
+  try {
+    navigator.mediaDevices?.addEventListener?.('devicechange', () => {
+      if (S.settings.latencyCal) return status('音频设备变了（换了耳机？）：麦克风延迟补偿可能不对了，建议重新「校准延迟」', true);
+      if (!mic.on) return;
+      setTimeout(() => { if (S.settings.latencyCal || !mic.on) return; const old = S.settings.latencyMs; S.settings.latencyMs = estLatency(); showLatency(); if (old !== S.settings.latencyMs) status(`音频设备变了：麦克风延迟估计 ${old} → ${S.settings.latencyMs} ms（建议校准）`); }, 500);
+    });
+  } catch (e) { /* 老浏览器 */ }
   syncAll();
   if (restoredNote && server) status(restoredNote);
   if (E.silent) { status('静音模式（网址带 ?silent）：一切照常运行，只是不从扬声器出声', true); document.title = '作曲器（静音）'; }

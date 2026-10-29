@@ -178,7 +178,7 @@ export async function world(opts = {}) {
   // 走带 transport.js 用全局的 setTimeout / setInterval：换成假时钟（每个测试完换回来）
   globalThis.setTimeout = fakeSetTimeout; globalThis.setInterval = fakeSetInterval; globalThis.clearTimeout = fakeClear; globalThis.clearInterval = fakeClear;
   w.restoreTimers = () => { Object.assign(globalThis, REAL_TIMERS); };
-  Object.assign(w, { M, doc, window, track, rafs, $: id => doc.getElementById(id) });
+  Object.assign(w, { M, doc, window, track, rafs, store, $: id => doc.getElementById(id) });
   await M.boot(); await flush();
   w.status = () => doc.getElementById('status').textContent;
   w.sel = id => (M.selectLayer ? M.selectLayer(id) : (M.S.sel = id));     // 旧版 main.js 没有 selectLayer
@@ -847,6 +847,77 @@ t('G8 serve.py 中途关了：保存改成下载，并说清楚', async () => {
   await M.save();
   URL.createObjectURL = r0; URL.revokeObjectURL = r1;
   assert.ok(dl >= 2, '下载了真值和会话'); assert.match(w.status(), /连不上 serve\.py/);
+  w.restoreTimers();
+});
+t('G8 离线下载：24 bit、文件名带版本（再存一次不撞名），真值里的文件名就是下载的名字', async () => {
+  const w = await world({ server: false }), M = w.M;
+  M.audio.set('a1', { buffer: fakeBuffer(1, 4800, 48000), pcm: new Float32Array(4800).fill(0.5), sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 0.1, audio: 'a1', input: 'hum', take: 1, active: true });
+  const got = []; const mk = w.doc.createElement;
+  w.doc.createElement = tag => { const e = mk(tag); if (tag === 'a') e.click = () => got.push({ name: e.download, blob: blobs.get(e.href) }); return e; };
+  const blobs = new Map(); let k = 0;
+  const r0 = URL.createObjectURL, r1 = URL.revokeObjectURL; URL.createObjectURL = b => { const u = 'blob:' + (++k); blobs.set(u, b); return u; }; URL.revokeObjectURL = () => {};
+  await M.save();
+  URL.createObjectURL = r0; URL.revokeObjectURL = r1;
+  const names = got.map(g => g.name);
+  const wav = got.find(g => /\.wav$/.test(g.name)), js = got.find(g => /^作曲_离线_\d{8}-\d{6}\.json$/.test(g.name));
+  assert.ok(wav && /^哼唱_离线_\d{8}-\d{6}_第1遍\.wav$/.test(wav.name), names.join(' '));
+  assert.ok(js, names.join(' '));
+  assert.ok(names.some(n => /_会话\.json$/.test(n)));
+  const ab = new DataView(await wav.blob.arrayBuffer());
+  assert.equal(ab.getUint16(34, true), 24); assert.equal(ab.byteLength, 44 + 4800 * 3);
+  const s0 = ab.getUint8(44) | (ab.getUint8(45) << 8) | (ab.getUint8(46) << 16);
+  assert.equal(s0, Math.round(0.5 * 8388607));
+  const truth = JSON.parse(await js.blob.text());
+  assert.equal(truth.clips[0].file, wav.name);
+  assert.match(w.status(), /允许下载多个文件/);
+  w.restoreTimers();
+});
+t('G11 没校准的麦克风延迟估计算上麦克风输入延迟（浏览器给的）', async () => {
+  const w = await world(), M = w.M;
+  w.track.getSettings = () => ({ latency: 0.02 });
+  await M.micOn();
+  assert.equal(M.S.settings.latencyMs, Math.round((0.03 + 0.02) * 1000 + 12));
+  w.restoreTimers();
+});
+t('G13 起点没对上原曲重拍：不做律动模板，说清楚；loadStems 一条都没载入不留撤销点', async () => {
+  const w = await world({ sense: { bpm: 150, downbeats: [0.36, 1.96] }, stems: ['drums.wav'] }), M = w.M;
+  await M.loadStems();
+  assert.equal(M.groove, null);
+  assert.match(w.statusLog.join('\n'), /律动模板没做/);
+  const w2 = await world({ stems: ['drums.wav'] }); const M2 = w2.M;
+  const u0 = M2.undoStack.length;
+  M2.E.ctx.decodeAudioData = async () => { throw new Error('坏文件'); };   // 分轨全读不了
+  await M2.loadStems();
+  assert.equal(M2.undoStack.length, u0, '没载入就没有撤销点');
+  w2.restoreTimers();
+});
+t('G19 停了以后最后一遍还在分析时按 Ctrl+Z：只撤掉那一遍（它不再塞回来），不再往回撤一步', async () => {
+  const w = await world({ outLat: 0.03 }), M = w.M;
+  M.S.loop.bars = 1; w.sel('voice');
+  await M.toggleRec(); await flush();
+  await w.until(() => M.hum.sessionTakes.length >= 2, 20);
+  await w.until(() => M.T.beatNow > 2.6, 5);                 // 这一遍唱过一半多
+  M.toggleRec();                                             // 停：这一遍（残段）在等
+  const ids = M.S.clips.map(c => c.id);
+  assert.ok(M.hum.pending > 0, '还有一遍在等');
+  M.undo();
+  await w.advance(2);
+  assert.deepEqual(M.S.clips.map(c => c.id), ids, '还在分析的那一遍没进来，之前的都还在');
+  w.restoreTimers();
+});
+t('G6 自动存档不带挂在哼唱上的音；撤销栈总量有上限', async () => {
+  const w = await world(), M = w.M;
+  M.S.notes.push({ id: 'h1', layer: 'voice', b: 0, d: 1, pitch: 64, vel: 0.8, input: 'hum', take: 'C1', bend: { dt: 0.02, cents: new Array(5000).fill(1) } });
+  M.S.notes.push({ id: 'k1', layer: 'lead', b: 0, d: 1, pitch: 64, vel: 0.8, input: 'keyboard' });
+  await w.advance(4.5);
+  const j = JSON.parse(w.store.get('composer_web_autosave_v1'));
+  assert.deepEqual(j.notes.map(x => x.id), ['k1']);
+  const big = M.S.notes[0].bend.cents; big.length = 2e6; big.fill(1);   // 一步 ~4 MB
+  for (let i = 0; i < 40; i++) M.snapshot();
+  const total = M.undoStack.reduce((n, x) => n + x.length, 0);
+  assert.ok(total <= 40e6 + M.undoStack[0].length, `撤销栈 ${total} 字符`);
+  assert.ok(M.undoStack.length >= 5);
   w.restoreTimers();
 });
 t('G18 改完下拉框 / 数字框：焦点还给页面；数字框里 Enter 也一样', async () => {

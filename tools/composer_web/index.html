@@ -126,6 +126,10 @@
 <div id="sessBox" class="hidden"><div><h2>打开会话</h2><div id="sessList"></div><button id="sessClose">关</button></div></div>
 <input type="file" id="fileIn" accept="audio/*" class="hidden">
 
+<script>
+  // 直接双击 index.html（file://）：浏览器不让载入模块，「开始」点了没反应 → 说清楚
+  if (location.protocol === 'file:') document.querySelector('#gate p').innerHTML = '⚠️这样直接打开不行（浏览器不许网页从本地文件夹载入脚本）。请双击 <b>tools/composer_web/start_composer.bat</b>，它会在浏览器里打开 http://127.0.0.1:8765/。';
+</script>
 <script type="module" src="js/main.js"></script>
 </body>
 </html>

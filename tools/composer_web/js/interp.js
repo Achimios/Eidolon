@@ -47,7 +47,7 @@ export function autoGrid(notes) {
 }
 
 // ---- 3. 律动模板：从鼓轨起音里取每个 16 分位置的平均偏移（拍为单位），吸到原曲的「手感」上 ----
-export function grooveFromOnsets(beats, { slots = 16, beatsPerBar = 4 } = {}) {
+export function grooveFromOnsets(beats, { slots = 16, beatsPerBar = 4, spb = 0.4 } = {}) {
   const per = beatsPerBar / slots;           // 一格多少拍
   const acc = Array.from({ length: slots }, () => []);
   for (const b of beats) {
@@ -55,7 +55,18 @@ export function grooveFromOnsets(beats, { slots = 16, beatsPerBar = 4 } = {}) {
     if (Math.abs(off) > per * 0.45) continue;
     acc[((k % slots) + slots) % slots].push(off);
   }
-  return { slots, per, offsets: acc.map(a => a.length >= 2 ? median(a) : 0), counts: acc.map(a => a.length) };
+  // 去噪：① 拍点（四分音符那几格）一起偏的那一份不是律动（起音检测的固定滞后 / 起点没对准），减掉 —— 律动 = 相对拍点的偏移；
+  // ② 起音少的格子往 0 收（n / (n + 2)）；③ 剩下不到 4 ms 的当 0（听不出来，只是噪声）
+  const raw = acc.map(a => a.length >= 2 ? median(a) : null);
+  const step = Math.max(1, Math.round(slots / beatsPerBar));
+  const onBeat = acc.filter((a, i) => i % step === 0).flat(), all = acc.flat();
+  const common = onBeat.length >= 4 ? median(onBeat) : all.length >= 4 ? median(all) : 0;
+  const offsets = raw.map((o, i) => {
+    if (o === null) return 0;
+    const v = (o - common) * acc[i].length / (acc[i].length + 2);
+    return Math.abs(v) * spb < 0.004 ? 0 : v;
+  });
+  return { slots, per, offsets, counts: acc.map(a => a.length), common };
 }
 
 // ---- 4. 吸附：起音按强度靠向格子（+ 摇摆 / 律动），时值的尾巴吸得弱一点 ----
