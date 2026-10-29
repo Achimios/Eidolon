@@ -3,7 +3,7 @@ import { MODES, NOTE_NAMES, ROW_A, ROW_Q, ROW_Z, KEY_LABEL, codeToDegree, degree
 import { Engine, PRESETS, DRUM_SOUNDS, DRUM_LABEL } from './engine.js';
 import { Transport, heardCtxTime } from './transport.js';
 import { Timeline } from './timeline.js';
-import { MACROS, MACRO_BY_ID, effectiveMacros, curveAt, curveWrite, makeState, makeLayer, uid, spb, loopRange, songBeats, layerById, exportTruth, exportSession, validateTruth } from './state.js';
+import { MACROS, MACRO_BY_ID, effectiveMacros, curveAt, curveWrite, makeState, makeLayer, uid, spb, loopRange, songBeats, layerById, exportTruth, exportSession, validateTruth, clipOpen } from './state.js';
 import { analyzeHum, notesToBeats, trimPreroll, yin, decimate, MODE_PARAMS } from './pitch.js';
 import { makeVariants, TIMBRE_VARIANTS, holdVelocity, tapPitch, detectOnsets, grooveFromOnsets, meanOffset, quantize, cloneNotes } from './interp.js';
 
@@ -109,7 +109,9 @@ function tempoChanged(oldBpm, front) {
 // 新加的层（加一层 / 叠成新层 / 复制成合成层 / 分轨 / 拖进来的文件）：进每一个已有的场景，不然在场景管着的地方一声不响
 function joinScenes(id) { for (const sc of S.scenes) if (!sc.layers.includes(id)) sc.layers.push(id); }
 // 还没存进硬盘的录音（拖进来的长文件本来就不随会话存，不算）
-function hasUnsavedAudio() { return S.clips.some(c => { const a = audio.get(c.audio); return a && !a.file && !(c.input !== 'hum' && a.buffer.duration > FILE_KEEP_SEC); }); }
+// 拖进来的长文件（贴出来的片段按它原来是什么算）：只记来源、不随会话存
+const longFile = (c, a) => (c.srcInput || c.input) !== 'hum' && a.buffer.duration > FILE_KEEP_SEC;
+function hasUnsavedAudio() { return S.clips.some(c => { const a = audio.get(c.audio); return a && !a.file && !longFile(c, a); }); }
 
 // 当前要播的事件（变体试听时替换掉被试的那几个音；挑哪一遍时，音符跟着正在放的那一遍录音）
 function events() {
@@ -147,6 +149,7 @@ function peaksOf(id) {
   let mx = 1e-6;
   for (let i = 0; i < n; i++) { let m = 0; for (let j = i * step; j < Math.min(d.length, (i + 1) * step); j += 4) m = Math.max(m, Math.abs(d[j])); pk[i] = m; mx = Math.max(mx, m); }
   for (let i = 0; i < n; i++) pk[i] /= mx;
+  pk.dur = a.buffer.duration;               // 时间线按片内起点（贴出来的片段）取哪一段波形
   peaksCache.set(id, pk);
   return pk;
 }
@@ -1010,8 +1013,22 @@ function deleteSel() {
     const act = new Set(clipsNow().filter(c => c.active).map(c => c.id));
     S.notes = S.notes.filter(n => n.b < a || n.b >= z || (n.take && !act.has(n.take)));
     for (const k of Object.keys(S.curves)) S.curves[k] = S.curves[k].filter(p => p[0] < a || p[0] > z);
-    status(`删了第 ${(a / S.beatsPerBar + 1).toFixed(2)}–${(z / S.beatsPerBar + 1).toFixed(2)} 小节里的音符和曲线（录音 / 分轨的声音不动）`); syncAll();
+    // 录音也剪（看得见的那几条；原曲分轨是伴奏，不剪）：这一段记成 gaps，播放和导出的 audible_spans 都跳过它
+    let cut = 0;
+    for (const c of clipsNow()) {
+      if (!c.active || c.input === 'stem') continue;
+      const real = S.clips.find(x => x.id === c.id), cz = c.b + c.dur / spb(S);
+      if (!real || z <= c.b || a >= cz) continue;
+      real.gaps = mergeGaps([...(real.gaps || []), [Math.max(a, c.b), Math.min(z, cz)]]); cut++;
+    }
+    status(`删了第 ${(a / S.beatsPerBar + 1).toFixed(2)}–${(z / S.beatsPerBar + 1).toFixed(2)} 小节里的音符和曲线${cut ? `，${cut} 条录音的这一段也剪了` : ''}（原曲分轨不剪）`); syncAll();
+    T.reclip();
   }
+}
+function mergeGaps(gs) {
+  const out = [];
+  for (const [p, q] of [...gs].sort((x, y) => x[0] - y[0])) { const l = out[out.length - 1]; if (l && p <= l[1] + 1e-9) l[1] = Math.max(l[1], q); else out.push([p, q]); }
+  return out;
 }
 // 复制出去的音：拍和原始拍位都相对复制起点；不再挂在哪一遍哼唱上（贴出来 = 普通音符：换一遍 / 重新识别都不动它）
 function relNote(n, a) {
@@ -1027,15 +1044,19 @@ function copySel() {
     const act = new Set(clipsNow().filter(c => c.active).map(c => c.id));
     const notes = S.notes.filter(n => (!n.take || act.has(n.take)) && n.b >= a && n.b < z).map(n => relNote(n, a));
     const curves = Object.fromEntries(Object.entries(S.curves).map(([k, p]) => [k, p.filter(q => q[0] >= a && q[0] <= z).map(q => [q[0] - a, q[1]])]));
-    if (!notes.length && !Object.values(curves).some(p => p.length)) { status('这一段里没有音符也没有曲线'); return false; }
-    clipboard = { span: z - a, notes, curves };
+    // 录音也复制（看得见的那几条、剪掉的几段不算；原曲分轨不复制）：记成「哪段录音的第几秒起、多长」，贴的时候指着同一段声音
+    const sp = spb(S);
+    const clips = clipsNow().filter(c => c.active && c.input !== 'stem' && audio.get(c.audio)).flatMap(c =>
+      clipOpen(c, Math.max(a, c.b), Math.min(z, c.b + c.dur / sp)).map(([p, q]) => ({ layer: c.layer, audio: c.audio, rel: p - a, dur: (q - p) * sp, offset: (c.offset || 0) + (p - c.b) * sp, srcInput: c.srcInput || c.input, from: c.id })));
+    if (!notes.length && !clips.length && !Object.values(curves).some(p => p.length)) { status('这一段里没有音符、录音也没有曲线'); return false; }
+    clipboard = { span: z - a, notes, curves, clips };
   } else {
     const ns = S.notes.filter(n => TL.sel.has(n.id));
     if (!ns.length) { status('先选：拖标尺下条选一段，或框选音符'); return false; }
     const a = Math.min(...ns.map(n => n.b));
-    clipboard = { span: Math.max(...ns.map(n => n.b + (n.d || 0.25))) - a, notes: ns.map(n => relNote(n, a)), curves: {} };
+    clipboard = { span: Math.max(...ns.map(n => n.b + (n.d || 0.25))) - a, notes: ns.map(n => relNote(n, a)), curves: {}, clips: [] };
   }
-  status(`复制了 ${clipboard.notes.length} 个音${Object.values(clipboard.curves).some(p => p.length) ? ' + 曲线' : ''}`);
+  status(`复制了 ${clipboard.notes.length} 个音${clipboard.clips.length ? ` + ${clipboard.clips.length} 段录音` : ''}${Object.values(clipboard.curves).some(p => p.length) ? ' + 曲线' : ''}`);
   return true;
 }
 function pasteAt(b) {
@@ -1050,8 +1071,16 @@ function pasteAt(b) {
     cur = cur.concat(pts.map(([pb, v]) => [pb + b, v])).sort((p, q) => p[0] - q[0]);
     S.curves[k] = cur;
   }
+  // 录音片段：叠在原有的上面（和音符一样不替换），不算哪一遍哼唱（input = paste，挑哪一遍不管它）
+  let nc = 0;
+  for (const p of clipboard.clips || []) {
+    if (!layerById(S, p.layer) || !audio.get(p.audio)) continue;
+    S.clips.push({ id: uid('C'), layer: p.layer, b: p.rel + b, dur: p.dur, audio: p.audio, input: 'paste', srcInput: p.srcInput, offset: p.offset, active: true, src: `复制自 ${p.from}` });
+    nc++;
+  }
   TL.sel = new Set(ids);
-  status(`贴到第 ${(b / S.beatsPerBar + 1).toFixed(2)} 小节`); syncAll();
+  status(`贴到第 ${(b / S.beatsPerBar + 1).toFixed(2)} 小节${nc ? `（含 ${nc} 段录音）` : ''}`); syncAll();
+  if (nc) T.reclip();
 }
 function duplicate() {
   if (!copySel()) return;                    // 没选东西：不拿旧剪贴板去贴（以前会贴到第 Infinity 拍）
@@ -1140,6 +1169,8 @@ function retimeHum(oldBpm) {
     n.b = c.b + (n.b - c.b) * k; n.d *= k;
     if (n.raw) { if (Number.isFinite(n.raw.b)) n.raw.b = c.b + (n.raw.b - c.b) * k; if (Number.isFinite(n.raw.d)) n.raw.d *= k; }
   }
+  // 剪掉的几段（gaps，拍）也跟着录音走
+  for (const c of S.clips) if (c.gaps) c.gaps = c.gaps.map(([p, q]) => [c.b + (p - c.b) * k, c.b + (q - c.b) * k]);
 }
 function buildGroove(buf) {
   const ch = buf.getChannelData(0);
@@ -1201,8 +1232,9 @@ async function save() {
       const files = {}, toSave = [], skipped = [];
       for (const c of S.clips) {
         const a = audio.get(c.audio); if (!a) continue;
+        if (files[c.audio]) continue;            // 贴出来的片段和原录音共用一段声音：只存一次
         if (a.file) { files[c.audio] = a.file; continue; }
-        if (c.input !== 'hum' && a.buffer.duration > FILE_KEEP_SEC) { skipped.push(c.src || c.id); continue; }
+        if (longFile(c, a)) { skipped.push(c.src || c.id); continue; }
         const name = c.input === 'hum' ? `哼唱_${ver}_第${c.take}遍.wav` : `素材_${ver}_${c.id}.wav`;
         files[c.audio] = `作曲/${name}`;          // 路径一律相对作品文件夹（分轨是 分轨/xxx.wav）
         toSave.push(wavPayload(name, a));
@@ -1291,7 +1323,7 @@ function moveAudioToWork() {
   for (const a of audio.values()) a.file = null;
   for (const c of S.clips) { delete c.file; if (c.input === 'stem') { c.input = 'file'; c.fileOffset = 0; } }
   undoStack = []; redoStack = [];
-  const long = S.clips.filter(c => { const a = audio.get(c.audio); return c.input !== 'hum' && a && a.buffer.duration > FILE_KEEP_SEC; }).length;
+  const long = S.clips.filter(c => { const a = audio.get(c.audio); return a && longFile(c, a); }).length;
   return long ? `⚠️有 ${long} 段超过 ${FILE_KEEP_SEC} s 的分轨 / 文件存不进新作品（重新打开会话时没声音）：要用的话把它放进新作品的 分轨/ 再载入` : '';
 }
 async function loadSession(name) {
@@ -1311,6 +1343,7 @@ async function loadSession(name) {
     for (const c of S.clips) {
       const fn = audioFiles[c.audio] || c.file;
       if (fn) c.file = fn;                    // 片段上也记着文件名：exportTruth 不靠 audioFiles 也对
+      if (audio.has(c.audio)) continue;        // 贴出来的片段和原录音共用一段声音：读过了
       try {
         let r;
         if (c.input === 'stem' && c.src && c.src.includes('@')) {

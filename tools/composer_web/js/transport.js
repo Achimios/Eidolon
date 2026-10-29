@@ -1,6 +1,6 @@
 // >v<🎛作曲器-走带-提前量调度（每 25 ms 排未来 120 ms 的事件），循环 = 一段一段地接。
 // 段（seg）= {ctx0, b0, b1}：音频时钟 ctx0 时刻在第 b0 拍，一直走到 b1。录音时用段把「按键的时刻」换算回拍。
-import { audibleAt, effectiveMacros, curveAt, loopRange, songBeats, spb, layerById, MACROS } from './state.js';
+import { audibleAt, effectiveMacros, curveAt, loopRange, songBeats, spb, layerById, MACROS, clipOpen } from './state.js';
 
 // 键盘事件的时刻 → 「听到的」音频时钟。getOutputTimestamp().contextTime 是扬声器此刻正在放的那个样本，
 // 所以换算出来的已经是听到的时钟（排在 c 的音恰好在 c 被听到），不能再减输出延迟。
@@ -162,8 +162,10 @@ export class Transport {
       const a = Math.max(c.b, g.b0, nowB), z = Math.min(cEnd, g.b1);
       if (!(z > a)) continue;
       const cuts = [a, ...s.scenes.map(sc => sc.bar * s.beatsPerBar).filter(x => x > a && x < z), z];
-      for (let i = 0; i < cuts.length - 1; i++) {
-        const p0 = cuts[i], p1 = cuts[i + 1];
+      // 每个场景段再减掉范围删除剪掉的几段（gaps）
+      const pieces = [];
+      for (let i = 0; i < cuts.length - 1; i++) pieces.push(...clipOpen(c, cuts[i], cuts[i + 1]));
+      for (const [p0, p1] of pieces) {
         const v = this._clipGain(s, L, p0 + 1e-6), when = this._when(g, p0), dur = (p1 - p0) * sp;
         const src = this.e.clip(L, buf, when, (p0 - c.b) * sp + (c.offset || 0), dur, v);
         if (src) this.live.push({ src, layer: L.id, p0, p1, when, end: when + dur, v });

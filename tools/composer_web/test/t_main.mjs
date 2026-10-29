@@ -743,6 +743,48 @@ t('#25 一遍循环的撤销点等这一遍听完再记：最后一拍的音和�
   w.restoreTimers();
 });
 
+// ====================== G14：范围删除 / 复制也剪录音 ======================
+t('G14 范围删除剪掉录音的那一段：播放跳过、audible_spans 不含它；原曲分轨不剪；撤销回来', async () => {
+  const w = await world(), M = w.M;
+  M.audio.set('a1', { buffer: fakeBuffer(1, 48000 * 7, 48000), pcm: null, sr: 48000, file: null });
+  M.audio.set('s1', { buffer: fakeBuffer(2, 48000 * 7, 48000), pcm: null, sr: 48000, file: '分轨/drums.wav' });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 6.4, audio: 'a1', input: 'hum', take: 1, active: true });
+  M.S.layers.push(St.makeLayer('stem', 'stem', '鼓轨', 4, { id: 'st' }));
+  M.S.clips.push({ id: 'C2', layer: 'st', b: 0, dur: 6.4, audio: 's1', input: 'stem', active: true, fileOffset: 0 });
+  M.TL.range = [4, 8]; M.deleteSel();
+  assert.deepEqual(M.S.clips[0].gaps, [[4, 8]]);
+  assert.equal(M.S.clips[1].gaps, undefined, '分轨不剪');
+  const tr = truthOf(M);
+  assert.deepEqual(tr.clips[0].audible_spans, [[0, 1.6], [3.2, 6.4]]);
+  assert.deepEqual(tr.clips[1].audible_spans, [[0, 6.4]]);
+  M.T.start(0); await w.advance(0.2);
+  const vs = M.E.clipsStarted.filter(c => c.layer === 'voice');
+  assert.deepEqual(vs.map(c => [+c.off.toFixed(3), +c.dur.toFixed(3)]), [[0, 1.6], [3.2, 3.2]], '跳过剪掉的那段');
+  M.T.stop(true);
+  M.undo(); assert.equal(M.S.clips[0].gaps, undefined);
+  assert.deepEqual(St.validateTruth(truthOf(M)), []);
+  w.restoreTimers();
+});
+t('G14 范围复制 / 粘贴带上录音：贴出来的片段指着同一段声音（offset 对），剪掉的不复制；保存只存一份 wav', async () => {
+  const w = await world(), M = w.M;
+  M.audio.set('a1', { buffer: fakeBuffer(1, 48000 * 7, 48000), pcm: new Float32Array(48000 * 7), sr: 48000, file: null });
+  M.S.clips.push({ id: 'C1', layer: 'voice', b: 0, dur: 6.4, audio: 'a1', input: 'hum', take: 1, active: true, gaps: [[5, 6]] });
+  M.TL.range = [4, 8]; assert.equal(M.copySel(), true);
+  assert.equal(M.clipboard.clips.length, 2, '剪掉的那拍把它分成两段');
+  M.pasteAt(16);
+  const ps = M.S.clips.filter(c => c.input === 'paste');
+  assert.deepEqual(ps.map(c => [c.b, +c.dur.toFixed(3), +c.offset.toFixed(3)]), [[16, 0.4, 1.6], [18, 0.8, 2.4]]);
+  const tr = truthOf(M);
+  const pc = tr.clips.filter(c => c.input === 'paste');
+  assert.deepEqual(pc.map(c => [c.t, c.offset, c.audible_spans]), [[6.4, 1.6, [[6.4, 6.8]]], [7.2, 2.4, [[7.2, 8]]]]);
+  await M.save();
+  const sv = w.saves[w.saves.length - 1];
+  assert.equal(sv.audio.length, 1, '共用一段声音只存一次');
+  assert.ok(sv.truth.clips.every(c => c.file === '作曲/' + sv.audio[0].name));
+  assert.deepEqual(St.validateTruth(sv.truth), []);
+  w.restoreTimers();
+});
+
 // ====================== C26 / D8：新层进场景 ======================
 t('D8/C26 场景建好以后才加的层：加一层 / 叠成新层 / 复制成合成层 / 拖进来的文件都进每个场景', async () => {
   const w = await world(), M = w.M;

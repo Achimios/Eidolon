@@ -260,9 +260,12 @@ export class Timeline {
         const pk = peaks(c.audio); if (!pk) continue;
         const x0 = this.bx(c.b), x1 = this.bx(c.b + c.dur / spb(S));
         g.fillStyle = L.color; g.globalAlpha = 0.22;
-        const n = pk.length, mid = y0 + ROW / 2;
+        // 贴出来的片段从录音中间开始（offset）；剪掉的那几段（gaps）空着
+        const n = pk.length, mid = y0 + ROW / 2, bufDur = pk.dur || c.dur, off = c.offset || 0, gaps = c.gaps || [];
         for (let px = Math.max(GUT, Math.floor(x0)); px < Math.min(W, x1); px++) {
-          const k = Math.floor((px - x0) / (x1 - x0) * n), a = pk[k] || 0;
+          const f = (px - x0) / (x1 - x0), pb = c.b + f * c.dur / spb(S);
+          if (gaps.some(([ga, gz]) => pb >= ga && pb < gz)) continue;
+          const k = Math.floor((off + f * c.dur) / bufDur * n), a = pk[k] || 0;
           g.fillRect(px, mid - a * (ROW / 2 - 3), 1, 2 * a * (ROW / 2 - 3) + 1);
         }
         g.globalAlpha = 1;
