@@ -1,0 +1,29 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "clean-slate",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-X",
+        "utf8",
+        "C:/Users/Administrator/Desktop/Projekt_Visual/MV_Clean_Slate/_web/serve.py",
+        "--port",
+        "5430"
+      ],
+      "port": 5430
+    },
+    {
+      "name": "clean-slate-animator2",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-X",
+        "utf8",
+        "C:/Users/Administrator/Desktop/Projekt_Visual/MV_Clean_Slate/_web/serve.py",
+        "--port",
+        "5432"
+      ],
+      "port": 5432
+    }
+  ]
+}

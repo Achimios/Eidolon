@@ -1,6 +1,8 @@
 # 从哪继续
 
 > ⭐接手第一眼读这个。只写「现在在做什么 / 下一步」；旧内容移 `_过期的/`。
+>
+> ⭐**2026-11-01**：ReadScreen / Animator1 / Animator2 三个会话从 SimuWeb 剪切到本项目（👤定主入口 = 本仓库，可直接 resume）。最新状态（Clean Slate 三支全片等 Leo 看）在 `Desktop/Projekt_Visual/__会话交接_从SimuWeb迁来.md`，比下面 10-22 的内容新。
 
 **最后更新：2026-10-22（素材生成日）**
 - 👤第二章的素材 / voice 已搬到 `MV_Cant_Kill_Us/素材`、`voice`（工具路径已改）。Seedream / Seedance flash 随便用；Tripo 👤网页做（抽奖）。
